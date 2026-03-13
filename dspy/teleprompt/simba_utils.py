@@ -8,6 +8,7 @@ import orjson
 import dspy
 from dspy.adapters.utils import get_field_description_string
 from dspy.signatures import InputField, OutputField
+from dspy.teleprompt.utils import strip_runtime_only_demo_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ def append_a_demo(demo_input_field_maxlen):
 
         for step in trace:
             predictor, _inputs, _outputs = step
+            _inputs = strip_runtime_only_demo_inputs(predictor.signature, _inputs)
 
             for k, v in _inputs.items():
                 if demo_input_field_maxlen and len(str(v)) > demo_input_field_maxlen:

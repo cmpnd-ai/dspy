@@ -206,7 +206,12 @@ class Adapter:
             signature's output field names. For multiple generations (n > 1), returns multiple dictionaries.
         """
         processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        inputs = self.format(processed_signature, demos, inputs)
+        inputs = self.format(
+            processed_signature,
+            demos,
+            inputs,
+            demo_signature=self._get_demo_signature(signature),
+        )
 
         outputs = lm(messages=inputs, **lm_kwargs)
         return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)

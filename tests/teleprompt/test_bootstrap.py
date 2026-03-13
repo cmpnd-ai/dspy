@@ -132,3 +132,32 @@ def test_validation_set_usage():
 
     # Check that validation examples are part of student's demos after compilation
     assert len(compiled_student.predictor.demos) >= len(valset), "Validation set not used in compiled student demos"
+
+
+def test_bootstrap_strips_tool_inputs_from_augmented_demos():
+    class ToolModule(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predictor = Predict("question, tools: list[dspy.Tool] -> answer")
+
+        def forward(self, **kwargs):
+            return self.predictor(**kwargs)
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    tools = [dspy.Tool(get_weather)]
+    trainset = [Example(question="What is the weather in Paris?", tools=tools, answer="sunny").with_inputs("question", "tools")]
+
+    student = ToolModule()
+    teacher = ToolModule()
+    dspy.configure(lm=DummyLM([{"answer": "sunny"}]), trace=[])
+
+    bootstrap = BootstrapFewShot(metric=lambda example, prediction, trace=None: example.answer == prediction.answer, max_bootstrapped_demos=1, max_labeled_demos=0)
+    compiled_student = bootstrap.compile(student, teacher=teacher, trainset=trainset)
+
+    assert len(compiled_student.predictor.demos) == 1
+    demo = compiled_student.predictor.demos[0]
+    assert demo.question == "What is the weather in Paris?"
+    assert demo.answer == "sunny"
+    assert "tools" not in demo

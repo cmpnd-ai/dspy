@@ -223,7 +223,10 @@ class BootstrapFewShot(Teleprompter):
         if success:
             for step in trace:
                 predictor, inputs, outputs = step
-                demo = dspy.Example(augmented=True, **inputs, **outputs)
+                from .utils import strip_runtime_only_demo_inputs
+
+                demo_inputs = strip_runtime_only_demo_inputs(predictor.signature, inputs)
+                demo = dspy.Example(augmented=True, **demo_inputs, **outputs)
 
                 try:
                     predictor_name = self.predictor2name[id(predictor)]

@@ -5,6 +5,7 @@ import os
 import random
 import shutil
 import sys
+from typing import get_origin
 
 import numpy as np
 
@@ -24,6 +25,18 @@ This file consists of helper functions for our variety of optimizers.
 ### OPTIMIZER TRAINING UTILS ###
 
 logger = logging.getLogger(__name__)
+
+
+def strip_runtime_only_demo_inputs(signature, inputs):
+    runtime_only_fields = set()
+    for name, field in signature.input_fields.items():
+        origin = get_origin(field.annotation)
+        if origin is list and field.annotation.__args__[0] == dspy.Tool:
+            runtime_only_fields.add(name)
+        elif field.annotation == dspy.Tool:
+            runtime_only_fields.add(name)
+
+    return {name: value for name, value in inputs.items() if name not in runtime_only_fields}
 
 
 def create_minibatch(trainset, batch_size=50, rng=None):

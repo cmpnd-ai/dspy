@@ -535,6 +535,114 @@ def test_json_adapter_formats_conversation_history():
     assert messages[4]["content"] == '{\n  "answer": "Berlin"\n}'
 
 
+def test_json_adapter_formats_raw_history():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        history: dspy.History = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    history = dspy.History.raw(
+        messages=[
+            {"role": "assistant", "content": "I should search first."},
+            {"role": "tool", "name": "search", "content": "Found one relevant result."},
+        ]
+    )
+
+    adapter = dspy.JSONAdapter()
+    messages = adapter.format(MySignature, [], {"question": "What next?", "history": history})
+
+    assert len(messages) == 4
+    assert messages[1] == {"role": "assistant", "content": "I should search first."}
+    assert messages[2] == {"role": "tool", "name": "search", "content": "Found one relevant result."}
+    assert messages[3]["role"] == "user"
+    assert "What next?" in messages[3]["content"]
+
+
+def test_json_adapter_formats_compacted_raw_history():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        history: dspy.History = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    adapter = dspy.JSONAdapter()
+    lm = dspy.utils.DummyLM([{"summary": "Earlier work established the key facts."}], adapter=adapter)
+    history = dspy.History.raw(
+        messages=[
+            {"role": "assistant", "content": "First step."},
+            {"role": "tool", "name": "search", "content": "Initial result."},
+        ],
+        compaction=dspy.HistoryCompaction(max_visible_tokens=1, keep_last_messages=1),
+    )
+
+    with mock.patch("litellm.utils.token_counter", return_value=999):
+        compacted_history = history.with_messages(
+            [{"role": "assistant", "content": "Most recent step."}],
+            lm=lm,
+            adapter=adapter,
+        )
+
+    messages = adapter.format(MySignature, [], {"question": "What next?", "history": compacted_history})
+
+    assert compacted_history.compacted_count == 2
+    assert compacted_history.summary == "Earlier work established the key facts."
+    assert messages[1] == {
+        "role": "user",
+        "content": "Summary of earlier conversation:\nEarlier work established the key facts.",
+    }
+    assert messages[2] == {"role": "assistant", "content": "Most recent step."}
+    assert messages[3]["role"] == "user"
+
+
+def test_json_adapter_formats_demos_with_raw_history():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        history: dspy.History = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    demo = {
+        "question": "What is the weather in Paris?",
+        "history": dspy.History.raw(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "Fetching weather for Paris.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "get_weather",
+                    "content": "The weather in Paris is sunny.",
+                },
+            ]
+        ),
+        "answer": "It is sunny in Paris.",
+    }
+
+    adapter = dspy.JSONAdapter()
+    messages = adapter.format(MySignature, [demo], {"question": "What is the weather in Tokyo?"})
+
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert messages[2] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "get_weather",
+        "content": "The weather in Paris is sunny.",
+    }
+    assert messages[3]["role"] == "user"
+    assert "What is the weather in Paris?" in messages[3]["content"]
+    assert messages[4]["role"] == "assistant"
+    assert '"answer": "It is sunny in Paris."' in messages[4]["content"]
+    assert messages[5]["role"] == "user"
+
+
 @pytest.mark.asyncio
 async def test_json_adapter_on_pydantic_model_async():
     from litellm.utils import Choices, Message, ModelResponse
@@ -998,7 +1106,7 @@ def test_format_system_message():
     expected_system_message = """Your input fields are:
 1. `question` (str):
 Your output fields are:
-1. `answers` (list[str]): 
+1. `answers` (list[str]):\x20
 2. `scores` (list[float]):
 All interactions will be structured in the following way, with the appropriate values filled in.
 
@@ -1013,6 +1121,8 @@ Outputs will be a JSON object with the following fields.
   "answers": "{answers}        # note: the value you produce must adhere to the JSON schema: {\\"type\\": \\"array\\", \\"items\\": {\\"type\\": \\"string\\"}}",
   "scores": "{scores}        # note: the value you produce must adhere to the JSON schema: {\\"type\\": \\"array\\", \\"items\\": {\\"type\\": \\"number\\"}}"
 }
-In adhering to this structure, your objective is: 
+In adhering to this structure, your objective is:\x20
         Answer the question with multiple answers and scores"""
     assert system_message == expected_system_message
+
+

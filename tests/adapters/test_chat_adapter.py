@@ -1,3 +1,4 @@
+import json
 from typing import Literal
 from unittest import mock
 
@@ -903,3 +904,67 @@ def test_tool_call_with_null_content_does_not_raise():
     assert len(result) == 1
 
 
+def test_tool_call_with_flattened_responses_output_does_not_raise():
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    sig_cls = dspy.Signature("question, tools: list[dspy.Tool] -> answer, tool_calls: dspy.ToolCalls")
+
+    outputs = [
+        {
+            "tool_calls": [
+                {
+                    "type": "function_call",
+                    "name": "search",
+                    "arguments": '{"query": "test"}',
+                    "call_id": "call_1",
+                    "status": "completed",
+                    "id": "call_1",
+                }
+            ]
+        }
+    ]
+
+    result = adapter._call_postprocess(sig_cls, sig_cls, outputs, None, {})
+    assert result == [{"answer": None, "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "search", "args": {"query": "test"}}])}]
+
+
+def test_chat_adapter_formats_native_tool_call_demo_messages():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    demo = {
+        "question": "What is the weather in Paris?",
+        "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "get_weather", "args": {"city": "Paris"}}]),
+    }
+    tools = [dspy.Tool(get_weather)]
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+
+    with mock.patch("litellm.completion") as mock_completion:
+        mock_completion.return_value = ModelResponse(
+            choices=[Choices(message=Message(content="[[ ## answer ## ]]\nParis\n[[ ## completed ## ]]"))],
+            model="openai/gpt-4o-mini",
+        )
+        adapter(
+            dspy.LM(model="openai/gpt-4o-mini", cache=False),
+            {},
+            MySignature,
+            [demo],
+            {"question": "Reply now.", "tools": tools},
+        )
+
+    _, call_kwargs = mock_completion.call_args
+    messages = call_kwargs["messages"]
+
+    assert "[[ ## tools ## ]]" not in messages[1]["content"]
+    assert "What is the weather in Paris?" in messages[1]["content"]
+    assert messages[2]["role"] == "assistant"
+    assert "Not supplied for this particular example." in messages[2]["content"]
+    assert len(messages[2]["tool_calls"]) == 1
+    assert messages[2]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert json.loads(messages[2]["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+    assert "[[ ## tools ## ]]" not in messages[3]["content"]

@@ -281,6 +281,24 @@ def test_tool_str():
     )
 
 
+def test_tool_format_as_native_tool():
+    tool = Tool(dummy_function)
+
+    formatted = tool.format_as_native_tool()
+
+    assert formatted["type"] == "function"
+    assert formatted["name"] == "dummy_function"
+    assert "A dummy function for testing" in formatted["description"]
+    assert formatted["parameters"] == {
+        "type": "object",
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "string", "default": "hello"},
+        },
+        "required": ["x", "y"],
+    }
+
+
 @pytest.mark.asyncio
 async def test_async_tool_from_function():
     tool = Tool(async_dummy_function)
@@ -448,6 +466,22 @@ def test_tool_calls_format_from_dict_list():
     assert len(result["tool_calls"]) == 2
     assert result["tool_calls"][0]["function"]["name"] == "search"
     assert result["tool_calls"][1]["function"]["name"] == "translate"
+
+
+def test_tool_calls_from_lm_tool_calls_accepts_chat_and_responses_shapes():
+    tool_calls = ToolCalls.from_lm_tool_calls(
+        [
+            {"function": {"name": "search", "arguments": '{"query": "hello"}'}},
+            {"name": "translate", "arguments": '{"text": "world", "lang": "fr"}'},
+        ]
+    )
+
+    assert tool_calls == ToolCalls.from_dict_list(
+        [
+            {"name": "search", "args": {"query": "hello"}},
+            {"name": "translate", "args": {"text": "world", "lang": "fr"}},
+        ]
+    )
 
 
 def test_toolcalls_vague_match():

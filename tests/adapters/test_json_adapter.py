@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 import pydantic
@@ -963,6 +964,55 @@ def test_json_adapter_toolcalls_native_function_calling():
         assert result[0]["tool_calls"] is None
 
 
+def test_json_adapter_native_function_calling_bypasses_support_gate_for_chat_models():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    lm_kwargs = {}
+    adapter = dspy.JSONAdapter(use_native_function_calling=True)
+    processed_signature = adapter._call_preprocess(
+        dspy.LM(model="openai/gpt-4o-mini", cache=False),
+        lm_kwargs,
+        MySignature,
+        {"question": "What is the weather in Paris?", "tools": [dspy.Tool(get_weather)]},
+    )
+
+    assert "tools" in lm_kwargs
+    assert lm_kwargs["tools"][0]["function"]["name"] == "get_weather"
+    assert "tools" not in processed_signature.input_fields
+    assert "tool_calls" not in processed_signature.output_fields
+
+
+def test_json_adapter_native_function_calling_formats_flat_tools_for_responses_models():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    lm_kwargs = {}
+    adapter = dspy.JSONAdapter(use_native_function_calling=True)
+    adapter._call_preprocess(
+        dspy.LM(model="openai/gpt-5-nano", model_type="responses", cache=False),
+        lm_kwargs,
+        MySignature,
+        {"question": "What is the weather in Paris?", "tools": [dspy.Tool(get_weather)]},
+    )
+
+    assert "tools" in lm_kwargs
+    assert lm_kwargs["tools"][0]["name"] == "get_weather"
+    assert "function" not in lm_kwargs["tools"][0]
+
+
 def test_json_adapter_toolcalls_no_native_function_calling():
     class MySignature(dspy.Signature):
         question: str = dspy.InputField()
@@ -1126,3 +1176,44 @@ In adhering to this structure, your objective is:\x20
     assert system_message == expected_system_message
 
 
+def test_json_adapter_formats_native_tool_call_demo_messages():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    demo = {
+        "question": "What is the weather in Paris?",
+        "answer": "Need weather lookup.",
+        "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "get_weather", "args": {"city": "Paris"}}]),
+    }
+    tools = [dspy.Tool(get_weather)]
+    adapter = dspy.JSONAdapter(use_native_function_calling=True)
+
+    with mock.patch("litellm.completion") as mock_completion:
+        mock_completion.return_value = ModelResponse(
+            choices=[Choices(message=Message(content='{"answer": "Paris"}'))],
+            model="openai/gpt-4o-mini",
+        )
+        adapter(
+            dspy.LM(model="openai/gpt-4o-mini", cache=False),
+            {},
+            MySignature,
+            [demo],
+            {"question": "Reply now.", "tools": tools},
+        )
+
+    _, call_kwargs = mock_completion.call_args
+    messages = call_kwargs["messages"]
+
+    assert "tools" not in str(messages[1]["content"])
+    assert "What is the weather in Paris?" in str(messages[1]["content"])
+    assert messages[2]["role"] == "assistant"
+    assert "Need weather lookup." in str(messages[2]["content"])
+    assert len(messages[2]["tool_calls"]) == 1
+    assert messages[2]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert json.loads(messages[2]["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}

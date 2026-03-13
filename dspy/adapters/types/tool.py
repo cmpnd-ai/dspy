@@ -2,6 +2,7 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
+import json_repair
 import pydantic
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, TypeAdapter, create_model
@@ -148,17 +149,26 @@ class Tool(Type):
     def format(self):
         return str(self)
 
-    def format_as_litellm_function_call(self):
+    def format_as_native_tool(self):
         return {
             "type": "function",
+            "name": self.name,
+            "description": self.desc,
+            "parameters": {
+                "type": "object",
+                "properties": self.args,
+                "required": list(self.args.keys()),
+            },
+        }
+
+    def format_as_litellm_function_call(self):
+        native_tool = self.format_as_native_tool()
+        return {
+            "type": native_tool["type"],
             "function": {
-                "name": self.name,
-                "description": self.desc,
-                "parameters": {
-                    "type": "object",
-                    "properties": self.args,
-                    "required": list(self.args.keys()),
-                },
+                "name": native_tool["name"],
+                "description": native_tool["description"],
+                "parameters": native_tool["parameters"],
             },
         }
 
@@ -342,6 +352,22 @@ class ToolCalls(Type):
         """
         tool_calls = [cls.ToolCall(**item) for item in tool_calls_dicts]
         return cls(tool_calls=tool_calls)
+
+    @classmethod
+    def from_lm_tool_calls(cls, tool_calls: list[dict[str, Any]]) -> "ToolCalls":
+        parsed_tool_calls = []
+        for tool_call in tool_calls:
+            function = tool_call.get("function")
+            name = function.get("name") if function is not None else tool_call.get("name")
+            arguments = function.get("arguments") if function is not None else tool_call.get("arguments")
+            if name is None:
+                raise ValueError("Tool call is missing a name.")
+            if arguments in (None, ""):
+                arguments = {}
+            elif isinstance(arguments, str):
+                arguments = json_repair.loads(arguments)
+            parsed_tool_calls.append({"name": name, "args": arguments})
+        return cls.from_dict_list(parsed_tool_calls)
 
     @classmethod
     def description(cls) -> str:

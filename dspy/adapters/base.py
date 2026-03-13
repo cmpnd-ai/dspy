@@ -2,9 +2,6 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, get_origin
 
-import json_repair
-import litellm
-
 from dspy.adapters.types import History, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
 from dspy.adapters.types.reasoning import Reasoning
@@ -85,15 +82,10 @@ class Adapter:
                     "input field with type `list[dspy.Tool]`."
                 )
 
-            if tool_call_output_field_name and litellm.supports_function_calling(model=lm.model):
+            if tool_call_output_field_name:
                 tools = inputs[tool_call_input_field_name]
                 tools = tools if isinstance(tools, list) else [tools]
-
-                litellm_tools = []
-                for tool in tools:
-                    litellm_tools.append(tool.format_as_litellm_function_call())
-
-                lm_kwargs["tools"] = litellm_tools
+                lm_kwargs["tools"] = [self._format_native_tool_for_lm(tool, lm) for tool in tools]
 
                 signature_for_native_function_calling = signature.delete(tool_call_output_field_name)
                 signature_for_native_function_calling = signature_for_native_function_calling.delete(
@@ -131,7 +123,7 @@ class Adapter:
             text = output
 
             if isinstance(output, dict):
-                text = output["text"]
+                text = output.get("text")
                 output_logprobs = output.get("logprobs")
                 tool_calls = output.get("tool_calls")
 
@@ -154,14 +146,7 @@ class Adapter:
                 )
 
             if tool_calls and tool_call_output_field_name:
-                tool_calls = [
-                    {
-                        "name": v["function"]["name"],
-                        "args": json_repair.loads(v["function"]["arguments"]),
-                    }
-                    for v in tool_calls
-                ]
-                value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+                value[tool_call_output_field_name] = ToolCalls.from_lm_tool_calls(tool_calls)
 
             # Parse custom types that does not rely on the `Adapter.parse()` method
             for name, field in original_signature.output_fields.items():

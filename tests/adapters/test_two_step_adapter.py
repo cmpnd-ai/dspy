@@ -135,6 +135,49 @@ async def test_two_step_adapter_async_call():
     assert "text from main LM" in content
 
 
+@pytest.mark.asyncio
+async def test_two_step_adapter_async_call_handles_tool_call_only_responses():
+    class TestSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    program = dspy.Predict(TestSignature)
+
+    mock_main_lm = mock.MagicMock(spec=dspy.LM)
+    mock_main_lm.acall.return_value = [
+        {
+            "tool_calls": [
+                {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": '{"city":"Paris"}',
+                    "call_id": "call_1",
+                    "status": "completed",
+                    "id": "call_1",
+                }
+            ]
+        }
+    ]
+    mock_main_lm.kwargs = {"temperature": 1.0}
+
+    mock_extraction_lm = mock.MagicMock(spec=dspy.LM)
+    mock_extraction_lm.acall.return_value = ["unused"]
+    mock_extraction_lm.kwargs = {"temperature": 1.0}
+    mock_extraction_lm.model = "openai/gpt-4o"
+
+    with dspy.context(lm=mock_main_lm, adapter=dspy.TwoStepAdapter(extraction_model=mock_extraction_lm)):
+        result = await program.acall(question="What is the weather in Paris?", tools=[dspy.Tool(get_weather)])
+
+    assert result.answer is None
+    assert result.tool_calls == dspy.ToolCalls.from_dict_list([{"name": "get_weather", "args": {"city": "Paris"}}])
+    mock_extraction_lm.acall.assert_not_called()
+
+
 def test_two_step_adapter_parse():
     class ComplexSignature(dspy.Signature):
         input_text: str = dspy.InputField()

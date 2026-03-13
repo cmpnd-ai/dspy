@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any, TextIO
 
@@ -45,47 +46,34 @@ def pretty_print_history(history: list[dict[str, Any]], n: int = 1, file: TextIO
 
         for msg in messages:
             print(_red(f"{msg['role'].capitalize()} message:", use_colors=use_colors), file=out)
-            if isinstance(msg["content"], str):
-                print(msg["content"].strip(), file=out)
-            else:
-                if isinstance(msg["content"], list):
-                    for c in msg["content"]:
-                        if c["type"] == "text":
-                            print(c["text"].strip(), file=out)
-                        elif c["type"] == "image_url":
-                            image_str = ""
-                            if "base64" in c["image_url"].get("url", ""):
-                                len_base64 = len(c["image_url"]["url"].split("base64,")[1])
-                                image_str = (
-                                    f"<{c['image_url']['url'].split('base64,')[0]}base64,"
-                                    f"<IMAGE BASE 64 ENCODED({len_base64!s})>"
-                                )
-                            else:
-                                image_str = f"<image_url: {c['image_url']['url']}>"
-                            print(_blue(image_str.strip(), use_colors=use_colors), file=out)
-                        elif c["type"] == "input_audio":
-                            audio_format = c["input_audio"]["format"]
-                            len_audio = len(c["input_audio"]["data"])
-                            audio_str = f"<audio format='{audio_format}' base64-encoded, length={len_audio}>"
-                            print(_blue(audio_str.strip(), use_colors=use_colors), file=out)
-                        elif c["type"] == "file" or c["type"] == "input_file":
-                            file_info = c.get("file", c.get("input_file", {}))
-                            filename = file_info.get("filename", "")
-                            file_id = file_info.get("file_id", "")
-                            file_data = file_info.get("file_data", "")
-                            file_str = f"<file: name:{filename}, id:{file_id}, data_length:{len(file_data)}>"
-                            print(_blue(file_str.strip(), use_colors=use_colors), file=out)
+            _print_message_content(msg, out, use_colors=use_colors)
+
+            if msg.get("tool_calls"):
+                print(_red("Tool calls in message:", use_colors=use_colors), file=out)
+                for tool_call in msg["tool_calls"]:
+                    print(_green(_format_tool_call(tool_call), use_colors=use_colors), file=out)
+
+            metadata_parts = []
+            if msg.get("tool_call_id"):
+                metadata_parts.append(f"tool_call_id: {msg['tool_call_id']}")
+            if msg.get("name"):
+                metadata_parts.append(f"name: {msg['name']}")
+            if metadata_parts:
+                print(_blue(" | ".join(metadata_parts), use_colors=use_colors), file=out)
             print("\n", file=out)
 
+        if not outputs:
+            continue
+
         if isinstance(outputs[0], dict):
-            if outputs[0]["text"]:
+            if outputs[0].get("text"):
                 print(_red("Response:", use_colors=use_colors), file=out)
                 print(_green(outputs[0]["text"].strip(), use_colors=use_colors), file=out)
 
             if outputs[0].get("tool_calls"):
                 print(_red("Tool calls:", use_colors=use_colors), file=out)
                 for tool_call in outputs[0]["tool_calls"]:
-                    print(_green(f"{tool_call['function']['name']}: {tool_call['function']['arguments']}", use_colors=use_colors), file=out)
+                    print(_green(_format_tool_call(tool_call), use_colors=use_colors), file=out)
         else:
             print(_red("Response:", use_colors=use_colors), file=out)
             print(_green(outputs[0].strip(), use_colors=use_colors), file=out)
@@ -95,3 +83,56 @@ def pretty_print_history(history: list[dict[str, Any]], n: int = 1, file: TextIO
             print(_red(choices_text, end="", use_colors=use_colors), file=out)
 
     print("\n\n\n", file=out)
+
+
+def _print_message_content(msg: dict[str, Any], out: TextIO, *, use_colors: bool) -> None:
+    content = msg.get("content")
+    if isinstance(content, str):
+        print(content.strip(), file=out)
+        return
+
+    if not isinstance(content, list):
+        if content is not None:
+            print(str(content).strip(), file=out)
+        return
+
+    for c in content:
+        if c["type"] == "text":
+            print(c["text"].strip(), file=out)
+        elif c["type"] == "image_url":
+            image_str = ""
+            if "base64" in c["image_url"].get("url", ""):
+                len_base64 = len(c["image_url"]["url"].split("base64,")[1])
+                image_str = (
+                    f"<{c['image_url']['url'].split('base64,')[0]}base64,"
+                    f"<IMAGE BASE 64 ENCODED({len_base64!s})>"
+                )
+            else:
+                image_str = f"<image_url: {c['image_url']['url']}>"
+            print(_blue(image_str.strip(), use_colors=use_colors), file=out)
+        elif c["type"] == "input_audio":
+            audio_format = c["input_audio"]["format"]
+            len_audio = len(c["input_audio"]["data"])
+            audio_str = f"<audio format='{audio_format}' base64-encoded, length={len_audio}>"
+            print(_blue(audio_str.strip(), use_colors=use_colors), file=out)
+        elif c["type"] == "file" or c["type"] == "input_file":
+            file_info = c.get("file", c.get("input_file", {}))
+            filename = file_info.get("filename", "")
+            file_id = file_info.get("file_id", "")
+            file_data = file_info.get("file_data", "")
+            file_str = f"<file: name:{filename}, id:{file_id}, data_length:{len(file_data)}>"
+            print(_blue(file_str.strip(), use_colors=use_colors), file=out)
+
+
+def _format_tool_call(tool_call: dict[str, Any]) -> str:
+    function = tool_call.get("function")
+    if function is None:
+        name = tool_call.get("name", "<unknown>")
+        arguments = tool_call.get("arguments", {})
+    else:
+        name = function.get("name", "<unknown>")
+        arguments = function.get("arguments", {})
+
+    if isinstance(arguments, str):
+        return f"{name}: {arguments}"
+    return f"{name}: {json.dumps(arguments, ensure_ascii=False)}"

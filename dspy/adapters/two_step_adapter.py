@@ -1,7 +1,5 @@
 from typing import Any
 
-import json_repair
-
 from dspy.adapters.base import Adapter
 from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types import ToolCalls
@@ -46,7 +44,11 @@ class TwoStepAdapter(Adapter):
         self.extraction_model = extraction_model
 
     def format(
-        self, signature: type[Signature], demos: list[dict[str, Any]], inputs: dict[str, Any]
+        self,
+        signature: type[Signature],
+        demos: list[dict[str, Any]],
+        inputs: dict[str, Any],
+        demo_signature: type[Signature] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Format a prompt for the first stage with the main LM.
@@ -67,7 +69,7 @@ class TwoStepAdapter(Adapter):
         task_description = self.format_task_description(signature)
         messages.append({"role": "system", "content": task_description})
 
-        messages.extend(self.format_demos(signature, demos))
+        messages.extend(self.format_demos(demo_signature or signature, demos))
 
         # Format the current input
         messages.append({"role": "user", "content": self.format_user_message_content(signature, inputs)})
@@ -126,33 +128,33 @@ class TwoStepAdapter(Adapter):
             text = output
 
             if isinstance(output, dict):
-                text = output["text"]
+                text = output.get("text")
                 output_logprobs = output.get("logprobs")
                 tool_calls = output.get("tool_calls")
 
-            try:
-                # Call the smaller LM to extract structured data from the raw completion text with ChatAdapter
-                value = await ChatAdapter().acall(
-                    lm=self.extraction_model,
-                    lm_kwargs={},
-                    signature=extractor_signature,
-                    demos=[],
-                    inputs={"text": text},
-                )
-                value = value[0]
+            if text:
+                try:
+                    # Call the smaller LM to extract structured data from the raw completion text with ChatAdapter
+                    value = await ChatAdapter().acall(
+                        lm=self.extraction_model,
+                        lm_kwargs={},
+                        signature=extractor_signature,
+                        demos=[],
+                        inputs={"text": text},
+                    )
+                    value = value[0]
 
-            except Exception as e:
-                raise ValueError(f"Failed to parse response from the original completion: {output}") from e
+                except Exception as e:
+                    raise ValueError(f"Failed to parse response from the original completion: {output}") from e
+            elif tool_calls and tool_call_output_field_name:
+                value = {}
+                for field_name in signature.output_fields.keys():
+                    value[field_name] = None
+            else:
+                raise ValueError("The LM returned an empty or null response.")
 
             if tool_calls and tool_call_output_field_name:
-                tool_calls = [
-                    {
-                        "name": v["function"]["name"],
-                        "args": json_repair.loads(v["function"]["arguments"]),
-                    }
-                    for v in tool_calls
-                ]
-                value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+                value[tool_call_output_field_name] = ToolCalls.from_lm_tool_calls(tool_calls)
 
             if output_logprobs is not None:
                 value["logprobs"] = output_logprobs

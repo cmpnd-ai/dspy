@@ -1,8 +1,11 @@
+from io import StringIO
+
 import pytest
 
 import dspy
 from dspy.clients.base_lm import GLOBAL_HISTORY
 from dspy.utils.dummies import DummyLM
+from dspy.utils.inspect_history import pretty_print_history
 
 
 @pytest.fixture(autouse=True)
@@ -75,3 +78,70 @@ def test_inspect_history_n_larger_than_history(capsys):
     dspy.inspect_history(n=5)
     history = GLOBAL_HISTORY
     assert len(history) == 2  # Should return all available entries
+
+
+def test_pretty_print_history_shows_prompt_tool_calls_and_tool_metadata():
+    history = [
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Fetching weather for Paris.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "name": "get_weather",
+                    "content": "The weather in Paris is sunny.",
+                },
+            ],
+            "outputs": [{"text": '{"answer": "Done"}'}],
+            "timestamp": "2026-03-13T10:40:00",
+        }
+    ]
+    file = StringIO()
+
+    pretty_print_history(history, file=file)
+    output = file.getvalue()
+
+    assert "Tool calls in message:" in output
+    assert 'get_weather: {"city": "Paris"}' in output
+    assert "tool_call_id: call_1 | name: get_weather" in output
+    assert "The weather in Paris is sunny." in output
+
+
+def test_pretty_print_history_handles_tool_call_only_outputs():
+    history = [
+        {
+            "messages": [{"role": "user", "content": "Use the get_weather tool."}],
+            "outputs": [
+                {
+                    "tool_calls": [
+                        {
+                            "type": "function_call",
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris"}',
+                            "call_id": "call_1",
+                            "status": "completed",
+                            "id": "call_1",
+                        }
+                    ]
+                }
+            ],
+            "timestamp": "2026-03-13T10:45:00",
+        }
+    ]
+    file = StringIO()
+
+    pretty_print_history(history, file=file)
+    output = file.getvalue()
+
+    assert "Tool calls:" in output
+    assert 'get_weather: {"city": "Paris"}' in output

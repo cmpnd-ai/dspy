@@ -1,7 +1,7 @@
 from unittest.mock import Mock, patch
 
 import dspy
-from dspy.teleprompt.utils import create_n_fewshot_demo_sets, eval_candidate_program
+from dspy.teleprompt.utils import create_n_fewshot_demo_sets, eval_candidate_program, strip_runtime_only_demo_inputs
 from dspy.utils.dummies import DummyLM
 
 
@@ -95,3 +95,25 @@ def test_create_n_fewshot_demo_sets_passes_metric_threshold_for_unshuffled():
             assert kwargs["metric_threshold"] == 0.9, (
                 f"metric_threshold={kwargs['metric_threshold']}, expected 0.9"
             )
+
+
+def test_strip_runtime_only_demo_inputs_removes_tool_fields():
+    class DemoSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tool: dspy.Tool = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    def get_weather(city: str) -> str:
+        return f"The weather in {city} is sunny"
+
+    single_tool = dspy.Tool(get_weather)
+    demo_inputs = {
+        "question": "What is the weather in Paris?",
+        "tool": single_tool,
+        "tools": [single_tool],
+    }
+
+    stripped_inputs = strip_runtime_only_demo_inputs(DemoSignature, demo_inputs)
+
+    assert stripped_inputs == {"question": "What is the weather in Paris?"}

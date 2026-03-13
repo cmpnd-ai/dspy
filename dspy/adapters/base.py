@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import TYPE_CHECKING, Any, get_origin
 
@@ -219,7 +220,12 @@ class Adapter:
         inputs: dict[str, Any],
     ) -> list[dict[str, Any]]:
         processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        inputs = self.format(processed_signature, demos, inputs)
+        inputs = self.format(
+            processed_signature,
+            demos,
+            inputs,
+            demo_signature=self._get_demo_signature(signature),
+        )
 
         outputs = await lm.acall(messages=inputs, **lm_kwargs)
         return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
@@ -229,6 +235,7 @@ class Adapter:
         signature: type[Signature],
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
+        demo_signature: type[Signature] | None = None,
     ) -> list[dict[str, Any]]:
         """Format the input messages for the LM call.
 
@@ -270,6 +277,7 @@ class Adapter:
             A list of multiturn messages as expected by the LM.
         """
         inputs_copy = dict(inputs)
+        demo_signature = demo_signature or signature
 
         # If the signature and inputs have conversation history, we need to format the conversation history and
         # remove the history field from the signature.
@@ -286,7 +294,7 @@ class Adapter:
         messages = []
         system_message = self.format_system_message(signature)
         messages.append({"role": "system", "content": system_message})
-        messages.extend(self.format_demos(signature, demos))
+        messages.extend(self.format_demos(demo_signature, demos))
         if history_field_name:
             # Conversation history and current input
             content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
@@ -432,30 +440,22 @@ class Adapter:
 
         incomplete_demo_prefix = "This is an example of the task, though some input or output fields are not supplied."
         for demo in incomplete_demos:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": self.format_user_message_content(signature, demo, prefix=incomplete_demo_prefix),
-                }
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.format_assistant_message_content(
-                        signature, demo, missing_field_message="Not supplied for this particular example. "
-                    ),
-                }
+            messages.extend(
+                self._format_demo_messages(
+                    signature,
+                    demo,
+                    prefix=incomplete_demo_prefix,
+                    missing_field_message="Not supplied for this particular example. ",
+                )
             )
 
         for demo in complete_demos:
-            messages.append({"role": "user", "content": self.format_user_message_content(signature, demo)})
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.format_assistant_message_content(
-                        signature, demo, missing_field_message="Not supplied for this conversation history message. "
-                    ),
-                }
+            messages.extend(
+                self._format_demo_messages(
+                    signature,
+                    demo,
+                    missing_field_message="Not supplied for this conversation history message. ",
+                )
             )
 
         return messages
@@ -482,6 +482,123 @@ class Adapter:
                 return name
         return None
 
+    def _format_native_tool_for_lm(self, tool: Tool, lm: "LM") -> dict[str, Any]:
+        native_tool = tool.format_as_native_tool()
+        if getattr(lm, "model_type", "chat") == "responses":
+            return native_tool
+        return {
+            "type": native_tool["type"],
+            "function": {
+                "name": native_tool["name"],
+                "description": native_tool["description"],
+                "parameters": native_tool["parameters"],
+            },
+        }
+
+    def _get_runtime_only_input_field_names(self, signature: type[Signature]) -> set[str]:
+        runtime_only_fields = set()
+        for name, field in signature.input_fields.items():
+            origin = get_origin(field.annotation)
+            if origin is list and field.annotation.__args__[0] == Tool:
+                runtime_only_fields.add(name)
+            elif field.annotation == Tool:
+                runtime_only_fields.add(name)
+        return runtime_only_fields
+
+    def _get_demo_signature(self, signature: type[Signature]) -> type[Signature]:
+        demo_signature = signature
+        for field_name in self._get_runtime_only_input_field_names(signature):
+            demo_signature = demo_signature.delete(field_name)
+        return demo_signature
+
+    def _format_demo_assistant_message(
+        self,
+        signature: type[Signature],
+        demo: dict[str, Any],
+        missing_field_message: str | None = None,
+    ) -> dict[str, Any]:
+        tool_call_output_field_name = self._get_tool_call_output_field_name(signature)
+        if tool_call_output_field_name is None or demo.get(tool_call_output_field_name) is None:
+            return {
+                "role": "assistant",
+                "content": self.format_assistant_message_content(
+                    signature,
+                    demo,
+                    missing_field_message=missing_field_message,
+                ),
+            }
+
+        tool_calls = demo[tool_call_output_field_name]
+        if not isinstance(tool_calls, ToolCalls):
+            tool_calls = ToolCalls.model_validate(tool_calls)
+
+        content = None
+        content_signature = signature.delete(tool_call_output_field_name)
+        if content_signature.output_fields:
+            content = self.format_assistant_message_content(
+                content_signature,
+                demo,
+                missing_field_message=missing_field_message,
+            ) or None
+
+        return {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": self._format_tool_calls_for_message(tool_calls),
+        }
+
+    def _format_demo_messages(
+        self,
+        signature: type[Signature],
+        demo: dict[str, Any],
+        prefix: str = "",
+        missing_field_message: str | None = None,
+    ) -> list[dict[str, Any]]:
+        demo_inputs = dict(demo)
+        demo_signature = signature
+        conversation_history = []
+
+        history_field_name = self._get_history_field_name(signature)
+        if history_field_name:
+            demo_signature = signature.delete(history_field_name)
+            conversation_history = self.format_conversation_history(
+                demo_signature,
+                history_field_name,
+                demo_inputs,
+            )
+
+        messages = []
+        messages.extend(conversation_history)
+        messages.append(
+            {
+                "role": "user",
+                "content": self.format_user_message_content(demo_signature, demo_inputs, prefix=prefix),
+            }
+        )
+        messages.append(
+            self._format_demo_assistant_message(
+                demo_signature,
+                demo_inputs,
+                missing_field_message=missing_field_message,
+            )
+        )
+        return messages
+
+    def _format_tool_calls_for_message(self, tool_calls: ToolCalls) -> list[dict[str, Any]]:
+        formatted_tool_calls = []
+        for idx, tool_call in enumerate(tool_calls.tool_calls):
+            formatted_tool_calls.append(
+                {
+                    "id": f"call_{idx + 1}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.args),
+                    },
+                }
+            )
+        return formatted_tool_calls
+
     def format_conversation_history(
         self,
         signature: type[Signature],
@@ -500,10 +617,17 @@ class Adapter:
         Returns:
             A list of multiturn messages.
         """
-        conversation_history = inputs[history_field_name].messages if history_field_name in inputs else None
+        history = inputs[history_field_name] if history_field_name in inputs else None
 
-        if conversation_history is None:
+        if history is None:
             return []
+
+        del inputs[history_field_name]
+
+        if history.mode == "raw":
+            return history.visible_messages()
+
+        conversation_history = history.messages
 
         messages = []
         for message in conversation_history:
@@ -519,9 +643,6 @@ class Adapter:
                     "content": self.format_assistant_message_content(signature, message),
                 }
             )
-
-        # Remove the history field from the inputs
-        del inputs[history_field_name]
 
         return messages
 

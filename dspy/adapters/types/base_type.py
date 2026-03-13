@@ -131,9 +131,9 @@ class Type(pydantic.BaseModel):
 
 
 def split_message_content_for_custom_types(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Split user message content into a list of content blocks.
+    """Split string message content into a list of content blocks.
 
-    This method splits each user message's content in the `messages` list to be a list of content block, so that
+    This method splits each string message's content in the `messages` list to be a list of content block, so that
     the custom types like `dspy.Image` can be properly formatted for better quality. For example, the split content
     may look like below if the user message has a `dspy.Image` object:
 
@@ -157,14 +157,12 @@ def split_message_content_for_custom_types(messages: list[dict[str, Any]]) -> li
         A list of messages with the content split into a list of content blocks around custom types content.
     """
     for message in messages:
-        if message["role"] != "user":
-            # Custom type messages are only in user messages
+        if not isinstance(message.get("content"), str):
             continue
 
         pattern = rf"{CUSTOM_TYPE_START_IDENTIFIER}(.*?){CUSTOM_TYPE_END_IDENTIFIER}"
         result = []
         last_end = 0
-        # DSPy adapter always formats user input into a string content before custom type splitting
         content: str = message["content"]
 
         for match in re.finditer(pattern, content, re.DOTALL):

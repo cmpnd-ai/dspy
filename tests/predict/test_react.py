@@ -1,107 +1,65 @@
-import re
+import asyncio
+import time
 
-import litellm
 import pytest
 from pydantic import BaseModel
 
 import dspy
+from dspy.adapters.types.tool import ToolCalls
 from dspy.utils.dummies import DummyLM
 
 
-@pytest.mark.extra
-def test_tool_observation_preserves_custom_type():
-    pytest.importorskip("PIL.Image")
-    from PIL import Image
-
-    captured_calls = []
-
-    class SpyChatAdapter(dspy.ChatAdapter):
-        def format_user_message_content(self, signature, inputs, *args, **kwargs):
-            captured_calls.append((signature, dict(inputs)))
-            return super().format_user_message_content(signature, inputs, *args, **kwargs)
-
-    def make_images():
-        return dspy.Image("https://example.com/test.png"), dspy.Image(Image.new("RGB", (100, 100), "red"))
+def _tool_calls(*calls: tuple[str, dict]) -> ToolCalls:
+    return ToolCalls.from_dict_list([{"name": name, "args": args} for name, args in calls])
 
 
-    adapter = SpyChatAdapter()
-    lm = DummyLM(
-        [
-            {
-                "next_thought": "I should call the image tool.",
-                "next_tool_name": "make_images",
-                "next_tool_args": {},
-            },
-            {
-                "next_thought": "I now have the image so I can finish.",
-                "next_tool_name": "finish",
-                "next_tool_args": {},
-            },
-            {"reasoning": "image ready", "answer": "done"},
-        ],
-        adapter=adapter,
-    )
-    dspy.configure(lm=lm, adapter=adapter)
-
-    react = dspy.ReAct("question -> answer", tools=[make_images])
-    react(question="Draw me something red")
-
-    sigs_with_obs = [sig for sig, inputs in captured_calls if "observation_0" in inputs]
-    assert sigs_with_obs, "Expected ReAct to format a trajectory containing observation_0"
-
-    observation_content = lm.history[1]["messages"][1]["content"]
-    assert sum(1 for part in observation_content if isinstance(part, dict) and part.get("type") == "image_url") == 2
-
-
-def test_tool_calling_with_pydantic_args():
+def test_react_submit_with_pydantic_args_and_history_shape():
     class CalendarEvent(BaseModel):
         name: str
         date: str
         participants: dict[str, str]
 
     def write_invitation_letter(participant_name: str, event_info: CalendarEvent):
-        if participant_name not in event_info.participants:
-            return None
         return f"It's my honor to invite {participant_name} to event {event_info.name} on {event_info.date}"
 
     class InvitationSignature(dspy.Signature):
-        participant_name: str = dspy.InputField(desc="The name of the participant to invite")
-        event_info: CalendarEvent = dspy.InputField(desc="The information about the event")
-        invitation_letter: str = dspy.OutputField(desc="The invitation letter to be sent to the participant")
+        participant_name: str = dspy.InputField()
+        event_info: CalendarEvent = dspy.InputField()
+        invitation_letter: str = dspy.OutputField()
 
     react = dspy.ReAct(InvitationSignature, tools=[write_invitation_letter])
-
-    lm = DummyLM(
+    steps = iter(
         [
-            {
-                "next_thought": "I need to write an invitation letter for Alice to the Science Fair event.",
-                "next_tool_name": "write_invitation_letter",
-                "next_tool_args": {
-                    "participant_name": "Alice",
-                    "event_info": {
-                        "name": "Science Fair",
-                        "date": "Friday",
-                        "participants": {"Alice": "female", "Bob": "male"},
-                    },
-                },
-            },
-            {
-                "next_thought": (
-                    "I have successfully written the invitation letter for Alice to the Science Fair. Now "
-                    "I can finish the task."
+            dspy.Prediction(
+                next_message="I'll write the invitation.",
+                tool_calls=_tool_calls(
+                    (
+                        "write_invitation_letter",
+                        {
+                            "participant_name": "Alice",
+                            "event_info": {
+                                "name": "Science Fair",
+                                "date": "Friday",
+                                "participants": {"Alice": "female", "Bob": "male"},
+                            },
+                        },
+                    )
                 ),
-                "next_tool_name": "finish",
-                "next_tool_args": {},
-            },
-            {
-                "reasoning": "This is a very rigorous reasoning process, trust me bro!",
-                "invitation_letter": "It's my honor to invite Alice to the Science Fair event on Friday.",
-            },
+            ),
+            dspy.Prediction(
+                next_message=None,
+                tool_calls=_tool_calls(
+                    (
+                        "submit",
+                        {"invitation_letter": "It's my honor to invite Alice to event Science Fair on Friday"},
+                    )
+                ),
+            ),
         ]
     )
-    dspy.configure(lm=lm)
+    react.react = lambda **kwargs: next(steps)
 
-    outputs = react(
+    result = react(
         participant_name="Alice",
         event_info=CalendarEvent(
             name="Science Fair",
@@ -109,317 +67,202 @@ def test_tool_calling_with_pydantic_args():
             participants={"Alice": "female", "Bob": "male"},
         ),
     )
-    assert outputs.invitation_letter == "It's my honor to invite Alice to the Science Fair event on Friday."
 
-    expected_trajectory = {
-        "thought_0": "I need to write an invitation letter for Alice to the Science Fair event.",
-        "tool_name_0": "write_invitation_letter",
-        "tool_args_0": {
-            "participant_name": "Alice",
-            "event_info": {
-                "name": "Science Fair",
-                "date": "Friday",
-                "participants": {"Alice": "female", "Bob": "male"},
+    assert result.invitation_letter == "It's my honor to invite Alice to event Science Fair on Friday"
+    assert result.history.messages[0]["role"] == "user"
+    assert "Alice" in result.history.messages[0]["content"]
+    assert "Respond with the corresponding output fields" not in result.history.messages[0]["content"]
+    assert result.history.messages[1]["tool_calls"][0]["function"]["name"] == "write_invitation_letter"
+    assert result.history.messages[2]["role"] == "tool"
+    assert result.history.messages[2]["name"] == "write_invitation_letter"
+    assert result.history.messages[3]["tool_calls"][0]["function"]["name"] == "submit"
+    assert result.history.messages[4]["name"] == "submit"
+    assert "Submitted final outputs successfully" in result.history.messages[4]["content"]
+    assert "[[ ## invitation_letter ## ]]" in result.history.messages[5]["content"]
+
+    assert result.trajectory["tool_name_0"] == "write_invitation_letter"
+    assert result.trajectory["observation_0"] == "It's my honor to invite Alice to event Science Fair on Friday"
+    assert result.trajectory["tool_name_1"] == "submit"
+
+
+def test_react_fallback_extract_appends_synthetic_submit():
+    react = dspy.ReAct("question -> answer", tools=[])
+    react.react = lambda **kwargs: dspy.Prediction(next_message="I think I can answer.", tool_calls=None)
+    react.extract = lambda **kwargs: dspy.Prediction(reasoning="fallback", answer="Paris")
+
+    result = react(question="What is the capital of France?")
+
+    assert result.answer == "Paris"
+    assert result.history.messages[1] == {"role": "assistant", "content": "I think I can answer."}
+    assert result.history.messages[2]["tool_calls"][0]["function"]["name"] == "submit"
+    assert result.history.messages[3]["name"] == "submit"
+    assert "Submitted final outputs successfully" in result.history.messages[3]["content"]
+    assert "[[ ## answer ## ]]" in result.history.messages[4]["content"]
+    assert result.trajectory["tool_name_0"] == "submit"
+    assert result.trajectory["tool_args_0"] == {"answer": "Paris"}
+
+
+def test_react_invalid_submit_yields_tool_error_then_can_continue():
+    react = dspy.ReAct("question -> answer", tools=[])
+    steps = iter(
+        [
+            dspy.Prediction(next_message=None, tool_calls=_tool_calls(("submit", {}))),
+            dspy.Prediction(next_message=None, tool_calls=_tool_calls(("submit", {"answer": "Paris"}))),
+        ]
+    )
+    react.react = lambda **kwargs: next(steps)
+
+    result = react(question="What is the capital of France?")
+
+    submit_errors = [message for message in result.history.messages if message.get("role") == "tool"]
+    assert len(submit_errors) == 2
+    assert "missing output fields" in submit_errors[0]["content"]
+    assert "Submitted final outputs successfully" in submit_errors[1]["content"]
+    assert result.answer == "Paris"
+
+
+def test_react_history_preserves_prior_user_turn_for_pronouns():
+    captured_histories = []
+    react = dspy.ReAct("question -> answer", tools=[])
+    react.react = lambda **kwargs: captured_histories.append(kwargs["history"]) or dspy.Prediction(
+        next_message=None,
+        tool_calls=_tool_calls(("submit", {"answer": "20C"})),
+    )
+
+    prior_history = dspy.History.raw(
+        messages=[
+            {"role": "user", "content": "What is the weather in Paris in F?"},
+            {
+                "role": "assistant",
+                "content": "Checking the weather.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                    }
+                ],
             },
-        },
-        "observation_0": "It's my honor to invite Alice to event Science Fair on Friday",
-        "thought_1": "I have successfully written the invitation letter for Alice to the Science Fair. Now I can finish the task.",
-        "tool_name_1": "finish",
-        "tool_args_1": {},
-        "observation_1": "Completed.",
+            {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "68"},
+            {"role": "assistant", "content": "[[ ## answer ## ]]\nIt is 68F in Paris.\n\n[[ ## completed ## ]]\n"},
+        ]
+    )
+
+    result = react(question="Convert that number to C.", history=prior_history)
+
+    seen_history = captured_histories[0]
+    assert seen_history.messages[0]["content"] == "What is the weather in Paris in F?"
+    assert seen_history.messages[3]["content"].startswith("[[ ## answer ## ]]")
+    assert seen_history.messages[-1]["role"] == "user"
+    assert "Convert that number to C." in seen_history.messages[-1]["content"]
+    assert result.answer == "20C"
+
+
+def test_react_parallel_tool_calls_preserve_original_order():
+    def slow_tool():
+        time.sleep(0.05)
+        return "slow"
+
+    def fast_tool():
+        time.sleep(0.01)
+        return "fast"
+
+    react = dspy.ReAct("question -> answer", tools=[slow_tool, fast_tool], parallel_tool_calls=True)
+    steps = iter(
+        [
+            dspy.Prediction(
+                next_message="Checking both tools.",
+                tool_calls=_tool_calls(("slow_tool", {}), ("fast_tool", {})),
+            ),
+            dspy.Prediction(next_message=None, tool_calls=_tool_calls(("submit", {"answer": "done"}))),
+        ]
+    )
+    react.react = lambda **kwargs: next(steps)
+
+    result = react(question="Check both tools.")
+
+    first_tool_messages = [message for message in result.history.messages if message.get("role") == "tool"][:2]
+    assert [message["name"] for message in first_tool_messages] == ["slow_tool", "fast_tool"]
+    assert [message["content"] for message in first_tool_messages] == ["slow", "fast"]
+
+
+@pytest.mark.extra
+def test_tool_observation_preserves_custom_type_in_raw_history():
+    pytest.importorskip("PIL.Image")
+    from PIL import Image
+
+    class SpyChatAdapter(dspy.ChatAdapter):
+        pass
+
+    def make_images():
+        return dspy.Image("https://example.com/test.png"), dspy.Image(Image.new("RGB", (100, 100), "red"))
+
+    adapter = SpyChatAdapter()
+    lm = DummyLM([{"reasoning": "image ready", "answer": "done"}], adapter=adapter)
+    dspy.configure(lm=lm, adapter=adapter)
+
+    react = dspy.ReAct("question -> answer", tools=[make_images])
+    steps = iter(
+        [
+            dspy.Prediction(next_message="I should inspect the images.", tool_calls=_tool_calls(("make_images", {}))),
+            dspy.Prediction(next_message="I can answer now.", tool_calls=None),
+        ]
+    )
+    react.react = lambda **kwargs: next(steps)
+
+    react(question="Draw me something red")
+
+    tool_messages = [message for message in lm.history[-1]["messages"] if message["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert sum(1 for part in tool_messages[0]["content"] if part.get("type") == "image_url") == 2
+
+
+def test_react_accepts_legacy_trajectory_alias():
+    captured_histories = []
+    react = dspy.ReAct("question -> answer", tools=[])
+    react.react = lambda **kwargs: captured_histories.append(kwargs["history"]) or dspy.Prediction(
+        next_message=None,
+        tool_calls=_tool_calls(("submit", {"answer": "Paris"})),
+    )
+
+    trajectory = {
+        "thought_0": "I should search.",
+        "tool_name_0": "search",
+        "tool_args_0": {"query": "capital of France"},
+        "observation_0": "Paris",
     }
-    assert outputs.trajectory == expected_trajectory
+
+    result = react(question="What is the capital of France?", trajectory=trajectory)
+
+    seen_history = captured_histories[0]
+    assert seen_history.messages[0]["tool_calls"][0]["function"]["name"] == "search"
+    assert seen_history.messages[1]["role"] == "tool"
+    assert seen_history.messages[-1]["role"] == "user"
+    assert result.answer == "Paris"
 
 
-def test_tool_calling_without_typehint():
-    def foo(a, b):
-        """Add two numbers."""
+@pytest.mark.asyncio
+async def test_react_async_tool_calling_and_submit():
+    async def add(a: int, b: int) -> int:
+        await asyncio.sleep(0.01)
         return a + b
 
-    react = dspy.ReAct("a, b -> c:int", tools=[foo])
-    lm = DummyLM(
+    react = dspy.ReAct("a, b -> c:int", tools=[add])
+    steps = iter(
         [
-            {"next_thought": "I need to add two numbers.", "next_tool_name": "foo", "next_tool_args": {"a": 1, "b": 2}},
-            {"next_thought": "I have the sum, now I can finish.", "next_tool_name": "finish", "next_tool_args": {}},
-            {"reasoning": "I added the numbers successfully", "c": 3},
+            dspy.Prediction(next_message="Let me add that.", tool_calls=_tool_calls(("add", {"a": 1, "b": 2}))),
+            dspy.Prediction(next_message=None, tool_calls=_tool_calls(("submit", {"c": 3}))),
         ]
     )
-    dspy.configure(lm=lm)
-    outputs = react(a=1, b=2)
 
-    expected_trajectory = {
-        "thought_0": "I need to add two numbers.",
-        "tool_name_0": "foo",
-        "tool_args_0": {
-            "a": 1,
-            "b": 2,
-        },
-        "observation_0": 3,
-        "thought_1": "I have the sum, now I can finish.",
-        "tool_name_1": "finish",
-        "tool_args_1": {},
-        "observation_1": "Completed.",
-    }
-    assert outputs.trajectory == expected_trajectory
+    async def mock_react(**kwargs):
+        return next(steps)
 
+    react.react.acall = mock_react
 
-def test_trajectory_truncation():
-    # Create a simple tool for testing
-    def echo(text: str) -> str:
-        return f"Echoed: {text}"
+    result = await react.acall(a=1, b=2)
 
-    # Create ReAct instance with our echo tool
-    react = dspy.ReAct("input_text -> output_text", tools=[echo])
-
-    # Mock react.react to simulate multiple tool calls
-    call_count = 0
-
-    def mock_react(**kwargs):
-        nonlocal call_count
-        call_count += 1
-
-        if call_count < 3:
-            # First 2 calls use the echo tool
-            return dspy.Prediction(
-                next_thought=f"Thought {call_count}",
-                next_tool_name="echo",
-                next_tool_args={"text": f"Text {call_count}"},
-            )
-        elif call_count == 3:
-            # The 3rd call raises context window exceeded error
-            raise litellm.ContextWindowExceededError("Context window exceeded", "dummy_model", "dummy_provider")
-        else:
-            # The 4th call finishes
-            return dspy.Prediction(next_thought="Final thought", next_tool_name="finish", next_tool_args={})
-
-    react.react = mock_react
-    react.extract = lambda **kwargs: dspy.Prediction(output_text="Final output")
-
-    # Call forward and get the result
-    result = react(input_text="test input")
-
-    # Verify that older entries in the trajectory were truncated
-    assert "thought_0" not in result.trajectory
-    assert "thought_2" in result.trajectory
-    assert result.output_text == "Final output"
-
-
-@pytest.mark.asyncio
-async def test_context_window_exceeded_after_retries():
-    def echo(text: str) -> str:
-        return f"Echoed: {text}"
-
-    react = dspy.ReAct("input_text -> output_text", tools=[echo])
-
-    def mock_react(**kwargs):
-        raise litellm.ContextWindowExceededError("Context window exceeded", "dummy_model", "dummy_provider")
-
-    # Test sync version
-    extract_calls = []
-
-    def mock_extract(**kwargs):
-        extract_calls.append(kwargs)
-        return dspy.Prediction(output_text="Fallback output")
-
-    react.react = mock_react
-    react.extract = mock_extract
-
-    result = react(input_text="test input")
-    assert result.trajectory == {}
-    assert result.output_text == "Fallback output"
-    assert len(extract_calls) == 1
-    assert extract_calls[0]["input_text"] == "test input"
-    assert "trajectory" in extract_calls[0]
-
-    # Test async version
-    async_extract_calls = []
-
-    async def mock_react_async(**kwargs):
-        raise litellm.ContextWindowExceededError("Context window exceeded", "dummy_model", "dummy_provider")
-
-    async def mock_extract_async(**kwargs):
-        async_extract_calls.append(kwargs)
-        return dspy.Prediction(output_text="Fallback output")
-
-    react.react.acall = mock_react_async
-    react.extract.acall = mock_extract_async
-
-    result = await react.acall(input_text="test input")
-    assert result.trajectory == {}
-    assert result.output_text == "Fallback output"
-    assert len(async_extract_calls) == 1
-    assert async_extract_calls[0]["input_text"] == "test input"
-    assert "trajectory" in async_extract_calls[0]
-
-
-def test_error_retry():
-    # --- a tiny tool that always fails -------------------------------------
-    def foo(a, b):
-        raise Exception("tool error")
-
-    # --- program under test -------------------------------------------------
-    react = dspy.ReAct("a, b -> c:int", tools=[foo])
-    lm = DummyLM(
-        [
-            {
-                "next_thought": "I need to add two numbers.",
-                "next_tool_name": "foo",
-                "next_tool_args": {"a": 1, "b": 2},
-            },
-            {
-                "next_thought": "I need to add two numbers.",
-                "next_tool_name": "foo",
-                "next_tool_args": {"a": 1, "b": 2},
-            },
-            # (The model *would* succeed on the 3rd turn, but max_iters=2 stops earlier.)
-            {"reasoning": "I added the numbers successfully", "c": 3},
-        ]
-    )
-    dspy.configure(lm=lm)
-
-    outputs = react(a=1, b=2, max_iters=2)
-    traj = outputs.trajectory
-
-    # --- exact-match checks (thoughts + tool calls) -------------------------
-    control_expected = {
-        "thought_0": "I need to add two numbers.",
-        "tool_name_0": "foo",
-        "tool_args_0": {"a": 1, "b": 2},
-        "thought_1": "I need to add two numbers.",
-        "tool_name_1": "foo",
-        "tool_args_1": {"a": 1, "b": 2},
-    }
-    for k, v in control_expected.items():
-        assert traj[k] == v, f"{k} mismatch"
-
-    # --- flexible checks for observations ----------------------------------
-    # We only care that each observation mentions our error string; we ignore
-    # any extra traceback detail or differing prefixes.
-    for i in range(2):
-        obs = traj[f"observation_{i}"]
-        assert re.search(r"\btool error\b", obs), f"unexpected observation_{i!r}: {obs}"
-
-
-@pytest.mark.asyncio
-async def test_async_tool_calling_with_pydantic_args():
-    class CalendarEvent(BaseModel):
-        name: str
-        date: str
-        participants: dict[str, str]
-
-    async def write_invitation_letter(participant_name: str, event_info: CalendarEvent):
-        if participant_name not in event_info.participants:
-            return None
-        return f"It's my honor to invite {participant_name} to event {event_info.name} on {event_info.date}"
-
-    class InvitationSignature(dspy.Signature):
-        participant_name: str = dspy.InputField(desc="The name of the participant to invite")
-        event_info: CalendarEvent = dspy.InputField(desc="The information about the event")
-        invitation_letter: str = dspy.OutputField(desc="The invitation letter to be sent to the participant")
-
-    react = dspy.ReAct(InvitationSignature, tools=[write_invitation_letter])
-
-    lm = DummyLM(
-        [
-            {
-                "next_thought": "I need to write an invitation letter for Alice to the Science Fair event.",
-                "next_tool_name": "write_invitation_letter",
-                "next_tool_args": {
-                    "participant_name": "Alice",
-                    "event_info": {
-                        "name": "Science Fair",
-                        "date": "Friday",
-                        "participants": {"Alice": "female", "Bob": "male"},
-                    },
-                },
-            },
-            {
-                "next_thought": (
-                    "I have successfully written the invitation letter for Alice to the Science Fair. Now "
-                    "I can finish the task."
-                ),
-                "next_tool_name": "finish",
-                "next_tool_args": {},
-            },
-            {
-                "reasoning": "This is a very rigorous reasoning process, trust me bro!",
-                "invitation_letter": "It's my honor to invite Alice to the Science Fair event on Friday.",
-            },
-        ]
-    )
-    with dspy.context(lm=lm):
-        outputs = await react.acall(
-            participant_name="Alice",
-            event_info=CalendarEvent(
-                name="Science Fair",
-                date="Friday",
-                participants={"Alice": "female", "Bob": "male"},
-            ),
-        )
-    assert outputs.invitation_letter == "It's my honor to invite Alice to the Science Fair event on Friday."
-
-    expected_trajectory = {
-        "thought_0": "I need to write an invitation letter for Alice to the Science Fair event.",
-        "tool_name_0": "write_invitation_letter",
-        "tool_args_0": {
-            "participant_name": "Alice",
-            "event_info": {
-                "name": "Science Fair",
-                "date": "Friday",
-                "participants": {"Alice": "female", "Bob": "male"},
-            },
-        },
-        "observation_0": "It's my honor to invite Alice to event Science Fair on Friday",
-        "thought_1": "I have successfully written the invitation letter for Alice to the Science Fair. Now I can finish the task.",
-        "tool_name_1": "finish",
-        "tool_args_1": {},
-        "observation_1": "Completed.",
-    }
-    assert outputs.trajectory == expected_trajectory
-
-
-@pytest.mark.asyncio
-async def test_async_error_retry():
-    # A tiny tool that always fails
-    async def foo(a, b):
-        raise Exception("tool error")
-
-    react = dspy.ReAct("a, b -> c:int", tools=[foo])
-    lm = DummyLM(
-        [
-            {
-                "next_thought": "I need to add two numbers.",
-                "next_tool_name": "foo",
-                "next_tool_args": {"a": 1, "b": 2},
-            },
-            {
-                "next_thought": "I need to add two numbers.",
-                "next_tool_name": "foo",
-                "next_tool_args": {"a": 1, "b": 2},
-            },
-            # (The model *would* succeed on the 3rd turn, but max_iters=2 stops earlier.)
-            {"reasoning": "I added the numbers successfully", "c": 3},
-        ]
-    )
-    with dspy.context(lm=lm):
-        outputs = await react.acall(a=1, b=2, max_iters=2)
-    traj = outputs.trajectory
-
-    # Exact-match checks (thoughts + tool calls)
-    control_expected = {
-        "thought_0": "I need to add two numbers.",
-        "tool_name_0": "foo",
-        "tool_args_0": {"a": 1, "b": 2},
-        "thought_1": "I need to add two numbers.",
-        "tool_name_1": "foo",
-        "tool_args_1": {"a": 1, "b": 2},
-    }
-    for k, v in control_expected.items():
-        assert traj[k] == v, f"{k} mismatch"
-
-    # Flexible checks for observations
-    # We only care that each observation mentions our error string; we ignore
-    # any extra traceback detail or differing prefixes.
-    for i in range(2):
-        obs = traj[f"observation_{i}"]
-        assert re.search(r"\btool error\b", obs), f"unexpected observation_{i!r}: {obs}"
+    assert result.c == 3
+    assert result.history.messages[1]["tool_calls"][0]["function"]["name"] == "add"
+    assert result.history.messages[2]["content"] == "3"
+    assert result.history.messages[3]["tool_calls"][0]["function"]["name"] == "submit"

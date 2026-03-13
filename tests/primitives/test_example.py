@@ -154,3 +154,25 @@ def test_example_to_dict_with_history():
     json_str = json.dumps(result)
     restored = json.loads(json_str)
     assert restored["history"]["messages"] == result["history"]["messages"]
+
+
+def test_example_to_dict_with_raw_history_compaction():
+    history = dspy.History(
+        messages=[
+            {"role": "assistant", "content": "Earlier step."},
+            {"role": "tool", "name": "search", "content": "Earlier result."},
+            {"role": "assistant", "content": "Latest step."},
+        ],
+        mode="raw",
+        compaction=dspy.HistoryCompaction(max_visible_tokens=32, keep_last_messages=1),
+        summary="Earlier work.",
+        compacted_count=2,
+    )
+    example = Example(question="Test question", history=history, answer="Test answer")
+
+    result = example.toDict()
+
+    assert result["history"]["mode"] == "raw"
+    assert result["history"]["compaction"] == {"max_visible_tokens": 32, "keep_last_messages": 1}
+    assert result["history"]["summary"] == "Earlier work."
+    assert result["history"]["compacted_count"] == 2

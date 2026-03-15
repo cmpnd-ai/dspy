@@ -176,11 +176,11 @@ class BootstrapFinetune(FinetuneTeleprompter):
         adapter = self.adapter[lm] or settings.adapter or ChatAdapter()
         data_format = infer_data_format(adapter)
         for item in trace_data:
-            for pred_ind, _ in enumerate(item["trace"]):
-                include_data = pred_ind is None or pred_ind == pred_ind
+            for trace_ind, _ in enumerate(item["trace"]):
+                include_data = pred_ind is None or pred_ind == trace_ind
                 if include_data:
                     call_data = build_call_data_from_trace(
-                        trace=item["trace"], pred_ind=pred_ind, adapter=adapter, exclude_demos=self.exclude_demos
+                        trace=item["trace"], pred_ind=trace_ind, adapter=adapter, exclude_demos=self.exclude_demos
                     )
                     data.append(call_data)
 

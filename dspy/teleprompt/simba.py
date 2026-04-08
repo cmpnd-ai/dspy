@@ -103,7 +103,10 @@ class SIMBA(Teleprompter):
 
         # Initialize RNG
         rng = random.Random(seed)
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for SIMBA. Install it with: pip install dspy[numpy]")
 
         rng_np = np.random.default_rng(seed)
 

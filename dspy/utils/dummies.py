@@ -195,7 +195,10 @@ class DummyVectorizer:
         return h % self.max_length
 
     def __call__(self, texts: list[str]):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for DummyVectorizer. Install it with: pip install dspy[numpy]")
 
         vecs = []
         for text in texts:

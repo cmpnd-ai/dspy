@@ -43,12 +43,18 @@ class KNN:
             " | ".join([f"{key}: {value}" for key, value in example.items() if key in example._input_keys])
             for example in self.trainset
         ]
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for KNN. Install it with: pip install dspy[numpy]")
 
         self.trainset_vectors = self.embedding(trainset_casted_to_vectorize).astype(np.float32)
 
     def __call__(self, **kwargs) -> list:
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for KNN. Install it with: pip install dspy[numpy]")
 
         input_example_vector = self.embedding([" | ".join([f"{key}: {val}" for key, val in kwargs.items()])])
         scores = np.dot(self.trainset_vectors, input_example_vector.T).squeeze()

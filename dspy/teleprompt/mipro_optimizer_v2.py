@@ -274,7 +274,10 @@ class MIPROv2(Teleprompter):
         return best_program
 
     def _set_random_seeds(self, seed):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for MIPROv2. Install it with: pip install dspy[numpy]")
 
         self.rng = random.Random(seed)
         np.random.seed(seed)

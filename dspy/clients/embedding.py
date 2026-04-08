@@ -108,7 +108,10 @@ class Embedder:
         return input_batches, caching, merged_kwargs, is_single_input
 
     def _postprocess(self, embeddings_list, is_single_input):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for embeddings. Install it with: pip install dspy[numpy]")
 
         embeddings = np.array(embeddings_list, dtype=np.float32)
         if is_single_input:

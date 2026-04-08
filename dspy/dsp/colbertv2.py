@@ -211,7 +211,10 @@ class ColBERTv2RerankerLocal:
     def forward(self, query: str, passages: list[str] | None = None):
         assert len(passages) > 0, "Passages should not be empty"
 
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for ColBERTv2 reranking. Install it with: pip install dspy[numpy]")
         from colbert.modeling.colbert import ColBERT
         from colbert.modeling.tokenization.doc_tokenization import DocTokenizer
         from colbert.modeling.tokenization.query_tokenization import QueryTokenizer

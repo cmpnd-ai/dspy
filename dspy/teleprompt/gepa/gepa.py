@@ -431,7 +431,10 @@ class GEPA(Teleprompter):
     def auto_budget(
         self, num_preds, num_candidates, valset_size: int, minibatch_size: int = 35, full_eval_steps: int = 5
     ) -> int:
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for GEPA auto_budget. Install it with: pip install dspy[numpy]")
 
         num_trials = int(max(2 * (num_preds * 2) * np.log2(num_candidates), 1.5 * num_candidates))
         if num_trials < 0 or valset_size < 0 or minibatch_size < 0:

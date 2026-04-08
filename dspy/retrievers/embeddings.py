@@ -63,14 +63,20 @@ class Embeddings:
         q_embeds = self._normalize(q_embeds) if self.normalize else q_embeds
 
         pids = self._faiss_search(q_embeds, self.k * 10) if self.index else None
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for embedding-based retrieval. Install it with: pip install dspy[numpy]")
 
         pids = np.tile(np.arange(len(self.corpus)), (len(queries), 1)) if pids is None else pids
 
         return self._rerank_and_predict(q_embeds, pids)
 
     def _build_faiss(self):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for FAISS index building. Install it with: pip install dspy[numpy]")
 
         nbytes = 32
         partitions = int(2 * np.sqrt(len(self.corpus)))
@@ -98,7 +104,10 @@ class Embeddings:
         return self.index.search(query_embeddings, num_candidates)[1]
 
     def _rerank_and_predict(self, q_embeds: np.ndarray, candidate_indices: np.ndarray):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for embedding-based retrieval. Install it with: pip install dspy[numpy]")
 
         candidate_embeddings = self.corpus_embeddings[candidate_indices]
         scores = np.einsum("qd,qkd->qk", q_embeds, candidate_embeddings)
@@ -114,7 +123,10 @@ class Embeddings:
         return results
 
     def _normalize(self, embeddings: np.ndarray):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for embedding normalization. Install it with: pip install dspy[numpy]")
 
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         return embeddings / np.maximum(norms, 1e-10)
@@ -143,7 +155,10 @@ class Embeddings:
             json.dump(config, f, indent=2)
 
         # Save embeddings
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for saving embeddings. Install it with: pip install dspy[numpy]")
 
         np.save(os.path.join(path, "corpus_embeddings.npy"), self.corpus_embeddings)
 
@@ -200,7 +215,10 @@ class Embeddings:
         self.embedder = embedder
 
         # Load embeddings
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required for loading embeddings. Install it with: pip install dspy[numpy]")
 
         self.corpus_embeddings = np.load(embeddings_path)
 

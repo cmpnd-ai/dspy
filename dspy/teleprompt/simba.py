@@ -4,8 +4,6 @@ import logging
 import random
 from typing import Any, Callable
 
-import numpy as np
-
 import dspy
 from dspy.teleprompt.simba_utils import append_a_demo, append_a_rule, prepare_models_for_resampling, wrap_program
 from dspy.teleprompt.teleprompt import Teleprompter
@@ -105,6 +103,8 @@ class SIMBA(Teleprompter):
 
         # Initialize RNG
         rng = random.Random(seed)
+        import numpy as np
+
         rng_np = np.random.default_rng(seed)
 
         programs = []
@@ -133,7 +133,9 @@ class SIMBA(Teleprompter):
 
             # Unnormalized weights
             scores = [calc_average_score(idx) for idx in program_idxs]
-            exps = [np.exp(s / temperature) for s in scores]
+            import math
+
+            exps = [math.exp(s / temperature) for s in scores]
             sum_exps = sum(exps)
             if sum_exps <= 0:
                 # Fallback: uniform if all exps are zero
@@ -212,8 +214,10 @@ class SIMBA(Teleprompter):
             # STEP 3: Sort the training buckets by (max-to-min gap, max score, and max-to-avg gap).
             buckets = []
             largest_max_to_avg_gap = float("-inf")
-            batch_10th_percentile_score = np.percentile([float(o["score"]) for o in outputs], 10)
-            batch_90th_percentile_score = np.percentile([float(o["score"]) for o in outputs], 90)
+            all_batch_scores = sorted(float(o["score"]) for o in outputs)
+            n = len(all_batch_scores)
+            batch_10th_percentile_score = all_batch_scores[max(0, int(n * 0.1))]
+            batch_90th_percentile_score = all_batch_scores[min(n - 1, int(n * 0.9))]
 
             # We'll chunk `outputs` by example index, each chunk has length = num_candidates
             for idx, _ in enumerate(batch):

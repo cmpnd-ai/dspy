@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 import random
 from collections import defaultdict
 from typing import Any
-
-import numpy as np
 
 from dspy.adapters.chat_adapter import FieldInfoWithName, field_header_pattern
 from dspy.clients.base_lm import BaseLM
@@ -194,7 +194,9 @@ class DummyVectorizer:
             h %= self.P
         return h % self.max_length
 
-    def __call__(self, texts: list[str]) -> np.ndarray:
+    def __call__(self, texts: list[str]):
+        import numpy as np
+
         vecs = []
         for text in texts:
             grams = [text[i : i + self.n_gram] for i in range(len(text) - self.n_gram + 1)]

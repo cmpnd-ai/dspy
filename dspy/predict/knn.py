@@ -1,4 +1,4 @@
-import numpy as np
+from __future__ import annotations
 
 from dspy.clients import Embedder
 from dspy.primitives import Example
@@ -43,9 +43,13 @@ class KNN:
             " | ".join([f"{key}: {value}" for key, value in example.items() if key in example._input_keys])
             for example in self.trainset
         ]
+        import numpy as np
+
         self.trainset_vectors = self.embedding(trainset_casted_to_vectorize).astype(np.float32)
 
     def __call__(self, **kwargs) -> list:
+        import numpy as np
+
         input_example_vector = self.embedding([" | ".join([f"{key}: {val}" for key, val in kwargs.items()])])
         scores = np.dot(self.trainset_vectors, input_example_vector.T).squeeze()
         nearest_samples_idxs = scores.argsort()[-self.k :][::-1]

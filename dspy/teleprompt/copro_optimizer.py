@@ -5,6 +5,7 @@ import dspy
 from dspy.evaluate.evaluate import Evaluate
 from dspy.signatures import Signature
 from dspy.teleprompt.teleprompt import Teleprompter
+from dspy.utils.optional_imports import import_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ class COPRO(Teleprompter):
         }
 
         if self.track_stats:
-            import numpy as np
+            np = import_numpy("COPRO stats tracking")
 
         candidates = {}
         evaluated_candidates = defaultdict(dict)

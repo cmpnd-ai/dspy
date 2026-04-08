@@ -13,6 +13,7 @@ from dspy.primitives import Example, Module, Prediction
 from dspy.teleprompt.gepa.gepa_utils import DspyAdapter, DSPyTrace, PredictorFeedbackFn, ScoreWithFeedback
 from dspy.teleprompt.teleprompt import Teleprompter
 from dspy.utils.annotation import experimental
+from dspy.utils.optional_imports import import_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -431,7 +432,7 @@ class GEPA(Teleprompter):
     def auto_budget(
         self, num_preds, num_candidates, valset_size: int, minibatch_size: int = 35, full_eval_steps: int = 5
     ) -> int:
-        import numpy as np
+        np = import_numpy("GEPA auto_budget")
 
         num_trials = int(max(2 * (num_preds * 2) * np.log2(num_candidates), 1.5 * num_candidates))
         if num_trials < 0 or valset_size < 0 or minibatch_size < 0:

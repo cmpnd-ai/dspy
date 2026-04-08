@@ -4,6 +4,7 @@ import requests
 
 from dspy.clients.cache import request_cache
 from dspy.dsp.utils import dotdict
+from dspy.utils.optional_imports import import_numpy
 
 # TODO: Ideally, this takes the name of the index and looks up its port.
 
@@ -211,7 +212,7 @@ class ColBERTv2RerankerLocal:
     def forward(self, query: str, passages: list[str] | None = None):
         assert len(passages) > 0, "Passages should not be empty"
 
-        import numpy as np
+        np = import_numpy("ColBERTv2 reranking")
         from colbert.modeling.colbert import ColBERT
         from colbert.modeling.tokenization.doc_tokenization import DocTokenizer
         from colbert.modeling.tokenization.query_tokenization import QueryTokenizer

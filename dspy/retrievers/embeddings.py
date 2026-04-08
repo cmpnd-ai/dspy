@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import json
 import os
 from typing import Any
 
-import numpy as np
-
+from dspy.utils.optional_imports import import_numpy
 from dspy.utils.unbatchify import Unbatchify
 
 
@@ -60,11 +61,15 @@ class Embeddings:
         q_embeds = self._normalize(q_embeds) if self.normalize else q_embeds
 
         pids = self._faiss_search(q_embeds, self.k * 10) if self.index else None
+        np = import_numpy("embedding-based retrieval")
+
         pids = np.tile(np.arange(len(self.corpus)), (len(queries), 1)) if pids is None else pids
 
         return self._rerank_and_predict(q_embeds, pids)
 
     def _build_faiss(self):
+        np = import_numpy("FAISS index building")
+
         nbytes = 32
         partitions = int(2 * np.sqrt(len(self.corpus)))
         dim = self.corpus_embeddings.shape[1]
@@ -87,10 +92,12 @@ class Embeddings:
 
         return index
 
-    def _faiss_search(self, query_embeddings: np.ndarray, num_candidates: int):
+    def _faiss_search(self, query_embeddings, num_candidates: int):
         return self.index.search(query_embeddings, num_candidates)[1]
 
-    def _rerank_and_predict(self, q_embeds: np.ndarray, candidate_indices: np.ndarray):
+    def _rerank_and_predict(self, q_embeds, candidate_indices):
+        np = import_numpy("embedding-based retrieval")
+
         candidate_embeddings = self.corpus_embeddings[candidate_indices]
         scores = np.einsum("qd,qkd->qk", q_embeds, candidate_embeddings)
 
@@ -104,7 +111,9 @@ class Embeddings:
             results.append((passages, indices.tolist(), query_scores.tolist()))
         return results
 
-    def _normalize(self, embeddings: np.ndarray):
+    def _normalize(self, embeddings):
+        np = import_numpy("embedding normalization")
+
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         return embeddings / np.maximum(norms, 1e-10)
 
@@ -132,6 +141,8 @@ class Embeddings:
             json.dump(config, f, indent=2)
 
         # Save embeddings
+        np = import_numpy("saving embeddings")
+
         np.save(os.path.join(path, "corpus_embeddings.npy"), self.corpus_embeddings)
 
         # Save FAISS index if it exists
@@ -187,6 +198,8 @@ class Embeddings:
         self.embedder = embedder
 
         # Load embeddings
+        np = import_numpy("loading embeddings")
+
         self.corpus_embeddings = np.load(embeddings_path)
 
         # Load FAISS index if it was saved and FAISS is available

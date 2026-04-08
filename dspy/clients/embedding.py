@@ -1,9 +1,9 @@
 from typing import Any, Callable
 
 import litellm
-import numpy as np
 
 from dspy.clients.cache import request_cache
+from dspy.utils.optional_imports import import_numpy
 
 
 class Embedder:
@@ -104,13 +104,15 @@ class Embedder:
         return input_batches, caching, merged_kwargs, is_single_input
 
     def _postprocess(self, embeddings_list, is_single_input):
+        np = import_numpy("embeddings")
+
         embeddings = np.array(embeddings_list, dtype=np.float32)
         if is_single_input:
             return embeddings[0]
         else:
             return np.array(embeddings, dtype=np.float32)
 
-    def __call__(self, inputs: str | list[str], batch_size: int | None = None, caching: bool | None = None, **kwargs: dict[str, Any]) -> np.ndarray:
+    def __call__(self, inputs: str | list[str], batch_size: int | None = None, caching: bool | None = None, **kwargs: dict[str, Any]):
         """Compute embeddings for the given inputs.
 
         Args:

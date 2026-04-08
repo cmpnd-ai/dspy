@@ -17,6 +17,7 @@ from dspy.teleprompt.utils import (
     save_candidate_program,
     set_signature,
 )
+from dspy.utils.optional_imports import import_numpy
 
 if TYPE_CHECKING:
     import optuna
@@ -274,10 +275,7 @@ class MIPROv2(Teleprompter):
         return best_program
 
     def _set_random_seeds(self, seed):
-        try:
-            import numpy as np
-        except ImportError:
-            raise ImportError("numpy is required for MIPROv2. Install it with: pip install dspy[numpy]")
+        np = import_numpy("MIPROv2")
 
         self.rng = random.Random(seed)
         np.random.seed(seed)

@@ -8,6 +8,7 @@ from dspy.adapters.chat_adapter import FieldInfoWithName, field_header_pattern
 from dspy.clients.base_lm import BaseLM
 from dspy.dsp.utils.utils import dotdict
 from dspy.signatures.field import OutputField
+from dspy.utils.optional_imports import import_numpy
 
 
 class DummyLM(BaseLM):
@@ -195,10 +196,7 @@ class DummyVectorizer:
         return h % self.max_length
 
     def __call__(self, texts: list[str]):
-        try:
-            import numpy as np
-        except ImportError:
-            raise ImportError("numpy is required for DummyVectorizer. Install it with: pip install dspy[numpy]")
+        np = import_numpy("DummyVectorizer")
 
         vecs = []
         for text in texts:

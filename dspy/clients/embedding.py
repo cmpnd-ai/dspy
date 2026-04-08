@@ -1,13 +1,9 @@
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 import litellm
 
 from dspy.clients.cache import request_cache
-
-if TYPE_CHECKING:
-    import numpy as np
+from dspy.utils.optional_imports import import_numpy
 
 
 class Embedder:
@@ -108,10 +104,7 @@ class Embedder:
         return input_batches, caching, merged_kwargs, is_single_input
 
     def _postprocess(self, embeddings_list, is_single_input):
-        try:
-            import numpy as np
-        except ImportError:
-            raise ImportError("numpy is required for embeddings. Install it with: pip install dspy[numpy]")
+        np = import_numpy("embeddings")
 
         embeddings = np.array(embeddings_list, dtype=np.float32)
         if is_single_input:
@@ -119,7 +112,7 @@ class Embedder:
         else:
             return np.array(embeddings, dtype=np.float32)
 
-    def __call__(self, inputs: str | list[str], batch_size: int | None = None, caching: bool | None = None, **kwargs: dict[str, Any]) -> np.ndarray:
+    def __call__(self, inputs: str | list[str], batch_size: int | None = None, caching: bool | None = None, **kwargs: dict[str, Any]):
         """Compute embeddings for the given inputs.
 
         Args:

@@ -7,6 +7,7 @@ from typing import Any, Callable
 import dspy
 from dspy.teleprompt.simba_utils import append_a_demo, append_a_rule, prepare_models_for_resampling, wrap_program
 from dspy.teleprompt.teleprompt import Teleprompter
+from dspy.utils.optional_imports import import_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +104,7 @@ class SIMBA(Teleprompter):
 
         # Initialize RNG
         rng = random.Random(seed)
-        try:
-            import numpy as np
-        except ImportError:
-            raise ImportError("numpy is required for SIMBA. Install it with: pip install dspy[numpy]")
+        np = import_numpy("SIMBA")
 
         rng_np = np.random.default_rng(seed)
 

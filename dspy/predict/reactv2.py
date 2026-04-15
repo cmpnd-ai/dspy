@@ -68,6 +68,7 @@ class ReActV2(Module):
     def forward(self, **input_args):
         history = input_args.pop("history", dspy.History(messages=[]))
         max_iters = input_args.pop("max_iters", self.max_iters)
+        tool_list = list(self.tools.values())
 
         if not history.has_open_episode():
             history.append_request(input_args)
@@ -75,7 +76,7 @@ class ReActV2(Module):
         for idx in range(max_iters):
             history.compact_if_needed()
             try:
-                pred: dspy.Prediction = self.react(history=history, **input_args)
+                pred: dspy.Prediction = self.react(history=history, tools=tool_list, **input_args)
             except (AdapterParseError, ValueError) as err:
                 logger.warning(f"Agent iteration {idx} failed: {_fmt_exc(err)}")
                 break
@@ -112,7 +113,7 @@ class ReActV2(Module):
 
     def _forced_submit(self, history, input_args):
         try:
-            pred = self.react(history=history, **input_args)
+            pred = self.react(history=history, tools=list(self.tools.values()), **input_args)
         except (AdapterParseError, ValueError):
             return dspy.Prediction(history=history)
 

@@ -1,0 +1,8 @@
+commands:
+  test: uv run pytest tests/predict/test_reactv2.py -x -v
+  test_adapters: uv run pytest tests/adapters/test_chat_adapter.py tests/adapters/test_json_adapter.py -x -v
+  typecheck: uv run python -c "import dspy; print('import OK')"
+  lint: echo "no lint configured"
+  loc_check: git diff 09eba10a --stat -- '*.py' | tail -1
+
+services: {}

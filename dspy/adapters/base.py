@@ -93,6 +93,7 @@ class Adapter:
                 signature_for_native_function_calling = signature_for_native_function_calling.delete(
                     tool_call_input_field_name
                 )
+                signature_for_native_function_calling.__dspy_native_fc__ = True
 
                 return signature_for_native_function_calling
 

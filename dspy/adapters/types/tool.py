@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import re
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
 import pydantic
@@ -15,6 +16,12 @@ if TYPE_CHECKING:
     from langchain.tools import BaseTool
 
 _TYPE_MAPPING = {"string": str, "integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
+_TOOL_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match OpenAI's ^[a-zA-Z0-9_-]+$ pattern."""
+    return _TOOL_NAME_RE.sub("_", name)
 
 
 class Tool(Type):
@@ -110,7 +117,7 @@ class Tool(Type):
             if arg_desc and k in arg_desc:
                 args[k]["description"] = arg_desc[k]
 
-        self.name = self.name or name
+        self.name = _sanitize_tool_name(self.name or name)
         self.desc = self.desc or desc
         self.args = self.args if self.args is not None else args
         self.arg_types = self.arg_types if self.arg_types is not None else arg_types
@@ -356,30 +363,40 @@ class ToolCalls(Type):
             "tool_calls": [tool_call.format() for tool_call in self.tool_calls],
         }
 
+    @staticmethod
+    def _normalize_openai_tool_call(item: dict) -> dict:
+        """Normalize {type:'function', function:{name, arguments}} → {name, args}."""
+        if "type" in item and item["type"] == "function" and "function" in item:
+            fn = item["function"]
+            return {"name": fn["name"], "args": fn.get("arguments", {})}
+        return item
+
     @pydantic.model_validator(mode="before")
     @classmethod
     def validate_input(cls, data: Any):
         if isinstance(data, cls):
             return data
 
-        # Handle case where data is a list of dicts with "name" and "args" keys
-        if isinstance(data, list) and all(
-            isinstance(item, dict) and "name" in item and "args" in item for item in data
-        ):
-            return {"tool_calls": [cls.ToolCall(**item) for item in data]}
+        # Handle case where data is a list of dicts
+        if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+            normalized = [cls._normalize_openai_tool_call(item) for item in data]
+            if all("name" in item and "args" in item for item in normalized):
+                return {"tool_calls": [cls.ToolCall(**item) for item in normalized]}
         # Handle case where data is a dict
         elif isinstance(data, dict):
             if "tool_calls" in data:
-                # Handle case where data is a dict with "tool_calls" key
                 tool_calls_data = data["tool_calls"]
                 if isinstance(tool_calls_data, list):
+                    normalized = [
+                        cls._normalize_openai_tool_call(item) if isinstance(item, dict) else item
+                        for item in tool_calls_data
+                    ]
                     return {
                         "tool_calls": [
-                            cls.ToolCall(**item) if isinstance(item, dict) else item for item in tool_calls_data
+                            cls.ToolCall(**item) if isinstance(item, dict) else item for item in normalized
                         ]
                     }
             elif "name" in data and "args" in data:
-                # Handle case where data is a dict with "name" and "args" keys
                 return {"tool_calls": [cls.ToolCall(**data)]}
 
         raise ValueError(f"Received invalid value for `dspy.ToolCalls`: {data}")

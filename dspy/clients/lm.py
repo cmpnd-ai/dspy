@@ -119,9 +119,13 @@ class LM(BaseLM):
             return self.model.split("/", 1)[0]
         return "openai"
 
+    _KNOWN_FC_PROVIDERS = frozenset({"openai", "anthropic", "google", "cohere", "mistral", "groq"})
+
     @property
     def supports_function_calling(self) -> bool:
-        return litellm.supports_function_calling(model=self.model)
+        if litellm.supports_function_calling(model=self.model):
+            return True
+        return self._provider_name in self._KNOWN_FC_PROVIDERS
 
     @property
     def supports_reasoning(self) -> bool:

@@ -1,5 +1,6 @@
 import dspy
 from dspy.adapters.types.history import History, truncate_oldest_actions
+from dspy.adapters.types.tool import Tool, ToolCalls, _sanitize_tool_name
 from dspy.predict.reactv2 import ReActV2, _build_submit_tool
 from dspy.utils.dummies import DummyLM
 
@@ -195,3 +196,86 @@ def test_compaction_fires_in_forward_loop():
     history = dspy.History(messages=[], compact_fn=track_compact)
     react(question="1+2", history=history)
     assert len(calls) == 2  # called each iteration
+
+
+# --- Native FC + format tests (VAL-FMT-*) ---
+
+def test_native_fc_prompt_format():
+    """VAL-FMT-002: Native path has reasoning guidance, no [[ ## completed ## ]]."""
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    sig = (
+        dspy.Signature({}, "Do the task.")
+        .append("question", dspy.InputField(), type_=str)
+        .append("tools", dspy.InputField(), type_=list[dspy.Tool])
+        .append("next_thought", dspy.OutputField(), type_=str)
+        .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
+    )
+    # Simulate _call_preprocess: remove tool_calls and tools, tag native FC
+    processed = sig.delete("tool_calls").delete("tools")
+    processed.__dspy_native_fc__ = True
+    messages = adapter.format(processed, [], {"question": "hi"})
+    system_msg = messages[0]["content"]
+    assert "[[ ## completed ## ]]" not in system_msg
+    assert "step-by-step" in system_msg.lower() or "reasoning" in system_msg.lower() or "tool" in system_msg.lower()
+
+
+def test_non_native_prompt_format_unchanged():
+    """VAL-FMT-001: Non-native path still has structured markers."""
+    adapter = dspy.ChatAdapter()
+    sig = (
+        dspy.Signature({}, "Do the task.")
+        .append("question", dspy.InputField(), type_=str)
+        .append("next_thought", dspy.OutputField(), type_=str)
+        .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
+    )
+    messages = adapter.format(sig, [], {"question": "hi"})
+    system_msg = messages[0]["content"]
+    assert "[[ ## completed ## ]]" in system_msg
+    assert "[[ ## next_thought ## ]]" in system_msg
+
+
+def test_toolcalls_normalizes_openai_format():
+    """VAL-FMT-004: ToolCalls normalizes OpenAI {type:'function', function:{name, arguments}} format."""
+    tc = ToolCalls(tool_calls=[
+        {"type": "function", "function": {"name": "search", "arguments": {"query": "hello"}}},
+        {"type": "function", "function": {"name": "submit", "arguments": {"answer": "42"}}},
+    ])
+    assert len(tc.tool_calls) == 2
+    assert tc.tool_calls[0].name == "search"
+    assert tc.tool_calls[0].args == {"query": "hello"}
+    assert tc.tool_calls[1].name == "submit"
+
+
+def test_tool_name_sanitization():
+    """Tool names sanitized to match OpenAI ^[a-zA-Z0-9_-]+$ pattern."""
+    assert _sanitize_tool_name("my.tool") == "my_tool"
+    assert _sanitize_tool_name("tool name!") == "tool_name_"
+    assert _sanitize_tool_name("valid-name_123") == "valid-name_123"
+    # Test via Tool constructor
+    def my_weird_fn(x: str) -> str:
+        """A tool."""
+        return x
+    tool = Tool(my_weird_fn, name="weird.tool.name")
+    assert tool.name == "weird_tool_name"
+
+
+def test_supports_fc_provider_fallback():
+    """gpt-5-nano reports supports_fc=True via provider fallback."""
+    lm = dspy.LM("openai/gpt-5-nano", cache=False)
+    assert lm.supports_function_calling is True
+
+
+def test_gepa_compile_with_reactv2():
+    """VAL-OPTIM-001: GEPA.compile() on a ReActV2 module completes without error."""
+    from dspy.teleprompt.gepa.gepa import GEPA
+    lm = DummyLM([
+        {"next_thought": "Do it.", "tool_calls": [{"name": "submit", "args": {"answer": "3"}}]},
+    ] * 20)
+    dspy.configure(lm=lm)
+    react = ReActV2("question -> answer", tools=[_make_add_tool()])
+    metric = lambda ex, pred, *a, **kw: float(getattr(pred, "answer", None) == ex.answer) if hasattr(pred, "answer") else 0.0
+    trainset = [dspy.Example(question="1+2", answer="3").with_inputs("question")]
+    gepa = GEPA(metric=metric, max_metric_calls=2, reflection_lm=lm)
+    result = gepa.compile(react, trainset=trainset)
+    assert isinstance(result, ReActV2)
+    assert "add" in result.react.signature.instructions

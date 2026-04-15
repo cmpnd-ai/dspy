@@ -120,6 +120,9 @@ class ChatAdapter(Adapter):
         `[[ ## field_name ## ]]`. An arbitrary field `completed` ([[ ## completed ## ]]) is added to the end of the
         output fields section to indicate the end of the output fields.
         """
+        if getattr(signature, "__dspy_native_fc__", False):
+            return self._format_native_fc_structure(signature)
+
         parts = []
         parts.append("All interactions will be structured in the following way, with the appropriate values filled in.")
 
@@ -135,6 +138,14 @@ class ChatAdapter(Adapter):
         parts.append(format_signature_fields_for_instructions(signature.output_fields))
         parts.append("[[ ## completed ## ]]\n")
         return "\n\n".join(parts).strip()
+
+    def _format_native_fc_structure(self, signature: type[Signature]) -> str:
+        parts = ["You will receive inputs and must respond with your reasoning in plain text, then call the appropriate tool."]
+        for name, field in signature.output_fields.items():
+            desc = get_field_description_string({name: field})
+            parts.append(f"Your response text should contain: {desc.strip()}")
+        parts.append("Do NOT use any special markers or delimiters. Think step-by-step, then call the appropriate tool via the API.")
+        return "\n".join(parts)
 
     def format_task_description(self, signature: type[Signature]) -> str:
         instructions = textwrap.dedent(signature.instructions)
@@ -164,23 +175,9 @@ class ChatAdapter(Adapter):
         messages.append(suffix)
         return "\n\n".join(messages).strip()
 
-    def user_message_output_requirements(self, signature: type[Signature]) -> str:
-        """Returns a simplified format reminder for the language model.
-
-        In chat-based interactions, language models may lose track of the required output format
-        as the conversation context grows longer. This method generates a concise reminder of
-        the expected output structure that can be included in user messages.
-
-        Args:
-            signature (Type[Signature]): The DSPy signature defining the expected input/output fields.
-
-        Returns:
-            str: A simplified description of the required output format.
-
-        Note:
-            This is a more lightweight version of `format_field_structure` specifically designed
-            for inline reminders within chat messages.
-        """
+    def user_message_output_requirements(self, signature: type[Signature]) -> str | None:
+        if getattr(signature, "__dspy_native_fc__", False):
+            return "Think step-by-step about what to do next, then call the appropriate tool."
 
         def type_info(v):
             if v.annotation is not str:
@@ -209,6 +206,9 @@ class ChatAdapter(Adapter):
         return assistant_message_content
 
     def parse(self, signature: type[Signature], completion: str) -> dict[str, Any]:
+        if getattr(signature, "__dspy_native_fc__", False):
+            return self._parse_native_fc(signature, completion)
+
         sections = [(None, [])]
 
         for line in completion.splitlines():
@@ -244,6 +244,18 @@ class ChatAdapter(Adapter):
             )
 
         return fields
+
+    def _parse_native_fc(self, signature: type[Signature], completion: str) -> dict[str, Any]:
+        """Parse native FC response: assign free-form text to the single str output field."""
+        str_fields = [k for k, v in signature.output_fields.items() if v.annotation is str]
+        if len(str_fields) == 1:
+            return {str_fields[0]: completion.strip()}
+        raise AdapterParseError(
+            adapter_name="ChatAdapter",
+            signature=signature,
+            lm_response=completion,
+            message="Native FC response with multiple output fields cannot be parsed without markers.",
+        )
 
     def format_field_with_value(self, fields_with_values: dict[FieldInfoWithName, Any]) -> str:
         """

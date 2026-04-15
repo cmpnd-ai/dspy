@@ -69,6 +69,9 @@ class ReActV2(Module):
         history = input_args.pop("history", dspy.History(messages=[]))
         max_iters = input_args.pop("max_iters", self.max_iters)
 
+        if not history.has_open_episode():
+            history.append_request(input_args)
+
         for idx in range(max_iters):
             history.compact_if_needed()
             try:
@@ -93,14 +96,15 @@ class ReActV2(Module):
                 except Exception as err:
                     observations.append((f"Execution error in {tool_call.name}: {_fmt_exc(err)}", True))
 
-            history.add_message(
+            history.append_action(
                 thought=pred.next_thought,
                 tool_calls=pred.tool_calls,
-                tool_observations=observations,
+                observations=observations,
             )
 
             for tool_call, (result, did_err) in zip(pred.tool_calls.tool_calls, observations):
                 if tool_call.name == "submit" and not did_err:
+                    history.append_final(result)
                     return dspy.Prediction(history=history, **result)
 
         # Forced submit: ask the model to submit one more time

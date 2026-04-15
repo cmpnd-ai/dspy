@@ -4,59 +4,7 @@ import pydantic
 
 
 class History(pydantic.BaseModel):
-    """Class representing the conversation history.
-
-    The conversation history is a list of messages, each message entity should have keys from the associated signature.
-    For example, if you have the following signature:
-
-    ```
-    class MySignature(dspy.Signature):
-        question: str = dspy.InputField()
-        history: dspy.History = dspy.InputField()
-        answer: str = dspy.OutputField()
-    ```
-
-    Then the history should be a list of dictionaries with keys "question" and "answer".
-
-    Examples:
-        ```
-        import dspy
-
-        dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
-
-        class MySignature(dspy.Signature):
-            question: str = dspy.InputField()
-            history: dspy.History = dspy.InputField()
-            answer: str = dspy.OutputField()
-
-        history = dspy.History(
-            messages=[
-                {"question": "What is the capital of France?", "answer": "Paris"},
-                {"question": "What is the capital of Germany?", "answer": "Berlin"},
-            ]
-        )
-
-        predict = dspy.Predict(MySignature)
-        outputs = predict(question="What is the capital of France?", history=history)
-        ```
-
-    Example of capturing the conversation history:
-        ```
-        import dspy
-
-        dspy.configure(lm=dspy.LM("openai/gpt-4o-mini"))
-
-        class MySignature(dspy.Signature):
-            question: str = dspy.InputField()
-            history: dspy.History = dspy.InputField()
-            answer: str = dspy.OutputField()
-
-        predict = dspy.Predict(MySignature)
-        outputs = predict(question="What is the capital of France?")
-        history = dspy.History(messages=[{"question": "What is the capital of France?", **outputs}])
-        outputs_with_history = predict(question="Are you sure?", history=history)
-        ```
-    """
+    """Conversation history with semantic events (REQUEST/ACTION/FINAL) and pluggable compaction."""
 
     messages: list[dict[str, Any]]
 
@@ -74,10 +22,42 @@ class History(pydantic.BaseModel):
         if fn is not None:
             fn(self)
 
-    def add_message(self, *, thought: str, tool_calls: Any, tool_observations: list[tuple[Any, bool]]):
+    def append_request(self, inputs: dict[str, Any]) -> None:
+        self.messages.append({"__dspy_history_event__": "REQUEST", **inputs})
+
+    def append_action(self, *, thought: str, tool_calls: Any, observations: list[tuple[Any, bool]]) -> None:
         self.messages.append({
             "__dspy_history_event__": "ACTION",
             "thought": thought,
             "tool_calls": tool_calls,
-            "observations": tool_observations,
+            "observations": observations,
         })
+
+    def append_final(self, outputs: dict[str, Any]) -> None:
+        self.messages.append({"__dspy_history_event__": "FINAL", **outputs})
+
+    def has_open_episode(self) -> bool:
+        last_boundary = None
+        for m in self.messages:
+            evt = m.get("__dspy_history_event__")
+            if evt in ("REQUEST", "FINAL"):
+                last_boundary = evt
+        return last_boundary == "REQUEST"
+
+
+def truncate_oldest_actions(history: History, *, max_tokens: int = 200_000, keep_n: int = 3) -> None:
+    est = len(str(history.messages)) // 4
+    if est <= max_tokens:
+        return
+    actions = [(i, m) for i, m in enumerate(history.messages) if m.get("__dspy_history_event__") == "ACTION"]
+    to_drop = len(actions) - keep_n
+    if to_drop <= 0:
+        return
+    drop_indices = {i for i, _ in actions[:to_drop]}
+    history.messages[:] = [m for i, m in enumerate(history.messages) if i not in drop_indices]
+
+
+def make_truncate_oldest_actions(max_tokens: int = 200_000, keep_n: int = 3) -> Callable[[History], None]:
+    def _compact(history: History) -> None:
+        truncate_oldest_actions(history, max_tokens=max_tokens, keep_n=keep_n)
+    return _compact

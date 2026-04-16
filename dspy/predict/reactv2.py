@@ -46,7 +46,7 @@ class ReActV2(Module):
 
         instr.extend([
             f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
-            "Each turn: think, then call a tool. After each tool call you receive an observation.",
+            "Each turn: think, then call one or more tools. After each tool call you receive an observation.",
             "When you have enough information, call `submit` with the output fields.\n",
             "Available tools:\n",
         ])
@@ -77,7 +77,7 @@ class ReActV2(Module):
 
         instr.extend([
             f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
-            "Each turn: think, then call a tool. After each tool call you receive an observation.",
+            "Each turn: think, then call one or more tools. After each tool call you receive an observation.",
             "When you have enough information, call `submit` with the output fields.\n",
             "Available tools:\n",
         ])

@@ -78,9 +78,10 @@ class ChatAdapter(Adapter):
                 isinstance(e, ContextWindowExceededError)
                 or isinstance(self, JSONAdapter)
                 or not self.use_json_adapter_fallback
+                or "tools" in lm_kwargs  # Don't fall back to JSON mode when native FC is active
             ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
+                # On context window exceeded error, already using JSONAdapter, use_json_adapter_fallback is False,
+                # or native function calling is active — don't retry with a different adapter.
                 raise e
             return JSONAdapter()(lm, lm_kwargs, signature, demos, inputs)
 
@@ -102,9 +103,10 @@ class ChatAdapter(Adapter):
                 isinstance(e, ContextWindowExceededError)
                 or isinstance(self, JSONAdapter)
                 or not self.use_json_adapter_fallback
+                or "tools" in lm_kwargs  # Don't fall back to JSON mode when native FC is active
             ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
+                # On context window exceeded error, already using JSONAdapter, use_json_adapter_fallback is False,
+                # or native function calling is active — don't retry with a different adapter.
                 raise e
             return await JSONAdapter().acall(lm, lm_kwargs, signature, demos, inputs)
 

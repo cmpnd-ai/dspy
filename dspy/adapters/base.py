@@ -3,7 +3,7 @@ from typing import Any, get_origin
 
 import json_repair
 
-from dspy.adapters.types import History, Type
+from dspy.adapters.types import ActionEvent, FinalEvent, History, InputEvent, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import Tool, ToolCalls
@@ -153,6 +153,7 @@ class Adapter:
                     {
                         "name": v["function"]["name"],
                         "args": json_repair.loads(v["function"]["arguments"]),
+                        **({"id": v["id"]} if "id" in v else {}),
                     }
                     for v in tool_calls
                 ]
@@ -273,6 +274,8 @@ class Adapter:
         if history_field_name:
             # In order to format the conversation history, we need to remove the history field from the signature.
             signature_without_history = signature.delete(history_field_name)
+            if getattr(signature, "__dspy_native_fc__", False):
+                signature_without_history.__dspy_native_fc__ = True
             conversation_history = self.format_conversation_history(
                 signature_without_history,
                 history_field_name,
@@ -503,18 +506,60 @@ class Adapter:
 
         messages = []
         for message in conversation_history:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": self.format_user_message_content(signature, message),
-                }
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.format_assistant_message_content(signature, message),
-                }
-            )
+            if isinstance(message, InputEvent):
+                content = self.format_user_message_content(signature, message.inputs)
+                if content.strip():
+                    messages.append({"role": "user", "content": content})
+            elif isinstance(message, ActionEvent):
+                is_native_fc = getattr(signature, "__dspy_native_fc__", False)
+                tc_obj = message.tool_calls
+                obs = message.observations
+
+                if is_native_fc and tc_obj and hasattr(tc_obj, "tool_calls"):
+                    import json as _json
+                    tc_list = []
+                    for tc in tc_obj.tool_calls:
+                        fmt = tc.format()
+                        if isinstance(fmt.get("function", {}).get("arguments"), dict):
+                            fmt["function"]["arguments"] = _json.dumps(fmt["function"]["arguments"])
+                        tc_list.append(fmt)
+                    asst_msg = {"role": "assistant", "tool_calls": tc_list}
+                    thought = message.thought
+                    if thought:
+                        asst_msg["content"] = str(thought)
+                    messages.append(asst_msg)
+                    for tc, (result, is_error) in zip(tc_obj.tool_calls, obs):
+                        tool_call_id = tc.id or f"call_{id(tc)}"
+                        content = str(result) if not isinstance(result, list) else "\n".join(str(r) for r in result)
+                        messages.append({"role": "tool", "content": content, "tool_call_id": tool_call_id})
+                else:
+                    action_fields = {"next_thought": message.thought, "tool_calls": message.tool_calls}
+                    asst_data = {k: action_fields[k] for k in signature.output_fields if k in action_fields and action_fields[k] is not None}
+                    asst_content = self.format_assistant_message_content(signature, asst_data)
+                    messages.append({"role": "assistant", "content": asst_content})
+                    if obs:
+                        parts = []
+                        for result, is_error in obs:
+                            label = "Error" if is_error else "Observation"
+                            if isinstance(result, list):
+                                parts.append(f"{label}:\n" + "\n".join(str(item) for item in result))
+                            else:
+                                parts.append(f"{label}: {result}")
+                        messages.append({"role": "user", "content": "\n\n".join(parts)})
+            elif isinstance(message, FinalEvent):
+                pass
+            else:
+                # Backward compat fallback for plain dicts
+                messages.append({"role": "user", "content": self.format_user_message_content(signature, message)})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": self.format_assistant_message_content(
+                            signature, message,
+                            missing_field_message="Not supplied for this conversation history message. ",
+                        ),
+                    }
+                )
 
         # Remove the history field from the inputs
         del inputs[history_field_name]

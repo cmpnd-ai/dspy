@@ -1,5 +1,5 @@
 import dspy
-from dspy.adapters.types.history import History, truncate_oldest_actions
+from dspy.adapters.types.history import ActionEvent, FinalEvent, History, InputEvent, truncate_oldest_actions
 from dspy.adapters.types.tool import Tool, ToolCalls, _sanitize_tool_name
 from dspy.predict.reactv2 import ReActV2, _build_submit_tool
 from dspy.utils.dummies import DummyLM
@@ -41,10 +41,12 @@ def test_basic_forward_with_submit():
     result = react(question="What is 1+2?")
     assert result.answer == "3"
     assert hasattr(result, "history")
-    # REQUEST + 2 ACTIONs + FINAL = 4 events
+    # input + 2 actions + final = 4 events
     assert len(result.history.messages) == 4
-    assert result.history.messages[0]["__dspy_history_event__"] == "REQUEST"
-    assert result.history.messages[-1]["__dspy_history_event__"] == "FINAL"
+    assert isinstance(result.history.messages[0], InputEvent)
+    assert result.history.messages[0].event == "input"
+    assert isinstance(result.history.messages[-1], FinalEvent)
+    assert result.history.messages[-1].event == "final"
 
 
 def test_max_iters_forced_submit():
@@ -97,8 +99,8 @@ def test_unknown_tool_returns_error_observation():
     react = ReActV2("question -> answer", tools=[_make_add_tool()])
     result = react(question="test")
     assert result.answer == "ok"
-    actions = [m for m in result.history.messages if m.get("__dspy_history_event__") == "ACTION"]
-    assert any("Unknown tool" in str(m.get("observations", "")) for m in actions)
+    actions = [m for m in result.history.messages if isinstance(m, ActionEvent)]
+    assert any("Unknown tool" in str(m.observations) for m in actions)
 
 
 def test_tool_execution_error_caught():
@@ -115,8 +117,8 @@ def test_tool_execution_error_caught():
     react = ReActV2("question -> answer", tools=[failing_tool])
     result = react(question="test")
     assert result.answer == "recovered"
-    actions = [m for m in result.history.messages if m.get("__dspy_history_event__") == "ACTION"]
-    assert any("Execution error" in str(m.get("observations", "")) for m in actions)
+    actions = [m for m in result.history.messages if isinstance(m, ActionEvent)]
+    assert any("Execution error" in str(m.observations) for m in actions)
 
 
 def test_reactv2_exported_from_dspy():
@@ -127,22 +129,27 @@ def test_reactv2_exported_from_dspy():
 
 # --- History semantic events tests (VAL-HIST-*) ---
 
-def test_history_events_request_action_final():
-    """VAL-HIST-001: add_message creates REQUEST/ACTION/FINAL events."""
+def test_history_events_input_action_final():
+    """VAL-HIST-001: append methods create input/action/final events."""
     h = History(messages=[])
-    h.append_request({"question": "hi"})
+    h.append_input({"question": "hi"})
     h.append_action(thought="thinking", tool_calls=None, observations=[("ok", False)])
     h.append_final({"answer": "bye"})
-    assert [m["__dspy_history_event__"] for m in h.messages] == ["REQUEST", "ACTION", "FINAL"]
-    assert h.messages[0]["question"] == "hi"
-    assert h.messages[2]["answer"] == "bye"
+    assert [m.event for m in h.messages] == ["input", "action", "final"]
+    assert isinstance(h.messages[0], InputEvent)
+    assert h.messages[0].inputs["question"] == "hi"
+    assert isinstance(h.messages[1], ActionEvent)
+    assert h.messages[1].thought == "thinking"
+    assert h.messages[1].observations == [("ok", False)]
+    assert isinstance(h.messages[2], FinalEvent)
+    assert h.messages[2].outputs["answer"] == "bye"
 
 
 def test_has_open_episode():
     """VAL-HIST-002: has_open_episode tracks state correctly."""
     h = History(messages=[])
     assert not h.has_open_episode()
-    h.append_request({"q": "1"})
+    h.append_input({"q": "1"})
     assert h.has_open_episode()
     h.append_action(thought="t", tool_calls=None, observations=[])
     assert h.has_open_episode()
@@ -163,23 +170,23 @@ def test_multi_turn_history_reuse():
     r1 = react(question="1+2")
     r2 = react(question="3+4", history=r1.history)
     assert r2.answer == "7"
-    requests = [m for m in r2.history.messages if m.get("__dspy_history_event__") == "REQUEST"]
+    requests = [m for m in r2.history.messages if isinstance(m, InputEvent)]
     assert len(requests) == 2
 
 
 # --- Compaction tests (VAL-COMPACT-*) ---
 
 def test_truncate_oldest_actions():
-    """VAL-COMPACT-001: truncation preserves REQUEST + most recent N actions."""
+    """VAL-COMPACT-001: truncation preserves input event + most recent N actions."""
     h = History(messages=[
-        {"__dspy_history_event__": "REQUEST", "q": "x"},
-        *[{"__dspy_history_event__": "ACTION", "step": i} for i in range(10)],
+        InputEvent(inputs={"q": "x"}),
+        *[ActionEvent(thought=str(i)) for i in range(10)],
     ])
     truncate_oldest_actions(h, max_tokens=0, keep_n=3)
-    actions = [m for m in h.messages if m.get("__dspy_history_event__") == "ACTION"]
+    actions = [m for m in h.messages if isinstance(m, ActionEvent)]
     assert len(actions) == 3
-    assert [a["step"] for a in actions] == [7, 8, 9]
-    assert h.messages[0]["__dspy_history_event__"] == "REQUEST"
+    assert [a.thought for a in actions] == ["7", "8", "9"]
+    assert isinstance(h.messages[0], InputEvent)
 
 
 def test_compaction_fires_in_forward_loop():

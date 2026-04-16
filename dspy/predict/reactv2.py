@@ -71,7 +71,7 @@ class ReActV2(Module):
         tool_list = list(self.tools.values())
 
         if not history.has_open_episode():
-            history.append_request(input_args)
+            history.append_input(input_args)
 
         for idx in range(max_iters):
             history.compact_if_needed()

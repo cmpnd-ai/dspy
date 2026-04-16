@@ -1,12 +1,32 @@
-from typing import Any, Callable
+from typing import Annotated, Any, Callable, Literal
 
 import pydantic
 
 
-class History(pydantic.BaseModel):
-    """Conversation history with semantic events (REQUEST/ACTION/FINAL) and pluggable compaction."""
+class InputEvent(pydantic.BaseModel):
+    event: Literal["input"] = "input"
+    inputs: dict[str, Any]
 
-    messages: list[dict[str, Any]]
+
+class ActionEvent(pydantic.BaseModel):
+    event: Literal["action"] = "action"
+    thought: str | None = None
+    tool_calls: Any = None  # ToolCalls type, use Any to avoid circular import
+    observations: list[tuple[Any, bool]] = []
+
+
+class FinalEvent(pydantic.BaseModel):
+    event: Literal["final"] = "final"
+    outputs: dict[str, Any]
+
+
+HistoryEvent = Annotated[InputEvent | ActionEvent | FinalEvent, pydantic.Field(discriminator="event")]
+
+
+class History(pydantic.BaseModel):
+    """Conversation history with typed semantic events and pluggable compaction."""
+
+    messages: list[HistoryEvent]
 
     model_config = pydantic.ConfigDict(
         str_strip_whitespace=True,
@@ -22,34 +42,30 @@ class History(pydantic.BaseModel):
         if fn is not None:
             fn(self)
 
-    def append_request(self, inputs: dict[str, Any]) -> None:
-        self.messages.append({"__dspy_history_event__": "REQUEST", **inputs})
+    def append_input(self, inputs: dict[str, Any]) -> None:
+        self.messages.append(InputEvent(inputs=inputs))
 
     def append_action(self, *, thought: str, tool_calls: Any, observations: list[tuple[Any, bool]]) -> None:
-        self.messages.append({
-            "__dspy_history_event__": "ACTION",
-            "thought": thought,
-            "tool_calls": tool_calls,
-            "observations": observations,
-        })
+        self.messages.append(ActionEvent(thought=thought, tool_calls=tool_calls, observations=observations))
 
     def append_final(self, outputs: dict[str, Any]) -> None:
-        self.messages.append({"__dspy_history_event__": "FINAL", **outputs})
+        self.messages.append(FinalEvent(outputs=outputs))
 
     def has_open_episode(self) -> bool:
         last_boundary = None
         for m in self.messages:
-            evt = m.get("__dspy_history_event__")
-            if evt in ("REQUEST", "FINAL"):
-                last_boundary = evt
-        return last_boundary == "REQUEST"
+            if isinstance(m, InputEvent):
+                last_boundary = "input"
+            elif isinstance(m, FinalEvent):
+                last_boundary = "final"
+        return last_boundary == "input"
 
 
 def truncate_oldest_actions(history: History, *, max_tokens: int = 200_000, keep_n: int = 3) -> None:
     est = len(str(history.messages)) // 4
     if est <= max_tokens:
         return
-    actions = [(i, m) for i, m in enumerate(history.messages) if m.get("__dspy_history_event__") == "ACTION"]
+    actions = [(i, m) for i, m in enumerate(history.messages) if isinstance(m, ActionEvent)]
     to_drop = len(actions) - keep_n
     if to_drop <= 0:
         return

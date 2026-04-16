@@ -213,16 +213,25 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
     ) -> dict[str, list[ReflectiveExample]]:
         program = self.build_program(candidate)
 
+        # Build predictor lookup once
+        predictors = {name: m for name, m in program.named_predictors()}
+
         ret_d: dict[str, list[ReflectiveExample]] = {}
 
         for pred_name in components_to_update:
-            # Find the predictor object
-            module = None
-            for name, m in program.named_predictors():
-                if name == pred_name:
-                    module = m
-                    break
-            assert module is not None, f"Predictor not found: {pred_name}"
+            is_tool_component = False
+
+            if pred_name in predictors:
+                module = predictors[pred_name]
+            else:
+                # This is a tool component (e.g. tools['add']).
+                # Use the first predictor's traces — tool descriptions affect how
+                # the parent predictor behaves, so its traces carry the relevant signal.
+                is_tool_component = True
+                module = next(iter(predictors.values()), None)
+                if module is None:
+                    logger.warning(f"  No predictor found to use as parent for tool component {pred_name}")
+                    continue
 
             # Create reflective examples from traces
             items: list[ReflectiveExample] = []

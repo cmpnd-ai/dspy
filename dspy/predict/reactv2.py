@@ -65,6 +65,28 @@ class ReActV2(Module):
         self.tools = tools
         self.react = dspy.Predict(react_signature)
 
+    def _rebuild_instructions(self):
+        """Regenerate the instruction string from current tool descs.
+
+        Called after GEPA updates tool.desc so that both text-mode prompts
+        and native FC schemas reflect the optimized descriptions.
+        """
+        inputs = ", ".join([f"`{k}`" for k in self.signature.input_fields.keys()])
+        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
+        instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
+
+        instr.extend([
+            f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
+            "Each turn: think, then call a tool. After each tool call you receive an observation.",
+            "When you have enough information, call `submit` with the output fields.\n",
+            "Available tools:\n",
+        ])
+
+        for idx, tool in enumerate(self.tools.values()):
+            instr.append(f"({idx + 1}) {tool}")
+
+        self.react.signature = self.react.signature.with_instructions("\n".join(instr))
+
     def forward(self, **input_args):
         history = input_args.pop("history", dspy.History(messages=[]))
         max_iters = input_args.pop("max_iters", self.max_iters)

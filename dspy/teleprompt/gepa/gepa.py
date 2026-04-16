@@ -563,6 +563,20 @@ class GEPA(Teleprompter):
         # Build the seed candidate: map each predictor name to its current instruction
         seed_candidate = {name: pred.signature.instructions for name, pred in student.named_predictors()}
 
+        # Also discover tools and add their descs as optimizable components
+        from dspy.adapters.types.tool import Tool as DspyTool
+
+        for name, param in student.named_parameters():
+            if isinstance(param, DspyTool) and param.name != "submit":
+                seed_candidate[name] = param.desc or ""
+
+        # Add feedback entries for tool components, reusing the parent predictor's feedback
+        for name, param in student.named_parameters():
+            if isinstance(param, DspyTool) and param.name != "submit":
+                parent_pred_name = next((pname for pname, _ in student.named_predictors()), None)
+                if parent_pred_name and parent_pred_name in feedback_map:
+                    feedback_map[name] = feedback_map[parent_pred_name]
+
         gepa_result: GEPAResult = optimize(
             seed_candidate=seed_candidate,
             trainset=trainset,

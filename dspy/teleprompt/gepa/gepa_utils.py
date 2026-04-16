@@ -134,11 +134,24 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         return results
 
     def build_program(self, candidate: dict[str, str]):
+        from dspy.adapters.types.tool import Tool as DspyTool
+
         new_prog = self.student.deepcopy()
 
         for name, pred in new_prog.named_predictors():
             if name in candidate:
                 pred.signature = pred.signature.with_instructions(candidate[name])
+
+        # Apply optimized tool descriptions
+        for name, param in new_prog.named_parameters():
+            if isinstance(param, DspyTool) and name in candidate:
+                param.desc = candidate[name]
+
+        # Rebuild instruction strings for any module that has tools
+        # This ensures the text-mode prompt reflects the optimized tool descs
+        for mod_name, mod in new_prog.named_sub_modules():
+            if hasattr(mod, "tools") and hasattr(mod, "_rebuild_instructions"):
+                mod._rebuild_instructions()
 
         return new_prog
 

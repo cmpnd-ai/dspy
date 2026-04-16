@@ -9,6 +9,7 @@ from pydantic import BaseModel, TypeAdapter, create_model
 
 from dspy.adapters.types.base_type import Type
 from dspy.dsp.utils.settings import settings
+from dspy.predict.parameter import Parameter
 from dspy.utils.callback import with_callbacks
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ def _sanitize_tool_name(name: str) -> str:
     return _TOOL_NAME_RE.sub("_", name)
 
 
-class Tool(Type):
+class Tool(Type, Parameter):
     """Tool class.
 
     This class is used to simplify the creation of tools for tool calling (function calling) in LLMs. Only supports
@@ -122,6 +123,17 @@ class Tool(Type):
         self.args = self.args if self.args is not None else args
         self.arg_types = self.arg_types if self.arg_types is not None else arg_types
         self.has_kwargs = any(param.kind == param.VAR_KEYWORD for param in sig.parameters.values())
+
+    def dump_state(self, json_mode=True):
+        return {"name": self.name, "desc": self.desc, "args": self.args}
+
+    def load_state(self, state):
+        if "desc" in state:
+            self.desc = state["desc"]
+        if "name" in state:
+            self.name = state["name"]
+        if "args" in state:
+            self.args = state["args"]
 
     def _validate_and_parse_args(self, **kwargs):
         # Validate the args value comply to the json schema.
@@ -270,15 +282,19 @@ class ToolCalls(Type):
     class ToolCall(Type):
         name: str
         args: dict[str, Any]
+        id: str | None = None
 
         def format(self):
-            return {
+            d = {
                 "type": "function",
                 "function": {
                     "name": self.name,
                     "arguments": self.args,
                 },
             }
+            if self.id is not None:
+                d["id"] = self.id
+            return d
 
         def execute(self, functions: dict[str, Any] | list[Tool] | None = None) -> Any:
             """Execute this individual tool call and return its result.

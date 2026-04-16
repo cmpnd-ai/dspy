@@ -24,7 +24,7 @@ def _build_submit_tool(signature: type["Signature"]) -> Tool:
     return Tool(
         func=lambda **kwargs: kwargs,
         name="submit",
-        desc=f"Submit the final outputs ({outputs}) for the task.",
+        desc=f"Call this tool to end the task and return your final answer. Takes: {outputs}.",
         args=output_args,
         arg_types=output_arg_types,
     )
@@ -47,7 +47,7 @@ class ReActV2(Module):
         instr.extend([
             f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
             "Each turn: think, then call one or more tools. After each tool call you receive an observation.",
-            "When you have enough information, call `submit` with the output fields.\n",
+            "When you have enough information to answer, call `submit` to finish. Do not keep using tools after you have the answer.\n",
             "Available tools:\n",
         ])
 
@@ -78,7 +78,7 @@ class ReActV2(Module):
         instr.extend([
             f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
             "Each turn: think, then call one or more tools. After each tool call you receive an observation.",
-            "When you have enough information, call `submit` with the output fields.\n",
+            "When you have enough information to answer, call `submit` to finish. Do not keep using tools after you have the answer.\n",
             "Available tools:\n",
         ])
 

@@ -48,9 +48,9 @@ def pretty_print_history(history: list[dict[str, Any]], n: int = 1, file: TextIO
             if msg["role"] == "tool" and msg.get("tool_call_id"):
                 role_label = f"Tool message: (tool_call_id={msg['tool_call_id']})"
             print(_red(role_label, use_colors=use_colors), file=out)
-            if isinstance(msg["content"], str):
+            if isinstance(msg.get("content"), str):
                 print(msg["content"].strip(), file=out)
-            elif msg["content"] is not None:
+            elif msg.get("content") is not None:
                 if isinstance(msg["content"], list):
                     for c in msg["content"]:
                         if c["type"] == "text":

@@ -261,6 +261,17 @@ class BaseLM:
             output = {}
             output["text"] = c.message.content if hasattr(c, "message") else c["text"]
 
+            # Extract reasoning from model_extra when content is None.
+            # Reasoning models (e.g. gpt-oss-120b via Groq) return content=None
+            # with reasoning in model_extra; surface it so adapters can use it
+            # (e.g. as next_thought in ReActV2 native FC).
+            if output["text"] is None and hasattr(c, "message"):
+                model_extra = getattr(c.message, "model_extra", None)
+                if model_extra and isinstance(model_extra, dict):
+                    reasoning = model_extra.get("reasoning")
+                    if reasoning:
+                        output["text"] = reasoning
+
             if hasattr(c, "message") and hasattr(c.message, "reasoning_content") and c.message.reasoning_content:
                 output["reasoning_content"] = c.message.reasoning_content
 

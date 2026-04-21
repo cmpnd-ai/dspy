@@ -50,29 +50,29 @@ def test_basic_forward_with_submit():
 
 
 def test_max_iters_forced_submit():
-    """VAL-CORE-004: max_iters exhausts triggers forced submit fallback."""
+    """VAL-CORE-004: model submits on final iteration within the loop."""
     lm = DummyLM([
         {"next_thought": "Adding.", "tool_calls": [{"name": "add", "args": {"a": 1, "b": 2}}]},
         {"next_thought": "Adding again.", "tool_calls": [{"name": "add", "args": {"a": 3, "b": 4}}]},
-        # Forced submit attempt:
+        # Submit on the 3rd (final) iteration within the loop:
         {"next_thought": "Submitting.", "tool_calls": [{"name": "submit", "args": {"answer": "10"}}]},
     ])
     dspy.configure(lm=lm)
     react = ReActV2("question -> answer", tools=[_make_add_tool()])
-    result = react(question="Add stuff", max_iters=2)
+    result = react(question="Add stuff", max_iters=3)
     assert result.answer == "10"
 
 
 def test_per_call_max_iters():
-    """VAL-CORE-007: agent(question=..., max_iters=1) overrides instance default."""
+    """VAL-CORE-007: agent(question=..., max_iters=2) overrides instance default."""
     lm = DummyLM([
         {"next_thought": "Adding.", "tool_calls": [{"name": "add", "args": {"a": 1, "b": 2}}]},
-        # Forced submit:
+        # Submit on the 2nd (final) iteration within the loop:
         {"next_thought": "Submitting.", "tool_calls": [{"name": "submit", "args": {"answer": "3"}}]},
     ])
     dspy.configure(lm=lm)
     react = ReActV2("question -> answer", tools=[_make_add_tool()], max_iters=20)
-    result = react(question="1+2", max_iters=1)
+    result = react(question="1+2", max_iters=2)
     assert result.answer == "3"
 
 

@@ -271,7 +271,12 @@ class Adapter:
         # If the signature and inputs have conversation history, we need to format the conversation history and
         # remove the history field from the signature.
         history_field_name = self._get_history_field_name(signature)
+        has_open_episode = False
         if history_field_name:
+            # Check if history has an open episode BEFORE format_conversation_history deletes it from inputs_copy.
+            history_obj = inputs_copy.get(history_field_name)
+            has_open_episode = hasattr(history_obj, "has_open_episode") and history_obj.has_open_episode()
+
             # In order to format the conversation history, we need to remove the history field from the signature.
             signature_without_history = signature.delete(history_field_name)
             if getattr(signature, "__dspy_native_fc__", False):
@@ -287,10 +292,17 @@ class Adapter:
         messages.append({"role": "system", "content": system_message})
         messages.extend(self.format_demos(signature, demos))
         if history_field_name:
-            # Conversation history and current input
-            content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
             messages.extend(conversation_history)
-            messages.append({"role": "user", "content": content})
+            if has_open_episode and hasattr(self, "user_message_output_requirements"):
+                # The InputEvent in the conversation history already contains the current query inputs.
+                # Only append the output requirements suffix to avoid sending the query twice.
+                output_req = self.user_message_output_requirements(signature_without_history)
+                if output_req:
+                    messages.append({"role": "user", "content": output_req})
+            else:
+                # No open episode — include the full input + output requirements as before.
+                content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
+                messages.append({"role": "user", "content": content})
         else:
             # Only current input
             content = self.format_user_message_content(signature, inputs_copy, main_request=True)

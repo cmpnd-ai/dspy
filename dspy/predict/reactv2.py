@@ -134,22 +134,78 @@ class ReActV2(Module):
         return self._forced_submit(history, input_args)
 
     def _forced_submit(self, history, input_args):
+        # Bypass self.react so the directive is the LAST message the model sees.
+        # self.react would append a user message after our directive, drowning it out.
+        import json_repair
+
+        lm = dspy.settings.lm
+        adapter = dspy.settings.adapter or dspy.ChatAdapter()
+
+        # Replicate the same preprocessing that Predict.forward / adapter.__call__ would do.
+        signature = self.react.signature
+        demos = self.react.demos
+        tool_list = list(self.tools.values())
+        inputs = {**input_args, "history": history, "tools": tool_list}
+
+        lm_kwargs = {**self.react.config}
+        processed_sig = adapter._call_preprocess(lm, lm_kwargs, signature, inputs)
+        messages = adapter.format(processed_sig, demos, inputs)
+
+        # Build the directive that tells the model to call submit NOW.
+        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
+        directive = (
+            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
+            f"with {outputs} based on the information you have gathered so far. "
+            f"Do not call any other tool. Call submit immediately."
+        )
+
+        # Replace the last user message with our directive so it's the final
+        # thing the model sees before generating.
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                messages[i] = {"role": "user", "content": directive}
+                break
+
+        # When native function calling is active, mechanically force the submit tool
+        # so reasoning models can't ignore the directive via their internal CoT.
+        if "tools" in lm_kwargs:
+            lm_kwargs["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
+
+        # Call the LM directly.
         try:
-            pred = self.react(history=history, tools=list(self.tools.values()), **input_args)
-        except (AdapterParseError, ValueError):
+            raw_outputs = lm(messages=messages, **lm_kwargs)
+        except Exception:
+            # Provider may not support tool_choice; retry without it
+            lm_kwargs.pop("tool_choice", None)
+            try:
+                raw_outputs = lm(messages=messages, **lm_kwargs)
+            except Exception:
+                return dspy.Prediction(history=history)
+
+        if not raw_outputs or not isinstance(raw_outputs, list):
             return dspy.Prediction(history=history)
 
-        if pred.tool_calls is None or not pred.tool_calls.tool_calls:
+        # Parse tool_calls from the first completion.
+        output = raw_outputs[0]
+        tool_calls = None
+        if isinstance(output, dict):
+            tool_calls = output.get("tool_calls")
+
+        if not tool_calls:
             return dspy.Prediction(history=history)
 
-        for tool_call in pred.tool_calls.tool_calls:
-            if tool_call.name == "submit":
-                tool = self.tools["submit"]
+        for tc in tool_calls:
+            name = tc.get("function", {}).get("name")
+            if name == "submit":
+                args_raw = tc.get("function", {}).get("arguments", "{}")
+                args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
                 try:
-                    result = tool(**tool_call.args)
+                    result = self.tools["submit"](**args)
+                    history.append_final(result)
                     return dspy.Prediction(history=history, **result)
                 except Exception:
                     pass
+
         return dspy.Prediction(history=history)
 
 

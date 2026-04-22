@@ -15,13 +15,10 @@ jobs:
         name: Extract tag name
         run: echo "tag=$(echo $GITHUB_REF | cut -d / -f 3)" >> "$GITHUB_OUTPUT"
 
-  build-and-publish-test-pypi:
+  build:
     needs: extract-tag
+    if: github.repository_owner == 'stanfordnlp'
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-    permissions:
-      id-token: write # IMPORTANT: mandatory for trusted publishing
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Set up Python 3.11
@@ -29,48 +26,130 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: python3 -m pip install --upgrade setuptools wheel twine build semver packaging
+        run: python3 -m pip install --upgrade setuptools wheel twine build semver packaging requests
       - name: Install Deno
         uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
         with:
           deno-version: v2.7.7
+
+      # --- TestPyPI package (dspy-ai-test-isaac) ---
       - name: Get correct version for TestPyPI release
         id: check_version
         run: |
-          VERSION=${{ needs.extract-tag.outputs.version }}  
+          VERSION=${{ needs.extract-tag.outputs.version }}
           PACKAGE_NAME="dspy-ai-test-isaac"
-          echo "Checking if $VERSION for $PACKAGE_NAME exists on TestPyPI"  
-          NEW_VERSION=$(python3 .github/workflows/build_utils/test_version.py $PACKAGE_NAME $VERSION)  
-          echo "Version to be used for TestPyPI release: $NEW_VERSION"  
+          echo "Checking if $VERSION for $PACKAGE_NAME exists on TestPyPI"
+          NEW_VERSION=$(python3 .github/workflows/build_utils/test_version.py $PACKAGE_NAME $VERSION)
+          echo "Version to be used for TestPyPI release: $NEW_VERSION"
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-      - name: Update version in pyproject.toml
+      - name: Update version in pyproject.toml (testpypi)
         run: sed -i '/#replace_package_version_marker/{n;s/version="[^"]*"/version="${{ steps.check_version.outputs.version }}"/;}' pyproject.toml
-      - name: Update package name in pyproject.toml
+      - name: Update package name in pyproject.toml (testpypi)
         run: sed -i '/#replace_package_name_marker/{n;s/name="[^"]*"/name="dspy-ai-test-isaac"/;}' pyproject.toml
-      - name: Build a binary wheel
-        run: python3 -m build
-      - name: Validate built distributions
+      - name: Build testpypi wheel/sdist
+        run: |
+          rm -rf dist
+          python3 -m build
+      - name: Validate testpypi artifacts
         run: python3 -m twine check --strict dist/*
-      # Test the locally built wheel
+      - name: Upload testpypi artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-testpypi
+          path: dist/
+
+      # Reset pyproject.toml before building prod dists
+      - name: Restore pyproject.toml for prod builds
+        run: git checkout -- pyproject.toml
+
+      # --- Prod package (dspy) ---
+      - name: Update version in pyproject.toml (dspy)
+        run: sed -i '/#replace_package_version_marker/{n;s/version *= *"[^"]*"/version="${{ needs.extract-tag.outputs.version }}"/;}' pyproject.toml
+      - name: Update version in __metadata__.py (dspy)
+        run: sed -i '/#replace_package_version_marker/{n;s/__version__ *= *"[^"]*"/__version__="${{ needs.extract-tag.outputs.version }}"/;}' ./dspy/__metadata__.py
+      - name: Update package name in pyproject.toml (dspy)
+        run: sed -i '/#replace_package_name_marker/{n;s/name *= *"[^"]*"/name="dspy"/;}' pyproject.toml
+      - name: Update package name in metadata.py (dspy)
+        run: sed -i '/#replace_package_name_marker/{n;s/__name__ *= *"[^"]*"/__name__="dspy"/;}' ./dspy/__metadata__.py
+      - name: Build dspy wheel/sdist
+        run: |
+          rm -rf dist
+          python3 -m build
+      - name: Validate dspy artifacts
+        run: python3 -m twine check --strict dist/*
+      - name: Upload dspy artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-pypi-dspy
+          path: dist/
+
+      # --- Prod package (dspy-ai) ---
+      - name: Update package name in pyproject.toml (dspy-ai)
+        run: sed -i '/#replace_package_name_marker/{n;s/name *= *"[^"]*"/name="dspy-ai"/;}' .github/.internal_dspyai/pyproject.toml
+      - name: Update version for dspy-ai release
+        run: sed -i '/#replace_package_version_marker/{n;s/version *= *"[^"]*"/version="${{ needs.extract-tag.outputs.version }}"/;}' .github/.internal_dspyai/pyproject.toml
+      - name: Update dspy dependency for dspy-ai release
+        run: |
+          sed -i '/#replace_dspy_version_marker/{n;s/dspy>=[^"]*/dspy>=${{ needs.extract-tag.outputs.version }}/;}' .github/.internal_dspyai/pyproject.toml
+      - name: Build dspy-ai wheel/sdist
+        run: python3 -m build .github/.internal_dspyai/
+      - name: Validate dspy-ai artifacts
+        run: python3 -m twine check --strict .github/.internal_dspyai/dist/*
+      - name: Upload dspy-ai artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-pypi-dspy-ai
+          path: .github/.internal_dspyai/dist/
+
+  test-wheel:
+    needs: build
+    if: github.repository_owner == 'stanfordnlp'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python 3.11
+        uses: actions/setup-python@3542bca2639a428e1796aaa6a2ffef0c0f575566 # v3
+        with:
+          python-version: "3.11"
+      - name: Install Deno
+        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
+        with:
+          deno-version: v2.7.7
+      - name: Download dspy dist artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-pypi-dspy
+          path: dist/
       - name: Create test environment
-        run: python -m venv test_before_testpypi
+        run: python -m venv test_wheel_env
       - name: Test package installation and functionality
         run: |
-          source test_before_testpypi/bin/activate
-          # Install the locally built wheel and testing dependencies
+          source test_wheel_env/bin/activate
           pip install dist/*.whl pytest pytest-asyncio
           pytest tests/metadata/test_metadata.py tests/predict
           deactivate
-      # Publish to test-PyPI
+
+  publish-testpypi:
+    needs: [build, test-wheel]
+    if: github.repository_owner == 'stanfordnlp'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+    permissions:
+      id-token: write # IMPORTANT: mandatory for trusted publishing
+    steps:
+      - name: Download testpypi artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-testpypi
+          path: dist/
       - name: Publish distribution 📦 to test-PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1 # This requires a trusted publisher to be setup in pypi/testpypi
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
 
-  # TODO: Add tests using dspy-ai-test
-
-  build-and-publish-pypi:
-    needs: [extract-tag, build-and-publish-test-pypi]
+  publish-pypi:
+    needs: [build, publish-testpypi]
     # Only publish to PyPI if the repository owner is stanfordnlp
     if: github.repository_owner == 'stanfordnlp'
     runs-on: ubuntu-latest
@@ -79,65 +158,29 @@ jobs:
     permissions:
       id-token: write # IMPORTANT: mandatory for trusted publishing
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Set up Python 3.11
-        uses: actions/setup-python@3542bca2639a428e1796aaa6a2ffef0c0f575566 # v3
+      - name: Download dspy artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: python3 -m pip install --upgrade setuptools wheel twine build
-      - name: Install Deno
-        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
-        with:
-          deno-version: v2.7.7
-      - name: Update version in pyproject.toml
-        run: sed -i '/#replace_package_version_marker/{n;s/version *= *"[^"]*"/version="${{ needs.extract-tag.outputs.version }}"/;}' pyproject.toml
-      - name: Update version in __metadata__.py
-        run: sed -i '/#replace_package_version_marker/{n;s/__version__ *= *"[^"]*"/__version__="${{ needs.extract-tag.outputs.version }}"/;}' ./dspy/__metadata__.py
-      # Publish to dspy
-      - name: Update package name in pyproject.toml
-        run: sed -i '/#replace_package_name_marker/{n;s/name *= *"[^"]*"/name="dspy"/;}' pyproject.toml
-      - name: Update package name in metadata.py
-        run: sed -i '/#replace_package_name_marker/{n;s/__name__ *= *"[^"]*"/__name__="dspy"/;}' ./dspy/__metadata__.py
-      - name: Build a binary wheel
-        run: python3 -m build
-      - name: Validate built distributions
-        run: python3 -m twine check --strict dist/*
-      # Test the locally built wheel before publishing to pypi
-      - name: Create test environment
-        run: python -m venv test_before_pypi
-      - name: Test package installation and functionality
-        run: |
-          source test_before_pypi/bin/activate
-          # Install the locally built wheel and testing dependencies
-          pip install dist/*.whl pytest pytest-asyncio
-          pytest tests/metadata/test_metadata.py tests/predict
-          deactivate
-          rm -r test_before_pypi
+          name: dist-pypi-dspy
+          path: dist-dspy/
       - name: Publish distribution 📦 to PyPI (dspy)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           attestations: false
-      # Publish to dspy-ai
-      - name: Update package name in pyproject.toml
-        run: sed -i '/#replace_package_name_marker/{n;s/name *= *"[^"]*"/name="dspy-ai"/;}' .github/.internal_dspyai/pyproject.toml
-      - name: Update version for dspy-ai release
-        run: sed -i '/#replace_package_version_marker/{n;s/version *= *"[^"]*"/version="${{ needs.extract-tag.outputs.version }}"/;}' .github/.internal_dspyai/pyproject.toml
-      - name: Update dspy dependency for dspy-ai release
-        run: |
-          sed -i '/#replace_dspy_version_marker/{n;s/dspy>=[^"]*/dspy>=${{ needs.extract-tag.outputs.version }}/;}' .github/.internal_dspyai/pyproject.toml
-      - name: Build a binary wheel (dspy-ai)
-        run: python3 -m build .github/.internal_dspyai/
-      - name: Validate built distributions (dspy-ai)
-        run: python3 -m twine check --strict .github/.internal_dspyai/dist/*
+          packages-dir: dist-dspy/
+      - name: Download dspy-ai artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-pypi-dspy-ai
+          path: dist-dspy-ai/
       - name: Publish distribution 📦 to PyPI (dspy-ai)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           attestations: false
-          packages-dir: .github/.internal_dspyai/dist/
+          packages-dir: dist-dspy-ai/
 
   sync-version-to-main:
-    needs: [extract-tag, build-and-publish-pypi]
+    needs: [extract-tag, publish-pypi]
     if: github.repository_owner == 'stanfordnlp'
     runs-on: ubuntu-latest
     permissions:

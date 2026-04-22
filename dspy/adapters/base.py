@@ -530,8 +530,16 @@ class Adapter:
                 if is_native_fc and tc_obj and hasattr(tc_obj, "tool_calls"):
                     import json as _json
                     tc_list = []
+                    # Pre-generate stable IDs for tool calls that lack them so the
+                    # assistant message and the corresponding tool-response messages
+                    # reference the same ID (required by the OpenAI API).
+                    resolved_ids = []
                     for tc in tc_obj.tool_calls:
+                        resolved_ids.append(tc.id or f"call_{abs(hash((tc.name, str(tc.args))))}")
+                    for tc, tid in zip(tc_obj.tool_calls, resolved_ids):
                         fmt = tc.format()
+                        # Ensure the id is always present
+                        fmt["id"] = tid
                         if isinstance(fmt.get("function", {}).get("arguments"), dict):
                             fmt["function"]["arguments"] = _json.dumps(fmt["function"]["arguments"])
                         tc_list.append(fmt)
@@ -540,24 +548,30 @@ class Adapter:
                     if thought:
                         asst_msg["content"] = str(thought)
                     messages.append(asst_msg)
-                    for tc, (result, is_error) in zip(tc_obj.tool_calls, obs):
-                        tool_call_id = tc.id or f"call_{id(tc)}"
+                    for tid, (result, is_error) in zip(resolved_ids, obs):
                         content = str(result) if not isinstance(result, list) else "\n".join(str(r) for r in result)
-                        messages.append({"role": "tool", "content": content, "tool_call_id": tool_call_id})
+                        messages.append({"role": "tool", "content": content, "tool_call_id": tid})
                 else:
-                    action_fields = {"next_thought": message.thought, "tool_calls": message.tool_calls}
-                    asst_data = {k: action_fields[k] for k in signature.output_fields if k in action_fields and action_fields[k] is not None}
-                    asst_content = self.format_assistant_message_content(signature, asst_data)
+                    # Non-native text mode: render tool calls as plain text so that
+                    # no JSON resembling native FC format leaks into the messages.
+                    parts = []
+                    if message.thought:
+                        parts.append(f"Thought: {message.thought}")
+                    if tc_obj and hasattr(tc_obj, "tool_calls"):
+                        for tc in tc_obj.tool_calls:
+                            args_str = ", ".join(f"{k}={v!r}" for k, v in (tc.args or {}).items())
+                            parts.append(f"Action: {tc.name}({args_str})")
+                    asst_content = "\n".join(parts) if parts else "..."
                     messages.append({"role": "assistant", "content": asst_content})
                     if obs:
-                        parts = []
+                        obs_parts = []
                         for result, is_error in obs:
                             label = "Error" if is_error else "Observation"
                             if isinstance(result, list):
-                                parts.append(f"{label}:\n" + "\n".join(str(item) for item in result))
+                                obs_parts.append(f"{label}:\n" + "\n".join(str(item) for item in result))
                             else:
-                                parts.append(f"{label}: {result}")
-                        messages.append({"role": "user", "content": "\n\n".join(parts)})
+                                obs_parts.append(f"{label}: {result}")
+                        messages.append({"role": "user", "content": "\n\n".join(obs_parts)})
             elif isinstance(message, FinalEvent):
                 pass
             else:

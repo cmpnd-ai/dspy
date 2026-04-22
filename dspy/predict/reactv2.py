@@ -191,20 +191,49 @@ class ReActV2(Module):
         if isinstance(output, dict):
             tool_calls = output.get("tool_calls")
 
-        if not tool_calls:
+        # --- Native FC path: tool_calls present in the response dict ---
+        if tool_calls:
+            for tc in tool_calls:
+                name = tc.get("function", {}).get("name")
+                if name == "submit":
+                    args_raw = tc.get("function", {}).get("arguments", "{}")
+                    args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                    try:
+                        result = self.tools["submit"](**args)
+                        history.append_final(result)
+                        return dspy.Prediction(history=history, **result)
+                    except Exception:
+                        pass
             return dspy.Prediction(history=history)
 
-        for tc in tool_calls:
-            name = tc.get("function", {}).get("name")
-            if name == "submit":
-                args_raw = tc.get("function", {}).get("arguments", "{}")
-                args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                try:
-                    result = self.tools["submit"](**args)
-                    history.append_final(result)
-                    return dspy.Prediction(history=history, **result)
-                except Exception:
-                    pass
+        # --- Non-native text path: parse the text response for a submit call ---
+        text = output if isinstance(output, str) else (output.get("text", "") if isinstance(output, dict) else "")
+        if text:
+            # Try to parse tool_calls from the text using the adapter
+            try:
+                parsed = adapter.parse(processed_sig, text)
+                tc_obj = parsed.get("tool_calls")
+                if tc_obj and hasattr(tc_obj, "tool_calls"):
+                    for tool_call in tc_obj.tool_calls:
+                        if tool_call.name == "submit":
+                            try:
+                                result = self.tools["submit"](**(tool_call.args or {}))
+                                history.append_final(result)
+                                return dspy.Prediction(history=history, **result)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # Last resort: try to extract output field values from the text
+            # using the original task signature (e.g. "question -> answer").
+            try:
+                parsed = adapter.parse(self.signature, text)
+                if any(v is not None for v in parsed.values()):
+                    history.append_final(parsed)
+                    return dspy.Prediction(history=history, **parsed)
+            except Exception:
+                pass
 
         return dspy.Prediction(history=history)
 

@@ -393,7 +393,10 @@ def _common_prep(
     return body, headers, cache
 
 
-def _rewrite_for_text_completion(body: dict[str, Any]) -> dict[str, Any]:
+def _rewrite_for_text_completion(body: dict[str, Any]) -> None:
+    """Mutate `body` in place to convert a chat-style request into the shape
+    litellm.text_completion expects. Caller must pass a dict it owns (e.g. the
+    copy produced by _common_prep)."""
     # Extract the provider and model from the model string.
     # TODO: Not all the models are in the format of "provider/model"
     model = body.pop("model").split("/", 1)
@@ -403,7 +406,6 @@ def _rewrite_for_text_completion(body: dict[str, Any]) -> dict[str, Any]:
     body["api_key"] = body.pop("api_key", None) or os.getenv(f"{provider}_API_KEY")
     body["api_base"] = body.pop("api_base", None) or os.getenv(f"{provider}_API_BASE")
     body["prompt"] = "\n\n".join([x["content"] for x in body.pop("messages")] + ["BEGIN RESPONSE:"])
-    return body
 
 
 def litellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
@@ -438,7 +440,7 @@ async def alitellm_completion(request: dict[str, Any], num_retries: int, cache: 
 
 def litellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
     body, headers, cache = _common_prep(request, cache)
-    body = _rewrite_for_text_completion(body)
+    _rewrite_for_text_completion(body)
 
     return litellm.text_completion(
         cache=cache,
@@ -451,7 +453,7 @@ def litellm_text_completion(request: dict[str, Any], num_retries: int, cache: di
 
 async def alitellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
     body, headers, cache = _common_prep(request, cache)
-    body = _rewrite_for_text_completion(body)
+    _rewrite_for_text_completion(body)
 
     return await litellm.atext_completion(
         cache=cache,

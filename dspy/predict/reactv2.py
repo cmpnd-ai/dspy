@@ -62,8 +62,16 @@ class ReActV2(Module):
             .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
         )
 
+        # Extract fallback: dedicated LM call to extract answer from history
+        # (like v1's self.extract, fires only when submit fails in _forced_submit)
+        extract_signature = dspy.Signature(
+            {**signature.input_fields, **signature.output_fields},
+            signature.instructions,
+        ).append("trajectory", dspy.InputField(desc="The agent's history of thoughts, actions, and observations"), type_=str)
+
         self.tools = tools
         self.react = dspy.Predict(react_signature)
+        self.extract = dspy.ChainOfThought(extract_signature)
 
     def _rebuild_instructions(self):
         """Regenerate the instruction string from current tool descs.
@@ -235,7 +243,40 @@ class ReActV2(Module):
             except Exception:
                 pass
 
+        # --- Extract fallback: use a ChainOfThought call to extract the answer from history ---
+        try:
+            trajectory_text = self._render_history_as_text(history)
+            extract = self.extract(trajectory=trajectory_text, **input_args)
+            result = {k: getattr(extract, k) for k in self.signature.output_fields if hasattr(extract, k)}
+            if any(v is not None for v in result.values()):
+                history.append_final(result)
+                return dspy.Prediction(history=history, **result)
+        except Exception:
+            pass
+
         return dspy.Prediction(history=history)
+
+    @staticmethod
+    def _render_history_as_text(history) -> str:
+        from dspy.adapters.types.history import ActionEvent, InputEvent
+
+        lines = []
+        for event in history.messages:
+            if isinstance(event, InputEvent):
+                for k, v in event.inputs.items():
+                    lines.append(f"[Input] {k}: {v}")
+            elif isinstance(event, ActionEvent):
+                if event.thought:
+                    lines.append(f"[Thought] {event.thought}")
+                if event.tool_calls and hasattr(event.tool_calls, "tool_calls"):
+                    for i, tc in enumerate(event.tool_calls.tool_calls):
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in (tc.args or {}).items())
+                        lines.append(f"[Action] {tc.name}({args_str})")
+                        if i < len(event.observations):
+                            obs_val, was_err = event.observations[i]
+                            prefix = "[Error]" if was_err else "[Observation]"
+                            lines.append(f"{prefix} {obs_val}")
+        return "\n".join(lines)
 
 
 def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:

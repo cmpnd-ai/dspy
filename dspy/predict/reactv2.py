@@ -7,12 +7,20 @@ from dspy.adapters.types.history import ActionEvent, InputEvent, Observation
 from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
-from dspy.utils.exceptions import AdapterParseError
+from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
+
+_ANNOTATION_TO_JSON_TYPE = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+}
 
 
 def _build_submit_tool(signature: type["Signature"]) -> Tool:
@@ -20,8 +28,10 @@ def _build_submit_tool(signature: type["Signature"]) -> Tool:
     output_args = {}
     output_arg_types = {}
     for k, v in signature.output_fields.items():
-        output_args[k] = {"type": "string"}
-        output_arg_types[k] = v.annotation if hasattr(v, "annotation") else str
+        annotation = v.annotation if hasattr(v, "annotation") else str
+        json_type = _ANNOTATION_TO_JSON_TYPE.get(annotation, "string")
+        output_args[k] = {"type": json_type}
+        output_arg_types[k] = annotation
 
     return Tool(
         func=lambda **kwargs: kwargs,
@@ -87,9 +97,10 @@ class ReActV2(Module):
         """
         base_instr = self._build_instructions()
         self.react.signature = self.react.signature.with_instructions(base_instr)
+        self.extract.predict.signature = self.extract.predict.signature.with_instructions(self.signature.instructions)
 
     def forward(self, **input_args):
-        # Callers can pass a History with a compact_fn for automatic compaction each iteration.
+        # Callers can pass a History with a compact_fn; compaction triggers on ContextWindowExceededError.
         history = input_args.pop("history", dspy.History(messages=[]))
         max_iters = input_args.pop("max_iters", self.max_iters)
         tool_list = list(self.tools.values())
@@ -101,6 +112,14 @@ class ReActV2(Module):
         for idx in range(max_iters):
             try:
                 pred: dspy.Prediction = self.react(history=history, tools=tool_list, **input_args)
+            except ContextWindowExceededError:
+                history.compact_if_needed()
+                try:
+                    pred = self.react(history=history, tools=tool_list, **input_args)
+                except ContextWindowExceededError:
+                    logger.warning("Context window exceeded after compaction, ending loop.")
+                    break_reason = "context_overflow"
+                    break
             except (AdapterParseError, ValueError) as err:
                 logger.warning(f"Agent iteration {idx} failed: {_fmt_exc(err)}")
                 break_reason = "parse_error"
@@ -144,17 +163,15 @@ class ReActV2(Module):
         adapter = dspy.settings.adapter
         native_fc = getattr(adapter, "use_native_function_calling", False) if adapter else False
 
-        saved_config = dict(self.react.config)
+        call_config = {}
         if native_fc:
-            self.react.config["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
+            call_config["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
 
         try:
-            pred = self.react(history=history, tools=tool_list, **input_args)
-        except Exception:
+            pred = self.react(history=history, tools=tool_list, config=call_config, **input_args)
+        except Exception as err:
+            logger.debug(f"Forced submit tier 1 (react) failed: {_fmt_exc(err)}")
             pred = None
-        finally:
-            self.react.config.clear()
-            self.react.config.update(saved_config)
 
         if pred and pred.tool_calls and pred.tool_calls.tool_calls:
             for tool_call in pred.tool_calls.tool_calls:
@@ -168,8 +185,8 @@ class ReActV2(Module):
                         )
                         history.append_output(result)
                         return dspy.Prediction(history=history, termination_reason="forced_submit", **result)
-                    except Exception:
-                        pass
+                    except Exception as err:
+                        logger.debug(f"Forced submit tool execution failed: {_fmt_exc(err)}")
 
         # Tier 2: Extract fallback via ChainOfThought.
         try:
@@ -179,8 +196,8 @@ class ReActV2(Module):
             if any(v is not None for v in result.values()):
                 history.append_output(result)
                 return dspy.Prediction(history=history, termination_reason="extract", **result)
-        except Exception:
-            pass
+        except Exception as err:
+            logger.debug(f"Forced submit tier 2 (extract) failed: {_fmt_exc(err)}")
 
         return dspy.Prediction(history=history, termination_reason=break_reason or "failed")
 

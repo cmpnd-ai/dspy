@@ -294,3 +294,20 @@ def test_gepa_compile_with_reactv2():
     result = gepa.compile(react, trainset=trainset)
     assert isinstance(result, ReActV2)
     assert "add" in result.react.signature.instructions
+
+
+def test_forced_submit_extract_fallback():
+    """Tier 2 extract fallback produces output when model never calls submit."""
+    lm = DummyLM([
+        # Main loop: model keeps calling add, never submits
+        {"next_thought": "Adding.", "tool_calls": [{"name": "add", "args": {"a": 1, "b": 2}}]},
+        # Forced submit tier 1: model STILL calls add instead of submit
+        {"next_thought": "Adding more.", "tool_calls": [{"name": "add", "args": {"a": 3, "b": 4}}]},
+        # Tier 2 extract (ChainOfThought): model finally produces the answer
+        {"reasoning": "Based on the trajectory, the answer is 3.", "answer": "3"},
+    ])
+    dspy.configure(lm=lm)
+    react = ReActV2("question -> answer", tools=[_make_add_tool()])
+    result = react(question="What is 1+2?", max_iters=1)
+    assert result.answer == "3"
+    assert result.termination_reason == "extract"

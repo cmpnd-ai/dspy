@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from typing import Any, get_origin
 
@@ -286,6 +287,7 @@ class Adapter:
                 history_field_name,
                 inputs_copy,
             )
+            inputs_copy.pop(history_field_name, None)
 
         messages = []
         system_message = self.format_system_message(signature)
@@ -535,7 +537,7 @@ class Adapter:
                     # reference the same ID (required by the OpenAI API).
                     resolved_ids = []
                     for tc in tc_obj.tool_calls:
-                        resolved_ids.append(tc.id or f"call_{abs(hash((tc.name, str(tc.args))))}")
+                        resolved_ids.append(tc.id or f"call_{hashlib.md5(f'{tc.name}:{tc.args}'.encode()).hexdigest()[:12]}")
                     for tc, tid in zip(tc_obj.tool_calls, resolved_ids):
                         fmt = tc.format()
                         # Ensure the id is always present
@@ -586,9 +588,6 @@ class Adapter:
                         ),
                     }
                 )
-
-        # Remove the history field from the inputs
-        del inputs[history_field_name]
 
         return messages
 

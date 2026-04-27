@@ -3,7 +3,7 @@ from typing import Any, get_origin
 
 import json_repair
 
-from dspy.adapters.types import ActionEvent, FinalEvent, History, InputEvent, Type
+from dspy.adapters.types import ActionEvent, History, InputEvent, OutputEvent, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import Tool, ToolCalls
@@ -572,7 +572,7 @@ class Adapter:
                             else:
                                 obs_parts.append(f"{label}: {result}")
                         messages.append({"role": "user", "content": "\n\n".join(obs_parts)})
-            elif isinstance(message, FinalEvent):
+            elif isinstance(message, OutputEvent):
                 pass
             else:
                 # Backward compat fallback for plain dicts

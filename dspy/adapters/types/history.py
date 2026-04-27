@@ -15,12 +15,12 @@ class ActionEvent(pydantic.BaseModel):
     observations: list[tuple[Any, bool]] = []
 
 
-class FinalEvent(pydantic.BaseModel):
-    event: Literal["final"] = "final"
+class OutputEvent(pydantic.BaseModel):
+    event: Literal["output"] = "output"
     outputs: dict[str, Any]
 
 
-HistoryEvent = Annotated[InputEvent | ActionEvent | FinalEvent, pydantic.Field(discriminator="event")]
+HistoryEvent = Annotated[InputEvent | ActionEvent | OutputEvent, pydantic.Field(discriminator="event")]
 
 
 class History(pydantic.BaseModel):
@@ -48,16 +48,16 @@ class History(pydantic.BaseModel):
     def append_action(self, *, thought: str, tool_calls: Any, observations: list[tuple[Any, bool]]) -> None:
         self.messages.append(ActionEvent(thought=thought, tool_calls=tool_calls, observations=observations))
 
-    def append_final(self, outputs: dict[str, Any]) -> None:
-        self.messages.append(FinalEvent(outputs=outputs))
+    def append_output(self, outputs: dict[str, Any]) -> None:
+        self.messages.append(OutputEvent(outputs=outputs))
 
     def has_open_episode(self) -> bool:
         last_boundary = None
         for m in self.messages:
             if isinstance(m, InputEvent):
                 last_boundary = "input"
-            elif isinstance(m, FinalEvent):
-                last_boundary = "final"
+            elif isinstance(m, OutputEvent):
+                last_boundary = "output"
         return last_boundary == "input"
 
 

@@ -135,7 +135,7 @@ class ReActV2(Module):
 
             for tool_call, (result, did_err) in zip(pred.tool_calls.tool_calls, observations):
                 if tool_call.name == "submit" and not did_err:
-                    history.append_final(result)
+                    history.append_output(result)
                     return dspy.Prediction(history=history, **result)
 
         # Forced submit: ask the model to submit one more time
@@ -208,7 +208,7 @@ class ReActV2(Module):
                     args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
                     try:
                         result = self.tools["submit"](**args)
-                        history.append_final(result)
+                        history.append_output(result)
                         return dspy.Prediction(history=history, **result)
                     except Exception:
                         pass
@@ -226,7 +226,7 @@ class ReActV2(Module):
                         if tool_call.name == "submit":
                             try:
                                 result = self.tools["submit"](**(tool_call.args or {}))
-                                history.append_final(result)
+                                history.append_output(result)
                                 return dspy.Prediction(history=history, **result)
                             except Exception:
                                 pass
@@ -238,7 +238,7 @@ class ReActV2(Module):
             try:
                 parsed = adapter.parse(self.signature, text)
                 if any(v is not None for v in parsed.values()):
-                    history.append_final(parsed)
+                    history.append_output(parsed)
                     return dspy.Prediction(history=history, **parsed)
             except Exception:
                 pass
@@ -249,7 +249,7 @@ class ReActV2(Module):
             extract = self.extract(trajectory=trajectory_text, **input_args)
             result = {k: getattr(extract, k) for k in self.signature.output_fields if hasattr(extract, k)}
             if any(v is not None for v in result.values()):
-                history.append_final(result)
+                history.append_output(result)
                 return dspy.Prediction(history=history, **result)
         except Exception:
             pass

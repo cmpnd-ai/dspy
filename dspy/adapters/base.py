@@ -4,7 +4,7 @@ from typing import Any, get_origin
 
 import json_repair
 
-from dspy.adapters.types import ActionEvent, History, InputEvent, OutputEvent, Type
+from dspy.adapters.types import ActionEvent, History, InputEvent, LegacyEvent, OutputEvent, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import Tool, ToolCalls
@@ -576,14 +576,14 @@ class Adapter:
                         messages.append({"role": "user", "content": "\n\n".join(obs_parts)})
             elif isinstance(message, OutputEvent):
                 pass
-            else:
-                # Backward compat fallback for plain dicts
-                messages.append({"role": "user", "content": self.format_user_message_content(signature, message)})
+            elif isinstance(message, LegacyEvent):
+                # Backward compat fallback for plain dicts wrapped as LegacyEvent
+                messages.append({"role": "user", "content": self.format_user_message_content(signature, message.data)})
                 messages.append(
                     {
                         "role": "assistant",
                         "content": self.format_assistant_message_content(
-                            signature, message,
+                            signature, message.data,
                             missing_field_message="Not supplied for this conversation history message. ",
                         ),
                     }

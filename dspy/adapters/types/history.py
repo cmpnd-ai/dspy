@@ -28,7 +28,13 @@ class OutputEvent(pydantic.BaseModel):
     outputs: dict[str, Any]
 
 
-HistoryEvent = Annotated[InputEvent | ActionEvent | OutputEvent, pydantic.Field(discriminator="event")]
+class LegacyEvent(pydantic.BaseModel):
+    """Backward-compat wrapper for plain dict messages from old History format."""
+    event: Literal["legacy"] = "legacy"
+    data: dict[str, Any]
+
+
+HistoryEvent = Annotated[InputEvent | ActionEvent | OutputEvent | LegacyEvent, pydantic.Field(discriminator="event")]
 
 
 class History(pydantic.BaseModel):
@@ -40,6 +46,36 @@ class History(pydantic.BaseModel):
         str_strip_whitespace=True,
         extra="forbid",
     )
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_messages(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "messages" not in data:
+            return data
+        raw = data["messages"]
+        if not isinstance(raw, list):
+            return data
+        coerced = []
+        for msg in raw:
+            if not isinstance(msg, dict) or "event" in msg:
+                coerced.append(msg)
+                continue
+            # Legacy plain dict — wrap as LegacyEvent so it passes validation
+            coerced.append({"event": "legacy", "data": msg})
+        return {**data, "messages": coerced}
+
+    @pydantic.model_serializer(mode="wrap")
+    def _serialize_legacy_messages(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if "messages" in data:
+            serialized = []
+            for msg in data["messages"]:
+                if isinstance(msg, dict) and msg.get("event") == "legacy":
+                    serialized.append(msg["data"])
+                else:
+                    serialized.append(msg)
+            data["messages"] = serialized
+        return data
 
     def __init__(self, *args: Any, compact_fn: Callable[["History"], None] | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)

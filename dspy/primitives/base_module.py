@@ -160,6 +160,9 @@ class BaseModule:
         from dspy.predict.predict import Predict
 
         for name, param in self.named_parameters():
+            if name not in state:
+                logger.debug(f"Skipping parameter '{name}' not found in saved state.")
+                continue
             if isinstance(param, Predict):
                 param.load_state(state[name], allow_unsafe_lm_state=allow_unsafe_lm_state)
             else:

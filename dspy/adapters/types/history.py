@@ -2,17 +2,25 @@ from typing import Annotated, Any, Callable, Literal
 
 import pydantic
 
+from dspy.adapters.types.tool import ToolCalls
+
 
 class InputEvent(pydantic.BaseModel):
     event: Literal["input"] = "input"
     inputs: dict[str, Any]
 
 
+class Observation(pydantic.BaseModel):
+    """A single tool observation with an optional error flag."""
+    value: Any
+    is_error: bool = False
+
+
 class ActionEvent(pydantic.BaseModel):
     event: Literal["action"] = "action"
     thought: str | None = None
-    tool_calls: Any = None  # ToolCalls type, use Any to avoid circular import
-    observations: list[tuple[Any, bool]] = []
+    tool_calls: ToolCalls | None = None
+    observations: list[Observation] = []
 
 
 class OutputEvent(pydantic.BaseModel):
@@ -45,7 +53,7 @@ class History(pydantic.BaseModel):
     def append_input(self, inputs: dict[str, Any]) -> None:
         self.messages.append(InputEvent(inputs=inputs))
 
-    def append_action(self, *, thought: str, tool_calls: Any, observations: list[tuple[Any, bool]]) -> None:
+    def append_action(self, *, thought: str, tool_calls: ToolCalls | None, observations: list[Observation]) -> None:
         self.messages.append(ActionEvent(thought=thought, tool_calls=tool_calls, observations=observations))
 
     def append_output(self, outputs: dict[str, Any]) -> None:

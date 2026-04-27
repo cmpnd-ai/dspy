@@ -1,5 +1,12 @@
 import dspy
-from dspy.adapters.types.history import ActionEvent, History, InputEvent, OutputEvent, truncate_oldest_actions
+from dspy.adapters.types.history import (
+    ActionEvent,
+    History,
+    InputEvent,
+    Observation,
+    OutputEvent,
+    truncate_oldest_actions,
+)
 from dspy.adapters.types.tool import Tool, ToolCalls, _sanitize_tool_name
 from dspy.predict.reactv2 import ReActV2, _build_submit_tool
 from dspy.utils.dummies import DummyLM
@@ -133,14 +140,14 @@ def test_history_events_input_action_final():
     """VAL-HIST-001: append methods create input/action/final events."""
     h = History(messages=[])
     h.append_input({"question": "hi"})
-    h.append_action(thought="thinking", tool_calls=None, observations=[("ok", False)])
+    h.append_action(thought="thinking", tool_calls=None, observations=[Observation(value="ok", is_error=False)])
     h.append_output({"answer": "bye"})
     assert [m.event for m in h.messages] == ["input", "action", "output"]
     assert isinstance(h.messages[0], InputEvent)
     assert h.messages[0].inputs["question"] == "hi"
     assert isinstance(h.messages[1], ActionEvent)
     assert h.messages[1].thought == "thinking"
-    assert h.messages[1].observations == [("ok", False)]
+    assert h.messages[1].observations == [Observation(value="ok", is_error=False)]
     assert isinstance(h.messages[2], OutputEvent)
     assert h.messages[2].outputs["answer"] == "bye"
 
@@ -189,8 +196,8 @@ def test_truncate_oldest_actions():
     assert isinstance(h.messages[0], InputEvent)
 
 
-def test_compaction_fires_in_forward_loop():
-    """VAL-COMPACT-002: compact_if_needed() is called each iteration with custom fn."""
+def test_compaction_is_callers_responsibility():
+    """VAL-COMPACT-002: compact_if_needed() is NOT called inside forward(); callers manage compaction."""
     calls = []
     def track_compact(history):
         calls.append(len(history.messages))
@@ -202,7 +209,8 @@ def test_compaction_fires_in_forward_loop():
     react = ReActV2("question -> answer", tools=[_make_add_tool()])
     history = dspy.History(messages=[], compact_fn=track_compact)
     react(question="1+2", history=history)
-    assert len(calls) == 2  # called each iteration
+    # compact_if_needed is no longer called inside forward()
+    assert len(calls) == 0
 
 
 # --- Native FC + format tests (VAL-FMT-*) ---

@@ -548,8 +548,8 @@ class Adapter:
                     if thought:
                         asst_msg["content"] = str(thought)
                     messages.append(asst_msg)
-                    for tid, (result, is_error) in zip(resolved_ids, obs):
-                        content = str(result) if not isinstance(result, list) else "\n".join(str(r) for r in result)
+                    for tid, obs_item in zip(resolved_ids, obs):
+                        content = str(obs_item.value) if not isinstance(obs_item.value, list) else "\n".join(str(r) for r in obs_item.value)
                         messages.append({"role": "tool", "content": content, "tool_call_id": tid})
                 else:
                     # Non-native text mode: render tool calls as plain text so that
@@ -565,12 +565,12 @@ class Adapter:
                     messages.append({"role": "assistant", "content": asst_content})
                     if obs:
                         obs_parts = []
-                        for result, is_error in obs:
-                            label = "Error" if is_error else "Observation"
-                            if isinstance(result, list):
-                                obs_parts.append(f"{label}:\n" + "\n".join(str(item) for item in result))
+                        for obs_item in obs:
+                            label = "Error" if obs_item.is_error else "Observation"
+                            if isinstance(obs_item.value, list):
+                                obs_parts.append(f"{label}:\n" + "\n".join(str(item) for item in obs_item.value))
                             else:
-                                obs_parts.append(f"{label}: {result}")
+                                obs_parts.append(f"{label}: {obs_item.value}")
                         messages.append({"role": "user", "content": "\n\n".join(obs_parts)})
             elif isinstance(message, OutputEvent):
                 pass

@@ -1,7 +1,9 @@
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+import traceback
+from typing import TYPE_CHECKING, Callable
 
 import dspy
+from dspy.adapters.types.history import ActionEvent, InputEvent, Observation
 from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
@@ -39,23 +41,27 @@ class ReActV2(Module):
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         tools = {tool.name: tool for tool in tools}
         tools["submit"] = _build_submit_tool(signature)
-
-        inputs = ", ".join([f"`{k}`" for k in signature.input_fields.keys()])
-        outputs = ", ".join([f"`{k}`" for k in signature.output_fields.keys()])
-        instr = [f"{signature.instructions}\n"] if signature.instructions else []
-
-        instr.extend([
-            f"You are an Agent. Given {inputs}, use tools to produce {outputs}.",
-            "Each turn: think, then call one or more tools. After each tool call you receive an observation.",
-            "When you have enough information to answer, call `submit` to finish. Do not keep using tools after you have the answer.\n",
-            "Available tools:\n",
-        ])
-
-        for idx, tool in enumerate(tools.values()):
-            instr.append(f"({idx + 1}) {tool}")
+        self.tools = tools
 
         react_signature = (
-            dspy.Signature({**signature.input_fields}, "\n".join(instr))
+            dspy.Signature({**signature.input_fields}, self._build_instructions())
+            .append("history", dspy.InputField(), type_=dspy.History)
+            .append("tools", dspy.InputField(), type_=list[dspy.Tool])
+            .append("next_thought", dspy.OutputField(), type_=str)
+            .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
+        )
+
+        # Submit-predict: a dedicated Predict with a directive to submit immediately.
+        # Used by _forced_submit when the main loop exhausts iterations.
+        outputs = ", ".join([f"`{k}`" for k in signature.output_fields.keys()])
+        submit_instr = (
+            f"{self._build_instructions()}\n\n"
+            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
+            f"with {outputs} based on the information you have gathered so far. "
+            f"Do not call any other tool. Call submit immediately."
+        )
+        submit_signature = (
+            dspy.Signature({**signature.input_fields}, submit_instr)
             .append("history", dspy.InputField(), type_=dspy.History)
             .append("tools", dspy.InputField(), type_=list[dspy.Tool])
             .append("next_thought", dspy.OutputField(), type_=str)
@@ -69,16 +75,12 @@ class ReActV2(Module):
             signature.instructions,
         ).append("trajectory", dspy.InputField(desc="The agent's history of thoughts, actions, and observations"), type_=str)
 
-        self.tools = tools
         self.react = dspy.Predict(react_signature)
+        self.submit_predict = dspy.Predict(submit_signature)
         self.extract = dspy.ChainOfThought(extract_signature)
 
-    def _rebuild_instructions(self):
-        """Regenerate the instruction string from current tool descs.
-
-        Called after GEPA updates tool.desc so that both text-mode prompts
-        and native FC schemas reflect the optimized descriptions.
-        """
+    def _build_instructions(self):
+        """Build the instruction string from current signature and tools."""
         inputs = ", ".join([f"`{k}`" for k in self.signature.input_fields.keys()])
         outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
         instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
@@ -93,9 +95,29 @@ class ReActV2(Module):
         for idx, tool in enumerate(self.tools.values()):
             instr.append(f"({idx + 1}) {tool}")
 
-        self.react.signature = self.react.signature.with_instructions("\n".join(instr))
+        return "\n".join(instr)
+
+    def _rebuild_instructions(self):
+        """Regenerate the instruction string from current tool descs.
+
+        Called after GEPA updates tool.desc so that both text-mode prompts
+        and native FC schemas reflect the optimized descriptions.
+        """
+        base_instr = self._build_instructions()
+        self.react.signature = self.react.signature.with_instructions(base_instr)
+
+        # Also update submit_predict's instructions with the refreshed tool descriptions.
+        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
+        submit_instr = (
+            f"{base_instr}\n\n"
+            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
+            f"with {outputs} based on the information you have gathered so far. "
+            f"Do not call any other tool. Call submit immediately."
+        )
+        self.submit_predict.signature = self.submit_predict.signature.with_instructions(submit_instr)
 
     def forward(self, **input_args):
+        # Callers can pass a History with a compact_fn for automatic compaction each iteration.
         history = input_args.pop("history", dspy.History(messages=[]))
         max_iters = input_args.pop("max_iters", self.max_iters)
         tool_list = list(self.tools.values())
@@ -103,29 +125,31 @@ class ReActV2(Module):
         if not history.has_open_episode():
             history.append_input(input_args)
 
+        break_reason = None
         for idx in range(max_iters):
-            history.compact_if_needed()
             try:
                 pred: dspy.Prediction = self.react(history=history, tools=tool_list, **input_args)
             except (AdapterParseError, ValueError) as err:
                 logger.warning(f"Agent iteration {idx} failed: {_fmt_exc(err)}")
+                break_reason = "parse_error"
                 break
 
             if pred.tool_calls is None or not pred.tool_calls.tool_calls:
                 logger.warning("Agent returned no tool calls, ending loop.")
+                break_reason = "no_tool_calls"
                 break
 
-            observations: list[tuple[Any, bool]] = []
+            observations: list[Observation] = []
             for tool_call in pred.tool_calls.tool_calls:
                 tool = self.tools.get(tool_call.name)
                 if tool is None:
-                    observations.append((f"Unknown tool: {tool_call.name}", True))
+                    observations.append(Observation(value=f"Unknown tool: {tool_call.name}", is_error=True))
                     continue
                 try:
                     result = tool(**tool_call.args)
-                    observations.append((result, False))
+                    observations.append(Observation(value=result, is_error=False))
                 except Exception as err:
-                    observations.append((f"Execution error in {tool_call.name}: {_fmt_exc(err)}", True))
+                    observations.append(Observation(value=f"Execution error in {tool_call.name}: {_fmt_exc(err)}", is_error=True))
 
             history.append_action(
                 thought=pred.next_thought,
@@ -133,133 +157,63 @@ class ReActV2(Module):
                 observations=observations,
             )
 
-            for tool_call, (result, did_err) in zip(pred.tool_calls.tool_calls, observations):
-                if tool_call.name == "submit" and not did_err:
-                    history.append_output(result)
-                    return dspy.Prediction(history=history, **result)
+            for tool_call, obs in zip(pred.tool_calls.tool_calls, observations):
+                if tool_call.name == "submit" and not obs.is_error:
+                    history.append_output(obs.value)
+                    return dspy.Prediction(history=history, termination_reason="submit", **obs.value)
 
         # Forced submit: ask the model to submit one more time
-        return self._forced_submit(history, input_args)
+        return self._forced_submit(history, input_args, break_reason=break_reason)
 
-    def _forced_submit(self, history, input_args):
-        # Bypass self.react so the directive is the LAST message the model sees.
-        # self.react would append a user message after our directive, drowning it out.
-        import json_repair
-
-        lm = dspy.settings.lm
-        adapter = dspy.settings.adapter or dspy.ChatAdapter()
-
-        # Replicate the same preprocessing that Predict.forward / adapter.__call__ would do.
-        signature = self.react.signature
-        demos = self.react.demos
+    def _forced_submit(self, history, input_args, break_reason=None):
         tool_list = list(self.tools.values())
-        inputs = {**input_args, "history": history, "tools": tool_list}
 
-        lm_kwargs = {**self.react.config}
-        processed_sig = adapter._call_preprocess(lm, lm_kwargs, signature, inputs)
-        messages = adapter.format(processed_sig, demos, inputs)
+        # Tier 1: Use submit_predict (has a directive to submit immediately in its instructions).
+        adapter = dspy.settings.adapter
+        native_fc = getattr(adapter, "use_native_function_calling", False) if adapter else False
 
-        # Build the directive that tells the model to call submit NOW.
-        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
-        directive = (
-            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
-            f"with {outputs} based on the information you have gathered so far. "
-            f"Do not call any other tool. Call submit immediately."
-        )
+        saved_config = dict(self.submit_predict.config)
+        if native_fc:
+            self.submit_predict.config["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
 
-        # Replace the last user message with our directive so it's the final
-        # thing the model sees before generating.
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                messages[i] = {"role": "user", "content": directive}
-                break
-
-        # When native function calling is active, mechanically force the submit tool
-        # so reasoning models can't ignore the directive via their internal CoT.
-        if "tools" in lm_kwargs:
-            lm_kwargs["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
-
-        # Call the LM directly.
         try:
-            raw_outputs = lm(messages=messages, **lm_kwargs)
+            pred = self.submit_predict(history=history, tools=tool_list, **input_args)
         except Exception:
-            # Provider may not support tool_choice; retry without it
-            lm_kwargs.pop("tool_choice", None)
-            try:
-                raw_outputs = lm(messages=messages, **lm_kwargs)
-            except Exception:
-                return dspy.Prediction(history=history)
+            pred = None
+        finally:
+            self.submit_predict.config.clear()
+            self.submit_predict.config.update(saved_config)
 
-        if not raw_outputs or not isinstance(raw_outputs, list):
-            return dspy.Prediction(history=history)
-
-        # Parse tool_calls from the first completion.
-        output = raw_outputs[0]
-        tool_calls = None
-        if isinstance(output, dict):
-            tool_calls = output.get("tool_calls")
-
-        # --- Native FC path: tool_calls present in the response dict ---
-        if tool_calls:
-            for tc in tool_calls:
-                name = tc.get("function", {}).get("name")
-                if name == "submit":
-                    args_raw = tc.get("function", {}).get("arguments", "{}")
-                    args = json_repair.loads(args_raw) if isinstance(args_raw, str) else args_raw
+        if pred and pred.tool_calls and pred.tool_calls.tool_calls:
+            for tool_call in pred.tool_calls.tool_calls:
+                if tool_call.name == "submit":
                     try:
-                        result = self.tools["submit"](**args)
+                        result = self.tools["submit"](**tool_call.args)
+                        history.append_action(
+                            thought=pred.next_thought,
+                            tool_calls=pred.tool_calls,
+                            observations=[Observation(value=result, is_error=False)],
+                        )
                         history.append_output(result)
-                        return dspy.Prediction(history=history, **result)
+                        return dspy.Prediction(history=history, termination_reason="forced_submit", **result)
                     except Exception:
                         pass
-            return dspy.Prediction(history=history)
 
-        # --- Non-native text path: parse the text response for a submit call ---
-        text = output if isinstance(output, str) else (output.get("text", "") if isinstance(output, dict) else "")
-        if text:
-            # Try to parse tool_calls from the text using the adapter
-            try:
-                parsed = adapter.parse(processed_sig, text)
-                tc_obj = parsed.get("tool_calls")
-                if tc_obj and hasattr(tc_obj, "tool_calls"):
-                    for tool_call in tc_obj.tool_calls:
-                        if tool_call.name == "submit":
-                            try:
-                                result = self.tools["submit"](**(tool_call.args or {}))
-                                history.append_output(result)
-                                return dspy.Prediction(history=history, **result)
-                            except Exception:
-                                pass
-            except Exception:
-                pass
-
-            # Last resort: try to extract output field values from the text
-            # using the original task signature (e.g. "question -> answer").
-            try:
-                parsed = adapter.parse(self.signature, text)
-                if any(v is not None for v in parsed.values()):
-                    history.append_output(parsed)
-                    return dspy.Prediction(history=history, **parsed)
-            except Exception:
-                pass
-
-        # --- Extract fallback: use a ChainOfThought call to extract the answer from history ---
+        # Tier 2: Extract fallback via ChainOfThought.
         try:
             trajectory_text = self._render_history_as_text(history)
             extract = self.extract(trajectory=trajectory_text, **input_args)
             result = {k: getattr(extract, k) for k in self.signature.output_fields if hasattr(extract, k)}
             if any(v is not None for v in result.values()):
                 history.append_output(result)
-                return dspy.Prediction(history=history, **result)
+                return dspy.Prediction(history=history, termination_reason="extract", **result)
         except Exception:
             pass
 
-        return dspy.Prediction(history=history)
+        return dspy.Prediction(history=history, termination_reason=break_reason or "failed")
 
     @staticmethod
     def _render_history_as_text(history) -> str:
-        from dspy.adapters.types.history import ActionEvent, InputEvent
-
         lines = []
         for event in history.messages:
             if isinstance(event, InputEvent):
@@ -273,12 +227,11 @@ class ReActV2(Module):
                         args_str = ", ".join(f"{k}={v!r}" for k, v in (tc.args or {}).items())
                         lines.append(f"[Action] {tc.name}({args_str})")
                         if i < len(event.observations):
-                            obs_val, was_err = event.observations[i]
+                            obs_val, was_err = event.observations[i].value, event.observations[i].is_error
                             prefix = "[Error]" if was_err else "[Observation]"
                             lines.append(f"{prefix} {obs_val}")
         return "\n".join(lines)
 
 
 def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
-    import traceback
     return "\n" + "".join(traceback.format_exception(type(err), err, err.__traceback__, limit=limit)).strip()

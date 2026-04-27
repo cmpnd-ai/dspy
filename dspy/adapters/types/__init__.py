@@ -2,12 +2,12 @@ from dspy.adapters.types.audio import Audio
 from dspy.adapters.types.base_type import Type
 from dspy.adapters.types.code import Code
 from dspy.adapters.types.file import File
-from dspy.adapters.types.history import ActionEvent, History, HistoryEvent, InputEvent, OutputEvent
+from dspy.adapters.types.history import ActionEvent, History, HistoryEvent, InputEvent, Observation, OutputEvent
 from dspy.adapters.types.image import Image
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import Tool, ToolCalls
 
 __all__ = [
-    "ActionEvent", "History", "HistoryEvent", "InputEvent", "OutputEvent",
+    "ActionEvent", "History", "HistoryEvent", "InputEvent", "Observation", "OutputEvent",
     "Image", "Audio", "File", "Type", "Tool", "ToolCalls", "Code", "Reasoning",
 ]

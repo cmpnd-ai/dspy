@@ -51,23 +51,6 @@ class ReActV2(Module):
             .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
         )
 
-        # Submit-predict: a dedicated Predict with a directive to submit immediately.
-        # Used by _forced_submit when the main loop exhausts iterations.
-        outputs = ", ".join([f"`{k}`" for k in signature.output_fields.keys()])
-        submit_instr = (
-            f"{self._build_instructions()}\n\n"
-            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
-            f"with {outputs} based on the information you have gathered so far. "
-            f"Do not call any other tool. Call submit immediately."
-        )
-        submit_signature = (
-            dspy.Signature({**signature.input_fields}, submit_instr)
-            .append("history", dspy.InputField(), type_=dspy.History)
-            .append("tools", dspy.InputField(), type_=list[dspy.Tool])
-            .append("next_thought", dspy.OutputField(), type_=str)
-            .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
-        )
-
         # Extract fallback: dedicated LM call to extract answer from history
         # (like v1's self.extract, fires only when submit fails in _forced_submit)
         extract_signature = dspy.Signature(
@@ -76,7 +59,6 @@ class ReActV2(Module):
         ).append("trajectory", dspy.InputField(desc="The agent's history of thoughts, actions, and observations"), type_=str)
 
         self.react = dspy.Predict(react_signature)
-        self.submit_predict = dspy.Predict(submit_signature)
         self.extract = dspy.ChainOfThought(extract_signature)
 
     def _build_instructions(self):
@@ -105,16 +87,6 @@ class ReActV2(Module):
         """
         base_instr = self._build_instructions()
         self.react.signature = self.react.signature.with_instructions(base_instr)
-
-        # Also update submit_predict's instructions with the refreshed tool descriptions.
-        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
-        submit_instr = (
-            f"{base_instr}\n\n"
-            f"You have used all your allowed iterations. You MUST call the `submit` tool now "
-            f"with {outputs} based on the information you have gathered so far. "
-            f"Do not call any other tool. Call submit immediately."
-        )
-        self.submit_predict.signature = self.submit_predict.signature.with_instructions(submit_instr)
 
     def forward(self, **input_args):
         # Callers can pass a History with a compact_fn for automatic compaction each iteration.
@@ -168,21 +140,21 @@ class ReActV2(Module):
     def _forced_submit(self, history, input_args, break_reason=None):
         tool_list = list(self.tools.values())
 
-        # Tier 1: Use submit_predict (has a directive to submit immediately in its instructions).
+        # Tier 1: Re-use self.react with tool_choice forced to submit.
         adapter = dspy.settings.adapter
         native_fc = getattr(adapter, "use_native_function_calling", False) if adapter else False
 
-        saved_config = dict(self.submit_predict.config)
+        saved_config = dict(self.react.config)
         if native_fc:
-            self.submit_predict.config["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
+            self.react.config["tool_choice"] = {"type": "function", "function": {"name": "submit"}}
 
         try:
-            pred = self.submit_predict(history=history, tools=tool_list, **input_args)
+            pred = self.react(history=history, tools=tool_list, **input_args)
         except Exception:
             pred = None
         finally:
-            self.submit_predict.config.clear()
-            self.submit_predict.config.update(saved_config)
+            self.react.config.clear()
+            self.react.config.update(saved_config)
 
         if pred and pred.tool_calls and pred.tool_calls.tool_calls:
             for tool_call in pred.tool_calls.tool_calls:

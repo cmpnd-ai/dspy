@@ -74,6 +74,38 @@ def format_field_value(field_info: FieldInfo, value: Any, assume_text=True) -> s
         return {"type": "text", "text": string_value}
 
 
+_SCHEMA_VALUE_KEYS = frozenset({
+    "not", "if", "then", "else", "items", "contains",
+    "additionalProperties", "additionalItems", "propertyNames",
+    "unevaluatedProperties", "unevaluatedItems",
+})
+_SCHEMA_MAP_KEYS = frozenset({"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"})
+_SCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems"})
+
+
+def strip_vendor_extensions(schema: Any) -> Any:
+    """Recursively strip OpenAPI/JSON Schema ``x-*`` vendor extensions in-place.
+
+    Recursion is scoped to known JSON Schema container keywords so user data inside
+    ``examples`` / ``default`` / ``const`` / ``enum`` is left untouched.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    for k in [k for k in schema if isinstance(k, str) and k.startswith("x-")]:
+        del schema[k]
+    for k in _SCHEMA_VALUE_KEYS & schema.keys():
+        strip_vendor_extensions(schema[k])
+    for k in _SCHEMA_MAP_KEYS & schema.keys():
+        if isinstance(schema[k], dict):
+            for sub in schema[k].values():
+                strip_vendor_extensions(sub)
+    for k in _SCHEMA_LIST_KEYS & schema.keys():
+        if isinstance(schema[k], list):
+            for sub in schema[k]:
+                strip_vendor_extensions(sub)
+    return schema
+
+
 def _get_json_schema(field_type):
     def move_type_to_front(d):
         # Move the 'type' key to the front of the dictionary, recursively, for LLM readability/adherence.
@@ -86,6 +118,7 @@ def _get_json_schema(field_type):
         return d
 
     schema = pydantic.TypeAdapter(field_type).json_schema()
+    schema = strip_vendor_extensions(schema)
     schema = move_type_to_front(schema)
     return schema
 

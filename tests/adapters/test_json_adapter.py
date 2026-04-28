@@ -855,6 +855,66 @@ def test_json_adapter_toolcalls_native_function_calling():
         assert result[0]["tool_calls"] is None
 
 
+def test_json_adapter_strips_vendor_extensions_from_response_format():
+    # Regression for #9686: x-* keys leaked into response_format break strict providers.
+    from dspy.adapters.json_adapter import _get_structured_outputs_response_format
+
+    class Form(pydantic.BaseModel):
+        name: str | None = pydantic.Field(
+            default=None,
+            json_schema_extra={"x-comparison": "exact", "examples": ["Alice"]},
+        )
+
+    class Extract(dspy.Signature):
+        text: str = dspy.InputField()
+        form: Form = dspy.OutputField()
+
+    schema_str = str(_get_structured_outputs_response_format(Extract).model_json_schema())
+    assert "x-comparison" not in schema_str
+    assert "examples" in schema_str
+
+
+def test_translate_field_type_strips_vendor_extensions_from_prompt_schema():
+    from dspy.adapters.utils import translate_field_type
+
+    class Form(pydantic.BaseModel):
+        name: str | None = pydantic.Field(
+            default=None,
+            json_schema_extra={"x-comparison": "exact", "pattern": "^[A-Z].*"},
+        )
+
+    class Extract(dspy.Signature):
+        text: str = dspy.InputField()
+        form: Form = dspy.OutputField()
+
+    rendered = translate_field_type("form", Extract.output_fields["form"])
+    assert "x-comparison" not in rendered
+    assert "pattern" in rendered
+
+
+def test_strip_vendor_extensions_helper():
+    from dspy.adapters.utils import strip_vendor_extensions
+
+    schema = {
+        "x-foo": 1,
+        "properties": {
+            "a": {"x-bar": 1, "examples": [{"x-keep": "user data"}]},
+            "b": {"anyOf": [{"x-baz": True}, {"type": "null"}]},
+        },
+        "$defs": {"N": {"x-internal": 1, "items": {"x-drop": 1, "minimum": 0}}},
+    }
+    strip_vendor_extensions(schema)
+
+    assert "x-foo" not in schema
+    assert "x-bar" not in schema["properties"]["a"]
+    # User data inside `examples` is not a schema position; must not be touched.
+    assert schema["properties"]["a"]["examples"] == [{"x-keep": "user data"}]
+    assert "x-baz" not in schema["properties"]["b"]["anyOf"][0]
+    assert "x-internal" not in schema["$defs"]["N"]
+    assert "x-drop" not in schema["$defs"]["N"]["items"]
+    assert schema["$defs"]["N"]["items"]["minimum"] == 0
+
+
 def test_json_adapter_toolcalls_no_native_function_calling():
     class MySignature(dspy.Signature):
         question: str = dspy.InputField()

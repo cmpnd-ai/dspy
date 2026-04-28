@@ -14,6 +14,7 @@ from dspy.adapters.utils import (
     get_annotation_name,
     parse_value,
     serialize_for_json,
+    strip_vendor_extensions,
     translate_field_type,
 )
 from dspy.clients.base_lm import BaseLM
@@ -246,12 +247,11 @@ def _get_structured_outputs_response_format(
         **fields,
     )
 
-    # Generate the initial schema.
     schema = pydantic_model.model_json_schema()
 
-    # Remove any DSPy-specific metadata.
-    for prop in schema.get("properties", {}).values():
-        prop.pop("json_schema_extra", None)
+    # Strict-schema providers reject ``x-*`` peer keys that Pydantic merges in from
+    # ``json_schema_extra`` (see issue #9686).
+    strip_vendor_extensions(schema)
 
     def enforce_required(schema_part: dict):
         """

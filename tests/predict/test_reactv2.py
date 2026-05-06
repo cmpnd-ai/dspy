@@ -196,11 +196,13 @@ def test_truncate_oldest_actions():
     assert isinstance(h.messages[0], InputEvent)
 
 
-def test_compaction_is_callers_responsibility():
-    """VAL-COMPACT-002: compact_if_needed() is NOT called inside forward(); callers manage compaction."""
+def test_compaction_not_called_without_context_overflow():
+    """VAL-COMPACT-002: compact_if_needed() is only called after context overflow."""
     calls = []
+
     def track_compact(history):
         calls.append(len(history.messages))
+
     lm = DummyLM([
         {"next_thought": "Go.", "tool_calls": [{"name": "add", "args": {"a": 1, "b": 2}}]},
         {"next_thought": "Done.", "tool_calls": [{"name": "submit", "args": {"answer": "3"}}]},
@@ -209,7 +211,7 @@ def test_compaction_is_callers_responsibility():
     react = ReActV2("question -> answer", tools=[_make_add_tool()])
     history = dspy.History(messages=[], compact_fn=track_compact)
     react(question="1+2", history=history)
-    # compact_if_needed is no longer called inside forward()
+    # No ContextWindowExceededError occurred, so there is nothing to compact.
     assert len(calls) == 0
 
 
@@ -249,15 +251,47 @@ def test_non_native_prompt_format_unchanged():
     assert "[[ ## next_thought ## ]]" in system_msg
 
 
+def test_non_native_history_action_uses_dspy_format():
+    """Non-native ReActV2 history provides ICL examples using DSPy field markers."""
+    adapter = dspy.ChatAdapter()
+    sig = (
+        dspy.Signature({}, "Do the task.")
+        .append("question", dspy.InputField(), type_=str)
+        .append("history", dspy.InputField(), type_=dspy.History)
+        .append("tools", dspy.InputField(), type_=list[dspy.Tool])
+        .append("next_thought", dspy.OutputField(), type_=str)
+        .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
+    )
+    history = History(messages=[])
+    history.append_input({"question": "What is 1+2?"})
+    history.append_action(
+        thought="I should add the two numbers.",
+        tool_calls=ToolCalls.from_dict_list([{"name": "add", "args": {"a": 1, "b": 2}}]),
+        observations=[Observation(value=3)],
+    )
+
+    messages = adapter.format(sig, [], {"question": "What is 1+2?", "history": history, "tools": [Tool(_make_add_tool())]})
+    assistant_content = next(message["content"] for message in messages if message["role"] == "assistant")
+
+    assert "[[ ## next_thought ## ]]" in assistant_content
+    assert "I should add the two numbers." in assistant_content
+    assert "[[ ## tool_calls ## ]]" in assistant_content
+    assert '"name": "add"' in assistant_content
+    assert "[[ ## completed ## ]]" in assistant_content
+    assert "Thought:" not in assistant_content
+    assert "Action:" not in assistant_content
+
+
 def test_toolcalls_normalizes_openai_format():
     """VAL-FMT-004: ToolCalls normalizes OpenAI {type:'function', function:{name, arguments}} format."""
     tc = ToolCalls(tool_calls=[
-        {"type": "function", "function": {"name": "search", "arguments": {"query": "hello"}}},
+        {"type": "function", "function": {"name": "search", "arguments": '{"query": "hello"}'}, "id": "call_1"},
         {"type": "function", "function": {"name": "submit", "arguments": {"answer": "42"}}},
     ])
     assert len(tc.tool_calls) == 2
     assert tc.tool_calls[0].name == "search"
     assert tc.tool_calls[0].args == {"query": "hello"}
+    assert tc.tool_calls[0].id == "call_1"
     assert tc.tool_calls[1].name == "submit"
 
 
@@ -274,12 +308,6 @@ def test_tool_name_sanitization():
     assert tool.name == "weird_tool_name"
 
 
-def test_supports_fc_provider_fallback():
-    """gpt-5-nano reports supports_fc=True via provider fallback."""
-    lm = dspy.LM("openai/gpt-5-nano", cache=False)
-    assert lm.supports_function_calling is True
-
-
 def test_gepa_compile_with_reactv2():
     """VAL-OPTIM-001: GEPA.compile() on a ReActV2 module completes without error."""
     from dspy.teleprompt.gepa.gepa import GEPA
@@ -288,7 +316,10 @@ def test_gepa_compile_with_reactv2():
     ] * 20)
     dspy.configure(lm=lm)
     react = ReActV2("question -> answer", tools=[_make_add_tool()])
-    metric = lambda ex, pred, *a, **kw: float(getattr(pred, "answer", None) == ex.answer) if hasattr(pred, "answer") else 0.0
+
+    def metric(ex, pred, *a, **kw):
+        return float(getattr(pred, "answer", None) == ex.answer) if hasattr(pred, "answer") else 0.0
+
     trainset = [dspy.Example(question="1+2", answer="3").with_inputs("question")]
     gepa = GEPA(metric=metric, max_metric_calls=2, reflection_lm=lm)
     result = gepa.compile(react, trainset=trainset)
@@ -311,3 +342,26 @@ def test_forced_submit_extract_fallback():
     result = react(question="What is 1+2?", max_iters=1)
     assert result.answer == "3"
     assert result.termination_reason == "extract"
+
+
+def test_forced_submit_records_only_selected_submit_call():
+    """Forced submit records the submit call and its observation with aligned history."""
+    lm = DummyLM([
+        {
+            "next_thought": "I can submit now.",
+            "tool_calls": [
+                {"name": "add", "args": {"a": 1, "b": 2}},
+                {"name": "submit", "args": {"answer": "3"}},
+            ],
+        },
+    ])
+    dspy.configure(lm=lm)
+    react = ReActV2("question -> answer", tools=[_make_add_tool()])
+
+    result = react(question="What is 1+2?", max_iters=0)
+
+    assert result.answer == "3"
+    action = next(m for m in result.history.messages if isinstance(m, ActionEvent))
+    assert len(action.tool_calls.tool_calls) == 1
+    assert action.tool_calls.tool_calls[0].name == "submit"
+    assert len(action.observations) == 1

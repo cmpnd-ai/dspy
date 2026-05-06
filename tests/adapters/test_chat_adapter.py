@@ -562,7 +562,13 @@ def test_chat_adapter_toolcalls_native_function_calling():
         )
 
         assert result[0]["tool_calls"] == dspy.ToolCalls(
-            tool_calls=[dspy.ToolCalls.ToolCall(name="get_weather", args={"city": "Paris"})]
+            tool_calls=[
+                dspy.ToolCalls.ToolCall(
+                    name="get_weather",
+                    args={"city": "Paris"},
+                    id="call_pQm8ajtSMxgA0nrzK2ivFmxG",
+                )
+            ]
         )
         # `answer` is not present, so we set it to None
         assert result[0]["answer"] is None
@@ -726,7 +732,7 @@ def test_format_system_message():
     expected_system_message = """Your input fields are:
 1. `question` (str):
 Your output fields are:
-1. `answers` (list[str]): 
+1. `answers` (list[str]):\x20
 2. `scores` (list[float]):
 All interactions will be structured in the following way, with the appropriate values filled in.
 
@@ -740,7 +746,7 @@ All interactions will be structured in the following way, with the appropriate v
 {scores}        # note: the value you produce must adhere to the JSON schema: {"type": "array", "items": {"type": "number"}}
 
 [[ ## completed ## ]]
-In adhering to this structure, your objective is: 
+In adhering to this structure, your objective is:\x20
         Answer the question with multiple answers and scores"""
     assert system_message == expected_system_message
 

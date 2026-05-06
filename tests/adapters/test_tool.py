@@ -577,7 +577,7 @@ def test_tool_call_execute():
     tool_call4 = dspy.ToolCalls.ToolCall(name="nonexistent", args={})
     try:
         tool_call4.execute(functions=tools)
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "not found" in str(e)
 

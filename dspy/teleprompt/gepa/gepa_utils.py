@@ -149,7 +149,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
 
         # Rebuild instruction strings for any module that has tools
         # This ensures the text-mode prompt reflects the optimized tool descs
-        for mod_name, mod in new_prog.named_sub_modules():
+        for _mod_name, mod in new_prog.named_sub_modules():
             if hasattr(mod, "tools") and hasattr(mod, "_rebuild_instructions"):
                 mod._rebuild_instructions()
 
@@ -214,20 +214,17 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         program = self.build_program(candidate)
 
         # Build predictor lookup once
-        predictors = {name: m for name, m in program.named_predictors()}
+        predictors = dict(program.named_predictors())
 
         ret_d: dict[str, list[ReflectiveExample]] = {}
 
         for pred_name in components_to_update:
-            is_tool_component = False
-
             if pred_name in predictors:
                 module = predictors[pred_name]
             else:
                 # This is a tool component (e.g. tools['add']).
                 # Use the first predictor's traces — tool descriptions affect how
                 # the parent predictor behaves, so its traces carry the relevant signal.
-                is_tool_component = True
                 module = next(iter(predictors.values()), None)
                 if module is None:
                     logger.warning(f"  No predictor found to use as parent for tool component {pred_name}")

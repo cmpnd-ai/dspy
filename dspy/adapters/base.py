@@ -1,8 +1,5 @@
-import hashlib
 import logging
 from typing import Any, get_origin
-
-import json_repair
 
 from dspy.adapters.types import ActionEvent, History, InputEvent, LegacyEvent, OutputEvent, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
@@ -150,15 +147,7 @@ class Adapter:
                 )
 
             if tool_calls and tool_call_output_field_name:
-                tool_calls = [
-                    {
-                        "name": v["function"]["name"],
-                        "args": json_repair.loads(v["function"]["arguments"]),
-                        **({"id": v["id"]} if "id" in v else {}),
-                    }
-                    for v in tool_calls
-                ]
-                value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+                value[tool_call_output_field_name] = ToolCalls.model_validate(tool_calls)
 
             # Parse custom types that does not rely on the `Adapter.parse()` method
             for name, field in original_signature.output_fields.items():
@@ -519,7 +508,7 @@ class Adapter:
             return []
 
         messages = []
-        for message in conversation_history:
+        for event_idx, message in enumerate(conversation_history):
             if isinstance(message, InputEvent):
                 content = self.format_user_message_content(signature, message.inputs)
                 if content.strip():
@@ -536,9 +525,9 @@ class Adapter:
                     # assistant message and the corresponding tool-response messages
                     # reference the same ID (required by the OpenAI API).
                     resolved_ids = []
-                    for tc in tc_obj.tool_calls:
-                        resolved_ids.append(tc.id or f"call_{hashlib.md5(f'{tc.name}:{tc.args}'.encode()).hexdigest()[:12]}")
-                    for tc, tid in zip(tc_obj.tool_calls, resolved_ids):
+                    for call_idx, tc in enumerate(tc_obj.tool_calls):
+                        resolved_ids.append(tc.id or f"call_{event_idx}_{call_idx}")
+                    for tc, tid in zip(tc_obj.tool_calls, resolved_ids, strict=True):
                         fmt = tc.format()
                         # Ensure the id is always present
                         fmt["id"] = tid
@@ -550,20 +539,15 @@ class Adapter:
                     if thought:
                         asst_msg["content"] = str(thought)
                     messages.append(asst_msg)
-                    for tid, obs_item in zip(resolved_ids, obs):
+                    for tid, obs_item in zip(resolved_ids, obs, strict=False):
                         content = str(obs_item.value) if not isinstance(obs_item.value, list) else "\n".join(str(r) for r in obs_item.value)
                         messages.append({"role": "tool", "content": content, "tool_call_id": tid})
                 else:
-                    # Non-native text mode: render tool calls as plain text so that
-                    # no JSON resembling native FC format leaks into the messages.
-                    parts = []
-                    if message.thought:
-                        parts.append(f"Thought: {message.thought}")
-                    if tc_obj and hasattr(tc_obj, "tool_calls"):
-                        for tc in tc_obj.tool_calls:
-                            args_str = ", ".join(f"{k}={v!r}" for k, v in (tc.args or {}).items())
-                            parts.append(f"Action: {tc.name}({args_str})")
-                    asst_content = "\n".join(parts) if parts else "..."
+                    asst_content = self.format_assistant_message_content(
+                        signature,
+                        {"next_thought": message.thought, "tool_calls": tc_obj},
+                        missing_field_message="Not supplied for this conversation history message. ",
+                    )
                     messages.append({"role": "assistant", "content": asst_content})
                     if obs:
                         obs_parts = []

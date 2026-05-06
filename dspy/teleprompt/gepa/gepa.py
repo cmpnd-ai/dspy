@@ -107,27 +107,27 @@ class DspyGEPAResult:
     @property
     def highest_score_achieved_per_val_task(self) -> list[float]:
         return [
-            self.val_subscores[list(self.per_val_instance_best_candidates[val_idx])[0]][val_idx]
+            self.val_subscores[next(iter(self.per_val_instance_best_candidates[val_idx]))][val_idx]
             for val_idx in range(len(self.val_subscores[0]))
         ]
 
     def to_dict(self) -> dict[str, Any]:
-        cands = [{k: v for k, v in cand.items()} for cand in self.candidates]
+        cands = [dict(cand) for cand in self.candidates]
 
-        return dict(
-            candidates=cands,
-            parents=self.parents,
-            val_aggregate_scores=self.val_aggregate_scores,
-            best_outputs_valset=self.best_outputs_valset,
-            val_subscores=self.val_subscores,
-            per_val_instance_best_candidates=[list(s) for s in self.per_val_instance_best_candidates],
-            discovery_eval_counts=self.discovery_eval_counts,
-            total_metric_calls=self.total_metric_calls,
-            num_full_val_evals=self.num_full_val_evals,
-            log_dir=self.log_dir,
-            seed=self.seed,
-            best_idx=self.best_idx,
-        )
+        return {
+            "candidates": cands,
+            "parents": self.parents,
+            "val_aggregate_scores": self.val_aggregate_scores,
+            "best_outputs_valset": self.best_outputs_valset,
+            "val_subscores": self.val_subscores,
+            "per_val_instance_best_candidates": [list(s) for s in self.per_val_instance_best_candidates],
+            "discovery_eval_counts": self.discovery_eval_counts,
+            "total_metric_calls": self.total_metric_calls,
+            "num_full_val_evals": self.num_full_val_evals,
+            "log_dir": self.log_dir,
+            "seed": self.seed,
+            "best_idx": self.best_idx,
+        }
 
     @staticmethod
     def from_gepa_result(gepa_result: "GEPAResult", adapter: "DspyAdapter") -> "DspyGEPAResult":
@@ -439,27 +439,27 @@ class GEPA(Teleprompter):
         if full_eval_steps < 1:
             raise ValueError("full_eval_steps must be >= 1.")
 
-        V = valset_size
-        N = num_trials
-        M = minibatch_size
+        val_count = valset_size
+        trial_count = num_trials
+        minibatch_count = minibatch_size
         m = full_eval_steps
 
         # Initial full evaluation on the default program
-        total = V
+        total = val_count
 
         # Assume upto 5 trials for bootstrapping each candidate
         total += num_candidates * 5
 
-        # N minibatch evaluations
-        total += N * M
-        if N == 0:
+        # Minibatch evaluations
+        total += trial_count * minibatch_count
+        if trial_count == 0:
             return total  # no periodic/full evals inside the loop
-        # Periodic full evals occur when trial_num % (m+1) == 0, where trial_num runs 2..N+1
-        periodic_fulls = (N + 1) // (m) + 1
-        # If 1 <= N < m, the code triggers one final full eval at the end
-        extra_final = 1 if N < m else 0
+        # Periodic full evals occur when trial_num % (m+1) == 0.
+        periodic_fulls = (trial_count + 1) // m + 1
+        # If 1 <= trial_count < m, the code triggers one final full eval at the end
+        extra_final = 1 if trial_count < m else 0
 
-        total += (periodic_fulls + extra_final) * V
+        total += (periodic_fulls + extra_final) * val_count
         return total
 
     def compile(
@@ -539,7 +539,7 @@ class GEPA(Teleprompter):
                         o["feedback"] = f"This trajectory got a score of {o['score']}."
                     return o
                 else:
-                    return dict(score=o, feedback=f"This trajectory got a score of {o}.")
+                    return {"score": o, "feedback": f"This trajectory got a score of {o}."}
 
             return feedback_fn
 
@@ -561,21 +561,25 @@ class GEPA(Teleprompter):
         )
 
         # Build the seed candidate: map each predictor name to its current instruction
-        seed_candidate = {name: pred.signature.instructions for name, pred in student.named_predictors()}
+        named_predictors = list(student.named_predictors())
+        seed_candidate = {name: pred.signature.instructions for name, pred in named_predictors}
 
         # Also discover tools and add their descs as optimizable components
         from dspy.adapters.types.tool import Tool as DspyTool
 
-        for name, param in student.named_parameters():
-            if isinstance(param, DspyTool) and param.name != "submit":
-                seed_candidate[name] = param.desc or ""
+        tool_params = [
+            (name, param)
+            for name, param in student.named_parameters()
+            if isinstance(param, DspyTool) and param.name != "submit"
+        ]
+        for name, param in tool_params:
+            seed_candidate[name] = param.desc or ""
 
         # Add feedback entries for tool components, reusing the parent predictor's feedback
-        for name, param in student.named_parameters():
-            if isinstance(param, DspyTool) and param.name != "submit":
-                parent_pred_name = next((pname for pname, _ in student.named_predictors()), None)
-                if parent_pred_name and parent_pred_name in feedback_map:
-                    feedback_map[name] = feedback_map[parent_pred_name]
+        parent_pred_name = named_predictors[0][0] if named_predictors else None
+        if parent_pred_name and parent_pred_name in feedback_map:
+            for name, _ in tool_params:
+                feedback_map[name] = feedback_map[parent_pred_name]
 
         gepa_result: GEPAResult = optimize(
             seed_candidate=seed_candidate,

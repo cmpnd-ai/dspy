@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Callable
 
 import dspy
 from dspy.adapters.types.history import ActionEvent, InputEvent, Observation
-from dspy.adapters.types.tool import Tool
+from dspy.adapters.types.tool import Tool, ToolCalls
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError
@@ -148,7 +148,7 @@ class ReActV2(Module):
                 observations=observations,
             )
 
-            for tool_call, obs in zip(pred.tool_calls.tool_calls, observations):
+            for tool_call, obs in zip(pred.tool_calls.tool_calls, observations, strict=True):
                 if tool_call.name == "submit" and not obs.is_error:
                     history.append_output(obs.value)
                     return dspy.Prediction(history=history, termination_reason="submit", **obs.value)
@@ -180,7 +180,7 @@ class ReActV2(Module):
                         result = self.tools["submit"](**tool_call.args)
                         history.append_action(
                             thought=pred.next_thought,
-                            tool_calls=pred.tool_calls,
+                            tool_calls=ToolCalls(tool_calls=[tool_call]),
                             observations=[Observation(value=result, is_error=False)],
                         )
                         history.append_output(result)

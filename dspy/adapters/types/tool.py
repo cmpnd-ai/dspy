@@ -3,6 +3,7 @@ import inspect
 import re
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
+import json_repair
 import pydantic
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, TypeAdapter, create_model
@@ -363,8 +364,7 @@ class ToolCalls(Type):
             tool_calls = ToolCalls.from_dict_list(tool_calls_dict)
             ```
         """
-        tool_calls = [cls.ToolCall(**item) for item in tool_calls_dicts]
-        return cls(tool_calls=tool_calls)
+        return cls.model_validate(tool_calls_dicts)
 
     @classmethod
     def description(cls) -> str:
@@ -382,9 +382,28 @@ class ToolCalls(Type):
     @staticmethod
     def _normalize_openai_tool_call(item: dict) -> dict:
         """Normalize {type:'function', function:{name, arguments}} → {name, args}."""
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            return item
         if "type" in item and item["type"] == "function" and "function" in item:
             fn = item["function"]
-            return {"name": fn["name"], "args": fn.get("arguments", {})}
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                args = json_repair.loads(args)
+            normalized = {"name": fn["name"], "args": args}
+            if "id" in item:
+                normalized["id"] = item["id"]
+            return normalized
+        if item.get("type") == "function_call" and "name" in item:
+            args = item.get("arguments", {})
+            if isinstance(args, str):
+                args = json_repair.loads(args)
+            normalized = {"name": item["name"], "args": args}
+            call_id = item.get("call_id") or item.get("id")
+            if call_id:
+                normalized["id"] = call_id
+            return normalized
         return item
 
     @pydantic.model_validator(mode="before")
@@ -394,7 +413,7 @@ class ToolCalls(Type):
             return data
 
         # Handle case where data is a list of dicts
-        if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+        if isinstance(data, list):
             normalized = [cls._normalize_openai_tool_call(item) for item in data]
             if all("name" in item and "args" in item for item in normalized):
                 return {"tool_calls": [cls.ToolCall(**item) for item in normalized]}
@@ -426,7 +445,7 @@ def _resolve_json_schema_reference(schema: dict) -> dict:
         return schema
 
     def resolve_refs(obj: Any) -> Any:
-        if not isinstance(obj, (dict, list)):
+        if not isinstance(obj, dict | list):
             return obj
         if isinstance(obj, dict):
             if "$ref" in obj:

@@ -4,11 +4,10 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
-from cachetools import LRUCache
 from diskcache import FanoutCache
 
 import dspy
-from dspy.clients.cache import Cache
+from dspy.clients.cache import Cache, LRUCache
 
 
 @dataclass

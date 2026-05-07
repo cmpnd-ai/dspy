@@ -33,7 +33,6 @@ dependencies = [
     "tenacity>=8.2.3",  # undeclared runtime dep of litellm, needed for exponential_backoff_retry
     "anyio",
     "asyncer==0.0.8",
-    "cachetools>=5.5.0",
     "cloudpickle>=3.1.2",
     "numpy>=1.26.0",
     "xxhash>=3.5.0",

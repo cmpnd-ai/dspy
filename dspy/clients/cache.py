@@ -3,6 +3,7 @@ import inspect
 import logging
 import os
 import threading
+from collections import OrderedDict
 from functools import wraps
 from hashlib import sha256
 from typing import Any
@@ -10,7 +11,6 @@ from typing import Any
 import cloudpickle
 import orjson
 import pydantic
-from cachetools import LRUCache
 from diskcache import FanoutCache
 
 from dspy.clients.disk_serialization import (
@@ -19,6 +19,38 @@ from dspy.clients.disk_serialization import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class LRUCache(OrderedDict):
+    """Least-recently-used cache backed by :class:`collections.OrderedDict`.
+
+    Drop-in replacement for ``cachetools.LRUCache`` covering the subset used by
+    DSPy: ``maxsize``, ``__getitem__``/``get``/``__setitem__``/``__contains__``/
+    ``clear``, and cloudpickle serialization.
+    """
+
+    def __init__(self, maxsize: int):
+        super().__init__()
+        self.maxsize = maxsize
+
+    def __getitem__(self, key):
+        self.move_to_end(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self.maxsize:
+            self.pop(next(iter(self)))
+
+    def __reduce__(self):
+        return (self.__class__, (self.maxsize,), None, None, iter(self.items()))
 
 
 def _transform_value(value):
@@ -41,7 +73,7 @@ class Cache:
     """DSPy Cache
 
     `Cache` provides 2 levels of caching (in the given order):
-        1. In-memory cache - implemented with cachetools.LRUCache
+        1. In-memory cache - implemented with LRUCache (OrderedDict-based)
         2. On-disk cache - implemented with diskcache.FanoutCache
     """
 

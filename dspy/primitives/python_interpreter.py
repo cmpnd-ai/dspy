@@ -387,6 +387,8 @@ class PythonInterpreter:
                 continue
 
             if response.get("id") != request_id:
+                if response.get("id") is None and "error" in response:
+                    raise CodeInterpreterError(f"Deno error {context}: {response['error'].get('message', 'Unknown error')}")
                 raise CodeInterpreterError(f"Response ID mismatch {context}: expected {request_id}, got {response.get('id')}")
             if "error" in response:
                 raise CodeInterpreterError(f"Error {context}: {response['error'].get('message', 'Unknown error')}")

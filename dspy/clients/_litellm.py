@@ -1,6 +1,8 @@
 import logging
 import os
 
+from dspy.utils.lazy_import import require
+
 _litellm = None
 
 
@@ -20,14 +22,8 @@ def get_litellm():
     if "LITELLM_LOCAL_MODEL_COST_MAP" not in os.environ:
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
-    try:
-        import litellm
-        from litellm._logging import verbose_logger
-    except ImportError as e:
-        raise ImportError(
-            "litellm is required to use dspy.LM. "
-            "Install with `pip install dspy[litellm]` or `pip install litellm`."
-        ) from e
+    litellm = require("litellm", extra="litellm", feature="dspy.LM")
+    verbose_logger = require("litellm._logging", extra="litellm", feature="dspy.LM").verbose_logger
 
     litellm.telemetry = False
     litellm.cache = None

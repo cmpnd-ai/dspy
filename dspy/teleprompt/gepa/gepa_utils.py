@@ -9,6 +9,7 @@ from dspy.adapters.types.base_type import Type
 from dspy.evaluate import Evaluate
 from dspy.primitives import Example, Prediction
 from dspy.teleprompt.bootstrap_trace import FailedPrediction, TraceData
+from dspy.utils.lazy_import import optional, require
 
 if TYPE_CHECKING:
     from gepa import EvaluationBatch, GEPAAdapter
@@ -18,12 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _require_gepa():
-    try:
-        import gepa  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "gepa is required to use dspy.GEPA. Install with `pip install dspy[gepa]` or `pip install gepa`."
-        ) from e
+    require("gepa", extra="gepa", feature="dspy.GEPA")
 
 
 def _get_gepa_adapter_base():
@@ -32,11 +28,10 @@ def _get_gepa_adapter_base():
     Returning `object` lets ``DspyAdapter`` be defined at import time without gepa;
     actual use is gated by ``_require_gepa()`` inside methods that touch gepa internals.
     """
-    try:
-        from gepa import GEPAAdapter
-        return GEPAAdapter[Example, "TraceData", Prediction]
-    except ImportError:
+    GEPAAdapter = optional("gepa", "GEPAAdapter")
+    if GEPAAdapter is None:
         return object
+    return GEPAAdapter[Example, "TraceData", Prediction]
 
 
 class LoggerAdapter:

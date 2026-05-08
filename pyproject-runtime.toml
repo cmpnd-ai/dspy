@@ -33,6 +33,7 @@ dependencies = [
     "json-repair>=0.54.2",
     "tenacity>=8.2.3",
     "jsonschema>=4.0",
+    "jiter>=0.4.0",
     # Transitional: scheduled to be made optional separately.
     "numpy>=1.26.0",
     "cachetools>=5.5.0",

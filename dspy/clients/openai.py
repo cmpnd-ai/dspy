@@ -4,17 +4,11 @@ from typing import Any
 
 from dspy.clients.provider import Provider, TrainingJob
 from dspy.clients.utils_finetune import TrainDataFormat, TrainingStatus, save_data
+from dspy.utils.lazy_import import require
 
 
 def _openai():
-    try:
-        import openai
-        return openai
-    except ImportError as e:
-        raise ImportError(
-            "openai is required to use the OpenAI provider for finetuning. "
-            "Install with `pip install openai` or `pip install dspy[full]`."
-        ) from e
+    return require("openai", extra="full", feature="the OpenAI finetuning provider")
 
 
 class TrainingJobOpenAI(TrainingJob):

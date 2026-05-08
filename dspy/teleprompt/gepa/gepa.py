@@ -492,12 +492,11 @@ class GEPA(Teleprompter):
         - trainset: The training set to use for reflective updates.
         - valset: The validation set to use for tracking Pareto scores. If not provided, GEPA will use the trainset for both.
         """
-        try:
-            from gepa import GEPAResult, optimize
-        except ImportError as e:
-            raise ImportError(
-                "gepa is required to use dspy.GEPA. Install with `pip install dspy[gepa]` or `pip install gepa`."
-            ) from e
+        from dspy.utils.lazy_import import require
+
+        gepa = require("gepa", extra="gepa", feature="dspy.GEPA")
+        GEPAResult = gepa.GEPAResult
+        optimize = gepa.optimize
 
         from dspy.teleprompt.gepa.gepa_utils import DspyAdapter, LoggerAdapter
 

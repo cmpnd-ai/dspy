@@ -6,12 +6,11 @@ from asyncio import iscoroutinefunction
 from queue import Queue
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Generator
 
-import litellm
 import orjson
 from anyio import create_memory_object_stream, create_task_group
 from anyio.streams.memory import MemoryObjectSendStream
-from litellm import ModelResponseStream
 
+from dspy.clients._litellm import get_litellm
 from dspy.dsp.utils.settings import settings
 from dspy.primitives.prediction import Prediction
 from dspy.streaming.messages import StatusMessage, StatusMessageProvider, StatusStreamingCallback
@@ -21,6 +20,8 @@ from dspy.utils.asyncify import asyncify
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from litellm import ModelResponseStream
+
     from dspy.primitives.module import Module
 
 
@@ -173,12 +174,13 @@ def streamify(
         await stream.send(prediction)
 
     async def async_streamer(*args, **kwargs):
+        litellm = get_litellm()
         send_stream, receive_stream = create_memory_object_stream(16)
         async with create_task_group() as tg, send_stream, receive_stream:
             tg.start_soon(generator, args, kwargs, send_stream)
 
             async for value in receive_stream:
-                if isinstance(value, ModelResponseStream):
+                if isinstance(value, litellm.ModelResponseStream):
                     if len(predict_id_to_listener) == 0:
                         # No listeners are configured, yield the chunk directly for backwards compatibility.
                         yield value
@@ -267,6 +269,7 @@ async def streaming_response(streamer: AsyncGenerator) -> AsyncGenerator:
     Returns:
         An async generator that yields OpenAI-compatible streaming response chunks.
     """
+    litellm = get_litellm()
     async for value in streamer:
         if isinstance(value, Prediction):
             data = {"prediction": dict(value.items(include_dspy=False))}

@@ -3,8 +3,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import litellm
-
+from dspy.clients._litellm import get_litellm
 from dspy.clients.base_lm import BaseLM, inspect_history
 from dspy.clients.cache import Cache
 from dspy.clients.embedding import Embedder
@@ -56,10 +55,6 @@ def configure_cache(
     dspy.cache = DSPY_CACHE
 
 
-litellm.telemetry = False
-litellm.cache = None  # By default we disable LiteLLM cache and use DSPy on-disk cache.
-
-
 def _get_dspy_cache():
     disk_cache_dir = os.environ.get("DSPY_CACHEDIR") or os.path.join(Path.home(), ".dspy_cache")
     disk_cache_limit = int(os.environ.get("DSPY_CACHE_LIMIT", 3e10))
@@ -101,17 +96,14 @@ def configure_litellm_logging(level: str = "ERROR"):
 
 
 def enable_litellm_logging():
-    litellm.suppress_debug_info = False
+    get_litellm().suppress_debug_info = False
     configure_litellm_logging("DEBUG")
 
 
 def disable_litellm_logging():
-    litellm.suppress_debug_info = True
+    get_litellm().suppress_debug_info = True
     configure_litellm_logging("ERROR")
 
-
-# By default, we disable LiteLLM logging for clean logging
-disable_litellm_logging()
 
 __all__ = [
     "BaseLM",

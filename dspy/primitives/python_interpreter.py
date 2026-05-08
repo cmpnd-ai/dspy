@@ -139,7 +139,7 @@ class PythonInterpreter:
         if deno_command:
             self.deno_command = list(deno_command)
         else:
-            args = ["deno", "run"]
+            args = ["deno", "run", "--no-config", "--no-lock"]
 
             # Allow reading runner.js and explicitly enabled paths
             allowed_read_paths = [self._get_runner_path()]

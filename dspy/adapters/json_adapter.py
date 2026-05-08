@@ -4,7 +4,6 @@ from typing import Any, get_origin
 
 import json_repair
 import pydantic
-import regex
 from pydantic.fields import FieldInfo
 
 from dspy.adapters.chat_adapter import ChatAdapter, FieldInfoWithName
@@ -146,6 +145,8 @@ class JSONAdapter(ChatAdapter):
         return self.format_field_with_value(fields_with_values, role="assistant")
 
     def parse(self, signature: type[Signature], completion: str) -> dict[str, Any]:
+        import regex
+
         fields = json_repair.loads(completion)
 
         if not isinstance(fields, dict):

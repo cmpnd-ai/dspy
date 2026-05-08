@@ -1,10 +1,6 @@
 import logging
 import random
-from typing import Any, Callable, Protocol, TypedDict
-
-from gepa import EvaluationBatch, GEPAAdapter
-from gepa.core.adapter import ProposalFn
-from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypedDict
 
 import dspy
 from dspy.adapters.chat_adapter import ChatAdapter
@@ -14,7 +10,33 @@ from dspy.evaluate import Evaluate
 from dspy.primitives import Example, Prediction
 from dspy.teleprompt.bootstrap_trace import FailedPrediction, TraceData
 
+if TYPE_CHECKING:
+    from gepa import EvaluationBatch, GEPAAdapter
+    from gepa.core.adapter import ProposalFn
+
 logger = logging.getLogger(__name__)
+
+
+def _require_gepa():
+    try:
+        import gepa  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "gepa is required to use dspy.GEPA. Install with `pip install dspy[gepa]` or `pip install gepa`."
+        ) from e
+
+
+def _get_gepa_adapter_base():
+    """Return the GEPAAdapter base class, or `object` if gepa is not installed.
+
+    Returning `object` lets ``DspyAdapter`` be defined at import time without gepa;
+    actual use is gated by ``_require_gepa()`` inside methods that touch gepa internals.
+    """
+    try:
+        from gepa import GEPAAdapter
+        return GEPAAdapter[Example, "TraceData", Prediction]
+    except ImportError:
+        return object
 
 
 class LoggerAdapter:
@@ -74,7 +96,7 @@ class PredictorFeedbackFn(Protocol):
         ...
 
 
-class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
+class DspyAdapter(_get_gepa_adapter_base()):
     def __init__(
         self,
         student_module,
@@ -117,6 +139,8 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     components_to_update=components_to_update,
                 )
 
+        from gepa.strategies.instruction_proposal import InstructionProposalSignature
+
         results: dict[str, str] = {}
 
         with dspy.context(lm=reflection_lm):
@@ -143,6 +167,8 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         return new_prog
 
     def evaluate(self, batch, candidate, capture_traces=False):
+        from gepa import EvaluationBatch
+
         program = self.build_program(candidate)
         callback_metadata = (
             {"metric_key": "eval_full"}

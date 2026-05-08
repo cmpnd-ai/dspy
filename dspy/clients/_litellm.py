@@ -20,8 +20,14 @@ def get_litellm():
     if "LITELLM_LOCAL_MODEL_COST_MAP" not in os.environ:
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
-    import litellm
-    from litellm._logging import verbose_logger
+    try:
+        import litellm
+        from litellm._logging import verbose_logger
+    except ImportError as e:
+        raise ImportError(
+            "litellm is required to use dspy.LM. "
+            "Install with `pip install dspy[litellm]` or `pip install litellm`."
+        ) from e
 
     litellm.telemetry = False
     litellm.cache = None

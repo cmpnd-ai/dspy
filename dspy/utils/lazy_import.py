@@ -6,8 +6,35 @@ succeeds even when they are absent, and call sites must raise a clear,
 actionable ImportError when the dep really is needed.
 """
 
+import functools
 import importlib
+import importlib.util
 from typing import Any
+
+_INSTALL_HINTS: dict[str, str] = {
+    "litellm": "litellm",
+    "openai": "openai",
+    "gepa": "gepa",
+    "optuna": "optuna",
+    "mcp": "mcp",
+    "langchain_core": "langchain",
+    "weaviate": "weaviate",
+    "anthropic": "anthropic",
+}
+
+
+@functools.lru_cache(maxsize=None)
+def is_available(module: str) -> bool:
+    """Return True if ``module`` can be imported, without importing it.
+
+    Uses ``importlib.util.find_spec`` so calling this does not execute the
+    module's top-level code. Safe for cheap branching ("if the optional dep
+    is installed, register the hook; otherwise skip").
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def require(module: str, *, extra: str | None = None, feature: str | None = None) -> Any:
@@ -19,7 +46,8 @@ def require(module: str, *, extra: str | None = None, feature: str | None = None
         module: Dotted module path (e.g. ``"litellm"`` or ``"gepa.core.adapter"``).
             The top-level segment is shown to the user.
         extra: Name of the dspy extra that pulls in this dep. Defaults to the
-            top-level module name.
+            entry in ``_INSTALL_HINTS`` for the top-level module, falling back
+            to the top-level module name.
         feature: Short feature label included in the error (e.g. ``"dspy.LM"``).
             Defaults to ``"this feature"``.
 
@@ -31,7 +59,7 @@ def require(module: str, *, extra: str | None = None, feature: str | None = None
     except ImportError as e:
         top = module.split(".", 1)[0]
         feat = feature or "this feature"
-        ext = extra or top
+        ext = extra or _INSTALL_HINTS.get(top, top)
         raise ImportError(
             f"{top} is required to use {feat}. "
             f"Install with `pip install dspy[{ext}]` or `pip install {top}`."

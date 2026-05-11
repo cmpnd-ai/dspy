@@ -4,7 +4,7 @@ from typing import Any, NamedTuple
 
 from pydantic.fields import FieldInfo
 
-from dspy.adapters.base import Adapter
+from dspy.adapters.base import _NATIVE_FC_DIRECTIVE, Adapter
 from dspy.adapters.utils import (
     format_field_value,
     get_annotation_name,
@@ -78,9 +78,10 @@ class ChatAdapter(Adapter):
                 isinstance(e, ContextWindowExceededError)
                 or isinstance(self, JSONAdapter)
                 or not self.use_json_adapter_fallback
+                or "tools" in lm_kwargs  # Don't fall back to JSON mode when native FC is active
             ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
+                # On context window exceeded error, already using JSONAdapter, use_json_adapter_fallback is False,
+                # or native function calling is active — don't retry with a different adapter.
                 raise e
             return JSONAdapter()(lm, lm_kwargs, signature, demos, inputs)
 
@@ -102,9 +103,10 @@ class ChatAdapter(Adapter):
                 isinstance(e, ContextWindowExceededError)
                 or isinstance(self, JSONAdapter)
                 or not self.use_json_adapter_fallback
+                or "tools" in lm_kwargs  # Don't fall back to JSON mode when native FC is active
             ):
-                # On context window exceeded error, already using JSONAdapter, or use_json_adapter_fallback is False
-                # we don't want to retry with a different adapter. Raise the original error instead of the fallback error.
+                # On context window exceeded error, already using JSONAdapter, use_json_adapter_fallback is False,
+                # or native function calling is active — don't retry with a different adapter.
                 raise e
             return await JSONAdapter().acall(lm, lm_kwargs, signature, demos, inputs)
 
@@ -148,6 +150,8 @@ class ChatAdapter(Adapter):
         prefix: str = "",
         suffix: str = "",
         main_request: bool = False,
+        *,
+        native_fc: bool = False,
     ) -> str:
         messages = [prefix]
         for k, v in signature.input_fields.items():
@@ -157,14 +161,16 @@ class ChatAdapter(Adapter):
                 messages.append(f"[[ ## {k} ## ]]\n{formatted_field_value}")
 
         if main_request:
-            output_requirements = self.user_message_output_requirements(signature)
+            output_requirements = self.user_message_output_requirements(signature, native_fc=native_fc)
             if output_requirements is not None:
                 messages.append(output_requirements)
 
         messages.append(suffix)
         return "\n\n".join(messages).strip()
 
-    def user_message_output_requirements(self, signature: type[Signature]) -> str:
+    def user_message_output_requirements(
+        self, signature: type[Signature], *, native_fc: bool = False
+    ) -> str | None:
         """Returns a simplified format reminder for the language model.
 
         In chat-based interactions, language models may lose track of the required output format
@@ -181,6 +187,8 @@ class ChatAdapter(Adapter):
             This is a more lightweight version of `format_field_structure` specifically designed
             for inline reminders within chat messages.
         """
+        if not signature.output_fields:
+            return None
 
         def type_info(v):
             if v.annotation is not str:
@@ -191,6 +199,8 @@ class ChatAdapter(Adapter):
         message = "Respond with the corresponding output fields, starting with the field "
         message += ", then ".join(f"`[[ ## {f} ## ]]`{type_info(v)}" for f, v in signature.output_fields.items())
         message += ", and then ending with the marker for `[[ ## completed ## ]]`."
+        if native_fc:
+            message += _NATIVE_FC_DIRECTIVE
         return message
 
     def format_assistant_message_content(

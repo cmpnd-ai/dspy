@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic.fields import FieldInfo
 
+from dspy.adapters.base import _NATIVE_FC_DIRECTIVE
 from dspy.adapters.chat_adapter import ChatAdapter, FieldInfoWithName
 from dspy.adapters.utils import format_field_value, translate_field_type
 from dspy.signatures.signature import Signature
@@ -48,6 +49,8 @@ class XMLAdapter(ChatAdapter):
         prefix: str = "",
         suffix: str = "",
         main_request: bool = False,
+        *,
+        native_fc: bool = False,
     ) -> str:
         messages = [prefix]
 
@@ -59,7 +62,7 @@ class XMLAdapter(ChatAdapter):
         ))
 
         if main_request:
-            output_requirements = self.user_message_output_requirements(signature)
+            output_requirements = self.user_message_output_requirements(signature, native_fc=native_fc)
             if output_requirements is not None:
                 messages.append(output_requirements)
 
@@ -79,10 +82,16 @@ class XMLAdapter(ChatAdapter):
             },
         )
 
-    def user_message_output_requirements(self, signature: type[Signature]) -> str:
+    def user_message_output_requirements(
+        self, signature: type[Signature], *, native_fc: bool = False
+    ) -> str | None:
+        if not signature.output_fields:
+            return None
         message = "Respond with the corresponding output fields wrapped in XML tags "
         message += ", then ".join(f"`<{f}>`" for f in signature.output_fields)
         message += "."
+        if native_fc:
+            message += _NATIVE_FC_DIRECTIVE
         return message
 
     def parse(self, signature: type[Signature], completion: str) -> dict[str, Any]:

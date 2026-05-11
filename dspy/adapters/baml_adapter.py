@@ -245,6 +245,8 @@ class BAMLAdapter(JSONAdapter):
         prefix: str = "",
         suffix: str = "",
         main_request: bool = False,
+        *,
+        native_fc: bool = False,
     ) -> str:
         """Overrides the base method to render Pydantic input instances as clean JSON."""
         messages = [prefix]
@@ -262,7 +264,7 @@ class BAMLAdapter(JSONAdapter):
                 messages.append(f"[[ ## {key} ## ]]\n{formatted_value}")
 
         if main_request:
-            output_requirements = self.user_message_output_requirements(signature)
+            output_requirements = self.user_message_output_requirements(signature, native_fc=native_fc)
             if output_requirements is not None:
                 messages.append(output_requirements)
 

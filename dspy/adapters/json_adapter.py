@@ -7,6 +7,7 @@ import pydantic
 import regex
 from pydantic.fields import FieldInfo
 
+from dspy.adapters.base import _NATIVE_FC_DIRECTIVE
 from dspy.adapters.chat_adapter import ChatAdapter, FieldInfoWithName
 from dspy.adapters.types.tool import ToolCalls
 from dspy.adapters.utils import (
@@ -120,7 +121,12 @@ class JSONAdapter(ChatAdapter):
         parts.append(format_signature_fields_for_instructions(signature.output_fields, role="assistant"))
         return "\n\n".join(parts).strip()
 
-    def user_message_output_requirements(self, signature: type[Signature]) -> str:
+    def user_message_output_requirements(
+        self, signature: type[Signature], *, native_fc: bool = False
+    ) -> str | None:
+        if not signature.output_fields:
+            return None
+
         def type_info(v):
             return (
                 f" (must be formatted as a valid Python {get_annotation_name(v.annotation)})"
@@ -131,6 +137,8 @@ class JSONAdapter(ChatAdapter):
         message = "Respond with a JSON object in the following order of fields: "
         message += ", then ".join(f"`{f}`{type_info(v)}" for f, v in signature.output_fields.items())
         message += "."
+        if native_fc:
+            message += _NATIVE_FC_DIRECTIVE
         return message
 
     def format_assistant_message_content(

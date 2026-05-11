@@ -521,7 +521,7 @@ def test_chat_adapter_toolcalls_native_function_calling():
     class MySignature(dspy.Signature):
         question: str = dspy.InputField()
         tools: list[dspy.Tool] = dspy.InputField()
-        answer: str = dspy.OutputField()
+        answer: str | None = dspy.OutputField()
         tool_calls: dspy.ToolCalls = dspy.OutputField()
 
     def get_weather(city: str) -> str:
@@ -562,7 +562,13 @@ def test_chat_adapter_toolcalls_native_function_calling():
         )
 
         assert result[0]["tool_calls"] == dspy.ToolCalls(
-            tool_calls=[dspy.ToolCalls.ToolCall(name="get_weather", args={"city": "Paris"})]
+            tool_calls=[
+                dspy.ToolCalls.ToolCall(
+                    name="get_weather",
+                    args={"city": "Paris"},
+                    id="call_pQm8ajtSMxgA0nrzK2ivFmxG",
+                )
+            ]
         )
         # `answer` is not present, so we set it to None
         assert result[0]["answer"] is None
@@ -664,7 +670,7 @@ def test_chat_adapter_native_reasoning():
             ],
             model="anthropic/claude-3-7-sonnet-20250219",
         )
-        modified_signature = adapter._call_preprocess(
+        modified_signature, _ = adapter._call_preprocess(
             dspy.LM(model="anthropic/claude-3-7-sonnet-20250219", reasoning_effort="low", cache=False),
             {},
             MySignature,
@@ -726,7 +732,7 @@ def test_format_system_message():
     expected_system_message = """Your input fields are:
 1. `question` (str):
 Your output fields are:
-1. `answers` (list[str]): 
+1. `answers` (list[str]):\x20
 2. `scores` (list[float]):
 All interactions will be structured in the following way, with the appropriate values filled in.
 
@@ -740,7 +746,7 @@ All interactions will be structured in the following way, with the appropriate v
 {scores}        # note: the value you produce must adhere to the JSON schema: {"type": "array", "items": {"type": "number"}}
 
 [[ ## completed ## ]]
-In adhering to this structure, your objective is: 
+In adhering to this structure, your objective is:\x20
         Answer the question with multiple answers and scores"""
     assert system_message == expected_system_message
 
@@ -782,9 +788,9 @@ def test_empty_string_content_raises_adapter_parse_error():
 
 def test_tool_call_with_null_content_does_not_raise():
     """Tool-call-only responses legitimately have content=None.
-    _call_postprocess must NOT raise when tool_calls are present."""
+    _call_postprocess must NOT raise when the only non-tool field is ToolCalls."""
     adapter = dspy.ChatAdapter(use_native_function_calling=True)
-    sig_cls = dspy.Signature("question, tools: list[dspy.Tool] -> answer, tool_calls: dspy.ToolCalls")
+    sig_cls = dspy.Signature("question, tools: list[dspy.Tool] -> tool_calls: dspy.ToolCalls")
 
     outputs = [{"text": None, "tool_calls": [
         {"function": {"name": "search", "arguments": '{"query": "test"}'}, "id": "call_1", "type": "function"}
@@ -793,3 +799,219 @@ def test_tool_call_with_null_content_does_not_raise():
     result = adapter._call_postprocess(sig_cls, sig_cls, outputs, None, {})
     assert result is not None
     assert len(result) == 1
+
+
+def test_tool_call_only_response_with_missing_required_field_raises():
+    """When the model returns only a tool call but the signature declares a
+    REQUIRED non-tool output field, _call_postprocess must raise an
+    AdapterParseError so the predict retry loop can re-prompt the model."""
+    from dspy.utils.exceptions import AdapterParseError
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    sig_cls = dspy.Signature(
+        "question, tools: list[dspy.Tool] -> reasoning, tool_calls: dspy.ToolCalls"
+    )
+
+    outputs = [
+        {
+            "text": None,
+            "tool_calls": [
+                {
+                    "function": {"name": "search", "arguments": '{"query": "test"}'},
+                    "id": "call_1",
+                    "type": "function",
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(AdapterParseError, match="reasoning"):
+        adapter._call_postprocess(sig_cls, sig_cls, outputs, None, {})
+
+
+def test_tool_call_only_response_with_optional_field_via_union_does_not_raise():
+    """Fields declared as `X | None` are optional and may come back as None
+    when the model only emits a tool call."""
+
+    class OptionalSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        reasoning: str | None = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+
+    outputs = [
+        {
+            "text": None,
+            "tool_calls": [
+                {
+                    "function": {"name": "search", "arguments": '{"query": "test"}'},
+                    "id": "call_1",
+                    "type": "function",
+                }
+            ],
+        }
+    ]
+
+    result = adapter._call_postprocess(OptionalSig, OptionalSig, outputs, None, {})
+    assert len(result) == 1
+    assert result[0]["reasoning"] is None
+    assert result[0]["tool_calls"].tool_calls[0].name == "search"
+
+
+def test_tool_call_only_response_with_optional_field_via_default_does_not_raise():
+    """Fields with a default value are optional and may come back as None."""
+
+    class DefaultSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        plan: str = dspy.OutputField(default="")
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+
+    outputs = [
+        {
+            "text": None,
+            "tool_calls": [
+                {
+                    "function": {"name": "search", "arguments": '{"query": "test"}'},
+                    "id": "call_1",
+                    "type": "function",
+                }
+            ],
+        }
+    ]
+
+    result = adapter._call_postprocess(DefaultSig, DefaultSig, outputs, None, {})
+    assert len(result) == 1
+    assert result[0]["plan"] is None
+    assert result[0]["tool_calls"].tool_calls[0].name == "search"
+
+
+def test_native_fc_and_native_reasoning_both_adapt_signature():
+    """When a signature has both a ToolCalls field AND a dspy.Reasoning field, and
+    native function calling is active, _call_preprocess must still adapt the
+    Reasoning field (deleting it from the signature and setting reasoning_effort
+    on lm_kwargs). Previously the native FC early return skipped this step."""
+
+    class CombinedSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        reasoning: dspy.Reasoning = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def search(query: str) -> str:
+        """Search the web."""
+        return "result"
+
+    class FakeLM:
+        model = "fake/model"
+        model_type = "chat"
+        supports_function_calling = True
+        supports_reasoning = True
+        kwargs = {}
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    lm_kwargs: dict = {}
+    processed_signature, native_fc = adapter._call_preprocess(
+        FakeLM(), lm_kwargs, CombinedSig, {"question": "q", "tools": [dspy.Tool(search)]}
+    )
+
+    assert native_fc is True
+    assert "reasoning" not in processed_signature.output_fields
+    assert "tool_calls" not in processed_signature.output_fields
+    assert "tools" not in processed_signature.input_fields
+    assert lm_kwargs.get("reasoning_effort") is not None
+    assert "tools" in lm_kwargs
+
+
+def test_native_fc_detects_tool_name_collision_after_sanitization():
+    """When two distinct tools sanitize to the same name (e.g. 'foo.bar' and 'foo bar'
+    both become 'foo_bar'), the adapter must raise a clear error rather than silently
+    sending two tools with the same name to the LM."""
+
+    class ToolSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def foo_dot_bar():
+        """Tool one."""
+        return 1
+
+    def foo_space_bar():
+        """Tool two."""
+        return 2
+
+    foo_dot_bar.__name__ = "foo.bar"
+    foo_space_bar.__name__ = "foo bar"
+
+    tool_a = dspy.Tool(foo_dot_bar)
+    tool_b = dspy.Tool(foo_space_bar)
+    assert tool_a.name == tool_b.name == "foo_bar"
+
+    class FakeLM:
+        model = "fake/model"
+        model_type = "chat"
+        supports_function_calling = True
+        kwargs = {}
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    with pytest.raises(ValueError, match="Duplicate tool name"):
+        adapter._call_preprocess(
+            FakeLM(), {}, ToolSig, {"question": "q", "tools": [tool_a, tool_b]}
+        )
+
+
+def test_tool_calls_validation_failure_raises_adapter_parse_error():
+    """A TypeError/ValueError from ToolCalls.model_validate during _call_postprocess
+    must be converted to AdapterParseError so the retry loop can handle it instead
+    of crashing the caller."""
+    from dspy.utils.exceptions import AdapterParseError
+
+    class ToolSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    class BrokenToolCall:
+        """Object whose model_dump raises TypeError and has no recoverable attrs."""
+        def model_dump(self):
+            raise TypeError("'MockValSer' object cannot be converted to 'SchemaSerializer'")
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    outputs = [{"text": "", "tool_calls": [BrokenToolCall()]}]
+    with pytest.raises(AdapterParseError, match="Failed to parse tool calls"):
+        adapter._call_postprocess(ToolSig, ToolSig, outputs, None, {})
+
+
+def test_native_fc_detects_collision_for_same_function_with_different_names():
+    """Two Tool objects wrapping the SAME function but with different explicit names
+    that sanitize to the same string must also be caught — not just different functions."""
+
+    class ToolSig(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    def shared_impl():
+        """Shared implementation used twice."""
+        return 1
+
+    tool_a = dspy.Tool(shared_impl, name="search.api")
+    tool_b = dspy.Tool(shared_impl, name="search api")
+    assert tool_a.name == tool_b.name == "search_api"
+
+    class FakeLM:
+        model = "fake/model"
+        model_type = "chat"
+        supports_function_calling = True
+        kwargs = {}
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    with pytest.raises(ValueError, match="Duplicate tool name"):
+        adapter._call_preprocess(
+            FakeLM(), {}, ToolSig, {"question": "q", "tools": [tool_a, tool_b]}
+        )

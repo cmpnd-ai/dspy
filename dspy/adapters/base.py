@@ -1,7 +1,8 @@
 import logging
-from typing import Any, get_origin
+import types
+from typing import Any, Union, get_args, get_origin
 
-import json_repair
+import pydantic
 
 from dspy.adapters.types import History, Type
 from dspy.adapters.types.base_type import split_message_content_for_custom_types
@@ -16,6 +17,8 @@ from dspy.utils.exceptions import AdapterParseError
 logger = logging.getLogger(__name__)
 
 _DEFAULT_NATIVE_RESPONSE_TYPES = [Citations, Reasoning]
+
+_NATIVE_FC_DIRECTIVE = " Then call the appropriate tool via the provided function calling API."
 
 
 class Adapter:
@@ -69,7 +72,14 @@ class Adapter:
         lm_kwargs: dict[str, Any],
         signature: type[Signature],
         inputs: dict[str, Any],
-    ) -> type[Signature]:
+    ) -> tuple[type[Signature], bool]:
+        # Adapt native response types first (e.g. Reasoning, Citations). These may
+        # remove their fields from the signature and set lm_kwargs (e.g.
+        # `reasoning_effort`) regardless of whether native function calling is active.
+        for name, field in signature.output_fields.items():
+            if self._is_native_response_type_field(field):
+                signature = field.annotation.adapt_to_native_lm_feature(signature, name, lm, lm_kwargs)
+
         if self.use_native_function_calling:
             tool_call_input_field_name = self._get_tool_call_input_field_name(signature)
             tool_call_output_field_name = self._get_tool_call_output_field_name(signature)
@@ -85,27 +95,22 @@ class Adapter:
                 tools = inputs[tool_call_input_field_name]
                 tools = tools if isinstance(tools, list) else [tools]
 
-                lm_tools = [tool.format_as_litellm_function_call() for tool in tools]
+                seen: set[str] = set()
+                for tool in tools:
+                    if tool.name in seen:
+                        raise ValueError(
+                            f"Duplicate tool name '{tool.name}' in the tools list. This can happen when "
+                            "two tools share a name or when different names sanitize to the same value "
+                            "(OpenAI requires `^[a-zA-Z0-9_-]+$`). Rename one of them to make every tool unique."
+                        )
+                    seen.add(tool.name)
 
-                lm_kwargs["tools"] = lm_tools
+                lm_kwargs["tools"] = [tool.format_as_litellm_function_call() for tool in tools]
 
-                signature_for_native_function_calling = signature.delete(tool_call_output_field_name)
-                signature_for_native_function_calling = signature_for_native_function_calling.delete(
-                    tool_call_input_field_name
-                )
+                signature = signature.delete(tool_call_output_field_name).delete(tool_call_input_field_name)
+                return signature, True
 
-                return signature_for_native_function_calling
-
-        # Handle custom types that use native LM features, e.g., reasoning, citations, etc.
-        for name, field in signature.output_fields.items():
-            if (
-                isinstance(field.annotation, type)
-                and field.annotation in self.native_response_types
-                and issubclass(field.annotation, Type)
-            ):
-                signature = field.annotation.adapt_to_native_lm_feature(signature, name, lm, lm_kwargs)
-
-        return signature
+        return signature, False
 
     def _call_postprocess(
         self,
@@ -129,6 +134,7 @@ class Adapter:
                 output_logprobs = output.get("logprobs")
                 tool_calls = output.get("tool_calls")
 
+            synthesized_from_tool_call_only = False
             if text:
                 value = self.parse(processed_signature, text)
                 for field_name in original_signature.output_fields.keys():
@@ -136,9 +142,8 @@ class Adapter:
                         # We need to set the field not present in the processed signature to None for consistency.
                         value[field_name] = None
             elif tool_calls and tool_call_output_field_name:
-                value = {}
-                for field_name in original_signature.output_fields.keys():
-                    value[field_name] = None
+                value = dict.fromkeys(original_signature.output_fields.keys())
+                synthesized_from_tool_call_only = True
             else:
                 raise AdapterParseError(
                     adapter_name=type(self).__name__,
@@ -148,25 +153,33 @@ class Adapter:
                 )
 
             if tool_calls and tool_call_output_field_name:
-                tool_calls = [
-                    {
-                        "name": v["function"]["name"],
-                        "args": json_repair.loads(v["function"]["arguments"]),
-                    }
-                    for v in tool_calls
-                ]
-                value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+                try:
+                    value[tool_call_output_field_name] = ToolCalls.model_validate(tool_calls)
+                except (TypeError, ValueError, pydantic.ValidationError) as e:
+                    raise AdapterParseError(
+                        adapter_name=type(self).__name__,
+                        signature=original_signature,
+                        lm_response=str(output),
+                        message=f"Failed to parse tool calls into `dspy.ToolCalls`: {e}",
+                    ) from e
 
             # Parse custom types that does not rely on the `Adapter.parse()` method
             for name, field in original_signature.output_fields.items():
-                if (
-                    isinstance(field.annotation, type)
-                    and field.annotation in self.native_response_types
-                    and issubclass(field.annotation, Type)
-                ):
+                if self._is_native_response_type_field(field):
                     parsed_value = field.annotation.parse_lm_response(output)
                     if parsed_value is not None:
                         value[name] = parsed_value
+
+            # Only enforce required-field extraction when we synthesized field values
+            # from a tool-call-only response. The text-parse path delegates to
+            # ``self.parse()``, which already raises if required fields are missing.
+            if synthesized_from_tool_call_only:
+                self._assert_required_fields_extracted(
+                    original_signature=original_signature,
+                    value=value,
+                    tool_call_output_field_name=tool_call_output_field_name,
+                    output=output,
+                )
 
             if output_logprobs:
                 value["logprobs"] = output_logprobs
@@ -174,6 +187,61 @@ class Adapter:
             values.append(value)
 
         return values
+
+    def _is_native_response_type_field(self, field) -> bool:
+        annotation = field.annotation
+        return (
+            isinstance(annotation, type)
+            and annotation in self.native_response_types
+            and issubclass(annotation, Type)
+        )
+
+    @staticmethod
+    def _is_optional_field(field) -> bool:
+        """Optional iff the field has a default value or its annotation includes ``None``."""
+        if not field.is_required():
+            return True
+        annotation = field.annotation
+        if annotation is type(None):
+            return True
+        if get_origin(annotation) in (Union, types.UnionType):
+            return type(None) in get_args(annotation)
+        return False
+
+    def _assert_required_fields_extracted(
+        self,
+        *,
+        original_signature: type[Signature],
+        value: dict[str, Any],
+        tool_call_output_field_name: str | None,
+        output: dict[str, Any] | str,
+    ) -> None:
+        """Raise ``AdapterParseError`` when required output fields come back ``None``.
+
+        ``ToolCalls`` and ``native_response_types`` fields are exempt because they
+        have their own out-of-band extraction lifecycle.
+        """
+        missing = [
+            name
+            for name, field in original_signature.output_fields.items()
+            if name != tool_call_output_field_name
+            and value.get(name) is None
+            and not self._is_optional_field(field)
+            and not self._is_native_response_type_field(field)
+        ]
+        if not missing:
+            return
+        raise AdapterParseError(
+            adapter_name=type(self).__name__,
+            signature=original_signature,
+            lm_response=str(output),
+            message=(
+                f"The LM response is missing required output fields: {missing}. "
+                "Either declare them as optional in your signature "
+                "(e.g. `field: str | None = dspy.OutputField()` or by providing a "
+                "default), or prompt the model to emit them alongside the tool call."
+            ),
+        )
 
     def __call__(
         self,
@@ -199,8 +267,8 @@ class Adapter:
             List of dictionaries representing parsed LM responses. Each dictionary contains keys matching the
             signature's output field names. For multiple generations (n > 1), returns multiple dictionaries.
         """
-        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        inputs = self.format(processed_signature, demos, inputs)
+        processed_signature, native_fc = self._call_preprocess(lm, lm_kwargs, signature, inputs)
+        inputs = self.format(processed_signature, demos, inputs, native_fc=native_fc)
 
         outputs = lm(messages=inputs, **lm_kwargs)
         return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
@@ -213,8 +281,8 @@ class Adapter:
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        inputs = self.format(processed_signature, demos, inputs)
+        processed_signature, native_fc = self._call_preprocess(lm, lm_kwargs, signature, inputs)
+        inputs = self.format(processed_signature, demos, inputs, native_fc=native_fc)
 
         outputs = await lm.acall(messages=inputs, **lm_kwargs)
         return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
@@ -224,6 +292,8 @@ class Adapter:
         signature: type[Signature],
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
+        *,
+        native_fc: bool = False,
     ) -> list[dict[str, Any]]:
         """Format the input messages for the LM call.
 
@@ -284,12 +354,16 @@ class Adapter:
         messages.extend(self.format_demos(signature, demos))
         if history_field_name:
             # Conversation history and current input
-            content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
+            content = self.format_user_message_content(
+                signature_without_history, inputs_copy, main_request=True, native_fc=native_fc
+            )
             messages.extend(conversation_history)
             messages.append({"role": "user", "content": content})
         else:
             # Only current input
-            content = self.format_user_message_content(signature, inputs_copy, main_request=True)
+            content = self.format_user_message_content(
+                signature, inputs_copy, main_request=True, native_fc=native_fc
+            )
             messages.append({"role": "user", "content": content})
 
         messages = split_message_content_for_custom_types(messages)
@@ -355,6 +429,8 @@ class Adapter:
         prefix: str = "",
         suffix: str = "",
         main_request: bool = False,
+        *,
+        native_fc: bool = False,
     ) -> str:
         """Format the user message content.
 

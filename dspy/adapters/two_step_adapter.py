@@ -1,14 +1,15 @@
 from typing import Any
 
-import json_repair
+import pydantic
 
 from dspy.adapters.base import Adapter
 from dspy.adapters.chat_adapter import ChatAdapter
-from dspy.adapters.types import ToolCalls
+from dspy.adapters.types.tool import ToolCalls
 from dspy.adapters.utils import get_field_description_string
 from dspy.clients.base_lm import BaseLM
 from dspy.signatures.field import InputField
 from dspy.signatures.signature import Signature, make_signature
+from dspy.utils.exceptions import AdapterParseError
 
 """
 NOTE/TODO/FIXME:
@@ -45,8 +46,35 @@ class TwoStepAdapter(Adapter):
             raise ValueError("extraction_model must be an instance of dspy.BaseLM")
         self.extraction_model = extraction_model
 
+    def _reject_native_tool_calls(self, signature: type[Signature]) -> None:
+        if not self.use_native_function_calling:
+            return
+        tool_call_output_field_name = self._get_tool_call_output_field_name(signature)
+        if tool_call_output_field_name:
+            raise ValueError(
+                "TwoStepAdapter does not support native function calling because its first stage uses a "
+                "free-form prompt. Set `use_native_function_calling=False` to let the main LM emit tool "
+                "intentions as text that the second-stage extractor parses into "
+                f"`{tool_call_output_field_name}: dspy.ToolCalls`, or switch to ChatAdapter."
+            )
+
+    def _call_preprocess(
+        self,
+        lm: BaseLM,
+        lm_kwargs: dict[str, Any],
+        signature: type[Signature],
+        inputs: dict[str, Any],
+    ) -> tuple[type[Signature], bool]:
+        self._reject_native_tool_calls(signature)
+        return super()._call_preprocess(lm, lm_kwargs, signature, inputs)
+
     def format(
-        self, signature: type[Signature], demos: list[dict[str, Any]], inputs: dict[str, Any]
+        self,
+        signature: type[Signature],
+        demos: list[dict[str, Any]],
+        inputs: dict[str, Any],
+        *,
+        native_fc: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Format a prompt for the first stage with the main LM.
@@ -111,15 +139,15 @@ class TwoStepAdapter(Adapter):
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        inputs = self.format(signature, demos, inputs)
+        processed_signature, _ = self._call_preprocess(lm, lm_kwargs, signature, inputs)
+        formatted_inputs = self.format(processed_signature, demos, inputs)
 
-        outputs = await lm.acall(messages=inputs, **lm_kwargs)
-        # The signature is supposed to be "text -> {original output fields}"
-        extractor_signature = self._create_extractor_signature(signature)
+        outputs = await lm.acall(messages=formatted_inputs, **lm_kwargs)
+        # The signature is supposed to be "text -> {output fields the main LM was asked to produce}"
+        extractor_signature = self._create_extractor_signature(processed_signature)
+        tool_call_output_field_name = self._get_tool_call_output_field_name(signature)
 
         values = []
-
-        tool_call_output_field_name = self._get_tool_call_output_field_name(signature)
         for output in outputs:
             output_logprobs = None
             tool_calls = None
@@ -131,28 +159,42 @@ class TwoStepAdapter(Adapter):
                 tool_calls = output.get("tool_calls")
 
             try:
-                # Call the smaller LM to extract structured data from the raw completion text with ChatAdapter
-                value = await ChatAdapter().acall(
+                extracted = await ChatAdapter().acall(
                     lm=self.extraction_model,
                     lm_kwargs={},
                     signature=extractor_signature,
                     demos=[],
                     inputs={"text": text},
                 )
-                value = value[0]
-
+                value = extracted[0]
             except Exception as e:
                 raise ValueError(f"Failed to parse response from the original completion: {output}") from e
 
+            # Back-fill fields that preprocessing removed from `processed_signature`
+            # (e.g. ToolCalls when use_native_function_calling is on) so the result
+            # always matches `signature.output_fields`. Mirrors `_call_postprocess`.
+            for field_name in signature.output_fields.keys():
+                value.setdefault(field_name, None)
+
             if tool_calls and tool_call_output_field_name:
-                tool_calls = [
-                    {
-                        "name": v["function"]["name"],
-                        "args": json_repair.loads(v["function"]["arguments"]),
-                    }
-                    for v in tool_calls
-                ]
-                value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+                try:
+                    value[tool_call_output_field_name] = ToolCalls.model_validate(tool_calls)
+                except (TypeError, ValueError, pydantic.ValidationError) as e:
+                    raise AdapterParseError(
+                        adapter_name=type(self).__name__,
+                        signature=signature,
+                        lm_response=str(output),
+                        message=f"Failed to parse tool calls into `dspy.ToolCalls`: {e}",
+                    ) from e
+
+            # Adapt native response types (e.g. dspy.Reasoning, dspy.Citations) that
+            # have their own `parse_lm_response` and are not handled by ChatAdapter
+            # extraction because they were stripped from `processed_signature`.
+            for name, field in signature.output_fields.items():
+                if self._is_native_response_type_field(field):
+                    parsed_value = field.annotation.parse_lm_response(output)
+                    if parsed_value is not None:
+                        value[name] = parsed_value
 
             if output_logprobs is not None:
                 value["logprobs"] = output_logprobs
@@ -180,6 +222,8 @@ class TwoStepAdapter(Adapter):
         inputs: dict[str, Any],
         prefix: str = "",
         suffix: str = "",
+        *,
+        native_fc: bool = False,
     ) -> str:
         parts = [prefix]
 

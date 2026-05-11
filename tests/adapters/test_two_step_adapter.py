@@ -179,3 +179,42 @@ def test_two_step_adapter_parse_errors():
 
     with pytest.raises(ValueError, match="Failed to parse response"):
         adapter.parse(TestSignature, first_response)
+
+
+@pytest.mark.asyncio
+async def test_two_step_adapter_acall_backfills_fields_stripped_during_preprocess():
+    """The async path must back-fill output fields that `_call_preprocess` removed
+    from `processed_signature` (e.g. dspy.Reasoning), matching the sync path."""
+
+    class SigWithReasoning(dspy.Signature):
+        question: str = dspy.InputField()
+        reasoning: dspy.Reasoning = dspy.OutputField()
+        answer: str = dspy.OutputField()
+
+    mock_main_lm = mock.MagicMock(spec=dspy.LM)
+    mock_main_lm.acall.return_value = [{"text": "main response", "reasoning_content": "step by step"}]
+    mock_main_lm.kwargs = {}
+    mock_main_lm.model = "openai/gpt-4o"
+    mock_main_lm.model_type = "chat"
+    mock_main_lm.supports_function_calling = False
+    mock_main_lm.supports_reasoning = True
+
+    mock_extraction_lm = mock.MagicMock(spec=dspy.LM)
+    mock_extraction_lm.acall.return_value = [
+        "[[ ## answer ## ]] 42\n[[ ## completed ## ]]"
+    ]
+    mock_extraction_lm.kwargs = {}
+    mock_extraction_lm.model = "openai/gpt-4o"
+
+    adapter = dspy.TwoStepAdapter(extraction_model=mock_extraction_lm)
+    results = await adapter.acall(
+        lm=mock_main_lm,
+        lm_kwargs={},
+        signature=SigWithReasoning,
+        demos=[],
+        inputs={"question": "q"},
+    )
+
+    assert len(results) == 1
+    assert "reasoning" in results[0]
+    assert "answer" in results[0]

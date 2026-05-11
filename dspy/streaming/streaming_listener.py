@@ -4,8 +4,6 @@ from collections import defaultdict
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 
-import jiter
-
 from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.json_adapter import JSONAdapter
 from dspy.adapters.types import Type
@@ -245,6 +243,8 @@ class StreamListener:
                 # If the parse doesn't raise an error, that means the accumulated tokens is a valid json object. Because
                 # we add an extra "{" to the beginning of the field_accumulated_messages, so we know the streaming is
                 # finished.
+                import jiter
+
                 jiter.from_json(self.json_adapter_state["field_accumulated_messages"].encode("utf-8"))
                 self.stream_end = True
                 last_token = self.flush()
@@ -259,6 +259,8 @@ class StreamListener:
                 pass
 
         try:
+            import jiter
+
             parsed = jiter.from_json(
                 self.json_adapter_state["field_accumulated_messages"].encode("utf-8"),
                 partial_mode="trailing-strings",

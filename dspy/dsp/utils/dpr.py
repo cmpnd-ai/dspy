@@ -8,8 +8,6 @@ import copy
 import logging
 import unicodedata
 
-import regex
-
 logger = logging.getLogger(__name__)
 
 
@@ -157,6 +155,8 @@ class SimpleTokenizer(Tokenizer):
         Args:
             annotators: None or empty set (only tokenizes).
         """
+        import regex
+
         self._regexp = regex.compile(
             "(%s)|(%s)" % (self.ALPHA_NUM, self.NON_WS),
             flags=regex.IGNORECASE + regex.UNICODE + regex.MULTILINE,
@@ -225,11 +225,18 @@ def locate_answers(tokenized_answers, text):
     return occurrences
 
 
-STokenizer = SimpleTokenizer()
+_STokenizer = None
+
+
+def _get_stokenizer():
+    global _STokenizer
+    if _STokenizer is None:
+        _STokenizer = SimpleTokenizer()
+    return _STokenizer
 
 
 def DPR_tokenize(text):  # noqa: N802
-    return STokenizer.tokenize(unicodedata.normalize("NFD", text))
+    return _get_stokenizer().tokenize(unicodedata.normalize("NFD", text))
 
 
 def DPR_normalize(text):  # noqa: N802

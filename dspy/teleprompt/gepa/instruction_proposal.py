@@ -1,13 +1,20 @@
 import logging
-from typing import Any
-
-from gepa.core.adapter import ProposalFn
+from typing import TYPE_CHECKING, Any
 
 import dspy
 from dspy.adapters.types.base_type import Type
 from dspy.teleprompt.gepa.gepa_utils import ReflectiveExample
+from dspy.utils.lazy_import import optional
+
+if TYPE_CHECKING:
+    from gepa.core.adapter import ProposalFn
 
 logger = logging.getLogger(__name__)
+
+
+def _get_proposal_fn_base():
+    """Return ProposalFn base class, or `object` if gepa is not installed."""
+    return optional("gepa.core.adapter", "ProposalFn", default=object)
 
 
 class GenerateEnhancedMultimodalInstructionFromFeedback(dspy.Signature):
@@ -269,7 +276,7 @@ class SingleComponentMultiModalProposer(dspy.Module):
         return multimodal_content
 
 
-class MultiModalInstructionProposer(ProposalFn):
+class MultiModalInstructionProposer(_get_proposal_fn_base()):
     """GEPA-compatible multimodal instruction proposer.
 
     This class handles multimodal inputs (like dspy.Image) during GEPA optimization by using

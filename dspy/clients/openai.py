@@ -2,10 +2,13 @@ import time
 from datetime import datetime
 from typing import Any
 
-import openai
-
 from dspy.clients.provider import Provider, TrainingJob
 from dspy.clients.utils_finetune import TrainDataFormat, TrainingStatus, save_data
+from dspy.utils.lazy_import import require
+
+
+def _openai():
+    return require("openai", extra="full", feature="the OpenAI finetuning provider")
 
 
 class TrainingJobOpenAI(TrainingJob):
@@ -22,13 +25,13 @@ class TrainingJobOpenAI(TrainingJob):
                 err_msg = "Jobs that are complete cannot be canceled."
                 err_msg += f" Job with ID {self.provider_job_id} is done."
                 raise Exception(err_msg)
-            openai.fine_tuning.jobs.cancel(self.provider_job_id)
+            _openai().fine_tuning.jobs.cancel(self.provider_job_id)
             self.provider_job_id = None
 
         # Delete the provider file
         if self.provider_file_id is not None:
             if OpenAIProvider.does_file_exist(self.provider_file_id):
-                openai.files.delete(self.provider_file_id)
+                _openai().files.delete(self.provider_file_id)
             self.provider_file_id = None
 
         # Call the super's cancel method after the custom cancellation logic
@@ -104,7 +107,7 @@ class OpenAIProvider(Provider):
         try:
             # TODO(nit): This call may fail for other reasons. We should check
             # the error message to ensure that the job does not exist.
-            openai.fine_tuning.jobs.retrieve(job_id)
+            _openai().fine_tuning.jobs.retrieve(job_id)
             return True
         except Exception:
             return False
@@ -114,7 +117,7 @@ class OpenAIProvider(Provider):
         try:
             # TODO(nit): This call may fail for other reasons. We should check
             # the error message to ensure that the file does not exist.
-            openai.files.retrieve(file_id)
+            _openai().files.retrieve(file_id)
             return True
         except Exception:
             return False
@@ -147,7 +150,7 @@ class OpenAIProvider(Provider):
         assert OpenAIProvider.does_job_exist(job_id), err_msg
 
         # Retrieve the provider's job and report the status
-        provider_job = openai.fine_tuning.jobs.retrieve(job_id)
+        provider_job = _openai().fine_tuning.jobs.retrieve(job_id)
         provider_status = provider_job.status
         status = provider_status_to_training_status[provider_status]
 
@@ -166,7 +169,7 @@ class OpenAIProvider(Provider):
     @staticmethod
     def upload_data(data_path: str) -> str:
         # Upload the data to the provider
-        provider_file = openai.files.create(
+        provider_file = _openai().files.create(
             file=open(data_path, "rb"),
             purpose="fine-tune",
         )
@@ -175,7 +178,7 @@ class OpenAIProvider(Provider):
     @staticmethod
     def _start_remote_training(train_file_id: str, model: str, train_kwargs: dict[str, Any] | None = None) -> str:
         train_kwargs = train_kwargs or {}
-        provider_job = openai.fine_tuning.jobs.create(
+        provider_job = _openai().fine_tuning.jobs.create(
             model=model,
             training_file=train_file_id,
             hyperparameters=train_kwargs,
@@ -194,7 +197,7 @@ class OpenAIProvider(Provider):
         while not done:
             # Report estimated time if not already reported
             if not reported_estimated_time:
-                remote_job = openai.fine_tuning.jobs.retrieve(job.provider_job_id)
+                remote_job = _openai().fine_tuning.jobs.retrieve(job.provider_job_id)
                 timestamp = remote_job.estimated_finish
                 if timestamp:
                     estimated_finish_dt = datetime.fromtimestamp(timestamp)
@@ -203,7 +206,7 @@ class OpenAIProvider(Provider):
                     reported_estimated_time = True
 
             # Get new events
-            page = openai.fine_tuning.jobs.list_events(fine_tuning_job_id=job.provider_job_id, limit=1)
+            page = _openai().fine_tuning.jobs.list_events(fine_tuning_job_id=job.provider_job_id, limit=1)
             new_event = page.data[0] if page.data else None
             if new_event and new_event.id != cur_event_id:
                 dt = datetime.fromtimestamp(new_event.created_at)
@@ -222,6 +225,6 @@ class OpenAIProvider(Provider):
             err_msg += f" Must be {TrainingStatus.succeeded} to retrieve model."
             raise Exception(err_msg)
 
-        provider_job = openai.fine_tuning.jobs.retrieve(job.provider_job_id)
+        provider_job = _openai().fine_tuning.jobs.retrieve(job.provider_job_id)
         finetuned_model = provider_job.fine_tuned_model
         return finetuned_model

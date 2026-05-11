@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=77.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Do not add spaces around the '=' sign for any of the fields
+# preceded by a marker comment as it affects the publish workflow.
+#replace_package_name_marker
+name="dspy-runtime"
+#replace_package_version_marker
+version="3.2.1"
+description = "DSPy runtime: minimal-dependency build of DSPy for production deployments. Same code as dspy, fewer hard dependencies."
+readme = "README.md"
+authors = [{ name = "Omar Khattab", email = "okhattab@stanford.edu" }]
+license = {file = "LICENSE"}
+requires-python = ">=3.10, <3.15"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3"
+]
+# Minimal runtime dependencies only. Heavier deps (litellm, gepa, optuna, etc.) are optional extras.
+# numpy, cachetools, and requests are scheduled to become optional via separate work; they remain
+# hard deps here for now so `import dspy` works out of the box.
+dependencies = [
+    "pydantic>=2.0",
+    "orjson>=3.9.0",
+    "cloudpickle>=3.1.2",
+    "anyio",
+    "tqdm>=4.66.1",
+    "diskcache>=5.6.0",
+    "json-repair>=0.54.2",
+    "tenacity>=8.2.3",
+    "jsonschema>=4.0",
+    "jiter>=0.4.0",
+    # Transitional: scheduled to be made optional separately.
+    "numpy>=1.26.0",
+    "cachetools>=5.5.0",
+    "requests>=2.31.0",
+    "regex>=2023.10.3",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.64.0"]
+openai = ["openai>=0.28.1"]
+gepa = ["gepa[dspy]==0.1.1"]
+optuna = ["optuna>=3.4.0"]
+mcp = ["mcp; python_version >= '3.10'"]
+langchain = ["langchain_core"]
+weaviate = ["weaviate-client~=4.5.4"]
+anthropic = ["anthropic>=0.18.0,<1.0.0"]
+# Aggregate matching the dspy hard-dep set.
+full = [
+    "litellm>=1.64.0",
+    "openai>=0.28.1",
+    "gepa[dspy]==0.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dspy", "dspy.*"]
+exclude = ["tests", "tests.*"]
+
+[tool.setuptools.package-data]
+dspy = ["primitives/*.js"]
+
+[project.urls]
+homepage = "https://github.com/stanfordnlp/dspy"

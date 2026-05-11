@@ -2,11 +2,12 @@ import inspect
 import logging
 import random
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, Union
 
-from gepa import GEPAResult
-from gepa.core.adapter import ProposalFn
-from gepa.proposer.reflective_mutation.base import ReflectionComponentSelector
+if TYPE_CHECKING:
+    from gepa import GEPAResult
+    from gepa.core.adapter import ProposalFn
+    from gepa.proposer.reflective_mutation.base import ReflectionComponentSelector
 
 from dspy.clients.lm import LM
 from dspy.primitives import Example, Module, Prediction
@@ -491,7 +492,11 @@ class GEPA(Teleprompter):
         - trainset: The training set to use for reflective updates.
         - valset: The validation set to use for tracking Pareto scores. If not provided, GEPA will use the trainset for both.
         """
-        from gepa import GEPAResult, optimize
+        from dspy.utils.lazy_import import require
+
+        gepa = require("gepa", extra="gepa", feature="dspy.GEPA")
+        GEPAResult = gepa.GEPAResult
+        optimize = gepa.optimize
 
         from dspy.teleprompt.gepa.gepa_utils import DspyAdapter, LoggerAdapter
 
@@ -575,7 +580,7 @@ class GEPA(Teleprompter):
         # Build the seed candidate: map each predictor name to its current instruction
         seed_candidate = {name: pred.signature.instructions for name, pred in student.named_predictors()}
 
-        gepa_result: GEPAResult = optimize(
+        gepa_result: "GEPAResult" = optimize(
             seed_candidate=seed_candidate,
             trainset=trainset,
             valset=valset,

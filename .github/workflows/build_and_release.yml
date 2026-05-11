@@ -136,6 +136,17 @@ jobs:
         with:
           attestations: false
           packages-dir: .github/.internal_dspyai/dist/
+      # Publish to dspy-runtime (minimal-dependency build from the same source tree)
+      - name: Update version in pyproject-runtime.toml
+        run: sed -i '/#replace_package_version_marker/{n;s/version *= *"[^"]*"/version="${{ needs.extract-tag.outputs.version }}"/;}' pyproject-runtime.toml
+      - name: Build dspy-runtime distribution
+        run: |
+          rm -rf dist
+          bash scripts/build_dspy_runtime.sh
+      - name: Publish distribution 📦 to PyPI (dspy-runtime)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          attestations: false
       - uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9 # v5 # auto commit changes to release branch
         with:
           commit_message: Update versions

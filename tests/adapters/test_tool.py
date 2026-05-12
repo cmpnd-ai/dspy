@@ -497,6 +497,71 @@ def test_toolcalls_vague_match():
         ToolCalls.model_validate([{"foo": "bar"}])
 
 
+def test_toolcalls_normalizes_cached_litellm_tool_call_object():
+    class Function:
+        name = "search"
+        arguments = '{"query": "hello", "k": 5}'
+
+    class CachedToolCall:
+        id = "call_123"
+        type = "function"
+        function = Function()
+
+        def model_dump(self):
+            raise TypeError("'MockValSer' object cannot be converted to 'SchemaSerializer'")
+
+    tc = ToolCalls.model_validate([CachedToolCall()])
+
+    assert len(tc.tool_calls) == 1
+    assert tc.tool_calls[0].name == "search"
+    assert tc.tool_calls[0].args == {"query": "hello", "k": 5}
+    assert tc.tool_calls[0].id == "call_123"
+
+
+def test_toolcalls_normalizes_cached_dspy_native_object_with_broken_model_dump():
+    """A cached pydantic object that doesn't match the OpenAI wire shape but has
+    DSPy-native (name, args) attributes should still normalize via getattr when
+    model_dump() raises TypeError (MockValSer error)."""
+    class CachedDSPyToolCall:
+        id = "call_456"
+        name = "lookup"
+        args = {"key": "value"}
+
+        def model_dump(self):
+            raise TypeError("'MockValSer' object cannot be converted to 'SchemaSerializer'")
+
+    tc = ToolCalls.model_validate([CachedDSPyToolCall()])
+
+    assert len(tc.tool_calls) == 1
+    assert tc.tool_calls[0].name == "lookup"
+    assert tc.tool_calls[0].args == {"key": "value"}
+    assert tc.tool_calls[0].id == "call_456"
+
+
+def test_toolcalls_propagates_typeerror_when_no_recoverable_attributes():
+    """When model_dump raises and the object has no name attribute, the
+    TypeError should propagate rather than being silently swallowed."""
+    class BrokenObject:
+        def model_dump(self):
+            raise TypeError("'MockValSer' object cannot be converted to 'SchemaSerializer'")
+
+    with pytest.raises(TypeError, match="MockValSer"):
+        ToolCalls.model_validate([BrokenObject()])
+
+
+def test_toolcalls_rejects_explicit_none_name():
+    """A normalized item with name=None should fail with a clear targeted error,
+    not slip through the key-existence guard into a downstream pydantic error."""
+    with pytest.raises(ValueError, match="Could not normalize tool call at index 0"):
+        ToolCalls.model_validate([{"name": None, "args": {"q": "x"}}])
+
+
+def test_toolcalls_rejects_explicit_none_args():
+    """A normalized item with args=None should also be rejected with a clear error."""
+    with pytest.raises(ValueError, match="Could not normalize tool call at index 0"):
+        ToolCalls.model_validate([{"name": "search", "args": None}])
+
+
 def test_tool_convert_input_schema_to_tool_args_no_input_params():
     args, arg_types, arg_desc = convert_input_schema_to_tool_args(schema={"properties": {}})
     assert args == {}
@@ -577,7 +642,7 @@ def test_tool_call_execute():
     tool_call4 = dspy.ToolCalls.ToolCall(name="nonexistent", args={})
     try:
         tool_call4.execute(functions=tools)
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "not found" in str(e)
 

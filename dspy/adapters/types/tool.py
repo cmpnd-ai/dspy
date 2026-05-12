@@ -1,7 +1,9 @@
 import asyncio
 import inspect
+import re
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
+import json_repair
 import pydantic
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, TypeAdapter, create_model
@@ -15,6 +17,12 @@ if TYPE_CHECKING:
     from langchain.tools import BaseTool
 
 _TYPE_MAPPING = {"string": str, "integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
+_TOOL_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match OpenAI's ^[a-zA-Z0-9_-]+$ pattern."""
+    return _TOOL_NAME_RE.sub("_", name)
 
 
 class Tool(Type):
@@ -110,7 +118,7 @@ class Tool(Type):
             if arg_desc and k in arg_desc:
                 args[k]["description"] = arg_desc[k]
 
-        self.name = self.name or name
+        self.name = _sanitize_tool_name(self.name or name)
         self.desc = self.desc or desc
         self.args = self.args if self.args is not None else args
         self.arg_types = self.arg_types if self.arg_types is not None else arg_types
@@ -263,15 +271,19 @@ class ToolCalls(Type):
     class ToolCall(Type):
         name: str
         args: dict[str, Any]
+        id: str | None = None
 
         def format(self):
-            return {
+            d = {
                 "type": "function",
                 "function": {
                     "name": self.name,
                     "arguments": self.args,
                 },
             }
+            if self.id is not None:
+                d["id"] = self.id
+            return d
 
         def execute(self, functions: dict[str, Any] | list[Tool] | None = None) -> Any:
             """Execute this individual tool call and return its result.
@@ -340,8 +352,7 @@ class ToolCalls(Type):
             tool_calls = ToolCalls.from_dict_list(tool_calls_dict)
             ```
         """
-        tool_calls = [cls.ToolCall(**item) for item in tool_calls_dicts]
-        return cls(tool_calls=tool_calls)
+        return cls.model_validate(tool_calls_dicts)
 
     @classmethod
     def description(cls) -> str:
@@ -356,33 +367,100 @@ class ToolCalls(Type):
             "tool_calls": [tool_call.format() for tool_call in self.tool_calls],
         }
 
+    @staticmethod
+    def _get_tool_call_value(item: Any, key: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    @staticmethod
+    def _parse_tool_call_args(args: Any) -> Any:
+        if isinstance(args, str):
+            return json_repair.loads(args)
+        return args
+
+    @staticmethod
+    def _build_call(name_source: Any, args_source: Any, id_source: Any) -> dict[str, Any]:
+        """Assemble the canonical ``{name, args[, id]}`` dict from arbitrary
+        objects, looking up each field via attribute or dict access."""
+        name = ToolCalls._get_tool_call_value(name_source, "name")
+        args_raw = ToolCalls._get_tool_call_value(args_source, "args")
+        if args_raw is None:
+            args_raw = ToolCalls._get_tool_call_value(args_source, "arguments", {})
+        normalized = {"name": name, "args": ToolCalls._parse_tool_call_args(args_raw)}
+        call_id = (
+            ToolCalls._get_tool_call_value(id_source, "call_id")
+            or ToolCalls._get_tool_call_value(id_source, "id")
+        )
+        if call_id:
+            normalized["id"] = call_id
+        return normalized
+
+    @staticmethod
+    def _normalize_openai_tool_call(item: Any) -> Any:
+        """Normalize a tool-call object into the DSPy-native ``{name, args, id?}`` shape."""
+        item_type = ToolCalls._get_tool_call_value(item, "type")
+        fn = ToolCalls._get_tool_call_value(item, "function")
+
+        # OpenAI Chat Completions: {type:"function", function:{name, arguments}, id}
+        if item_type == "function" and fn is not None:
+            return ToolCalls._build_call(name_source=fn, args_source=fn, id_source=item)
+
+        # OpenAI Responses API: {type:"function_call", name, arguments, call_id}
+        if item_type == "function_call" and ToolCalls._get_tool_call_value(item, "name") is not None:
+            return ToolCalls._build_call(name_source=item, args_source=item, id_source=item)
+
+        # Pydantic object (e.g. cached LiteLLM response) — try model_dump and recurse,
+        # falling back to attribute access when the SchemaSerializer is broken.
+        if not isinstance(item, dict) and hasattr(item, "model_dump"):
+            try:
+                return ToolCalls._normalize_openai_tool_call(item.model_dump())
+            except TypeError:
+                if ToolCalls._get_tool_call_value(item, "name") is None:
+                    raise
+                return ToolCalls._build_call(name_source=item, args_source=item, id_source=item)
+
+        return item
+
+    @classmethod
+    def _validate_call_list(cls, items: list) -> dict:
+        """Normalize a list of arbitrarily-shaped tool calls and wrap into a
+        ``{tool_calls: [ToolCall, ...]}`` payload.
+
+        Raises ``ValueError`` with the index and original value of the first
+        item that couldn't be coerced into ``{name, args}`` so callers can
+        diagnose which list element is malformed.
+        """
+        tool_calls = []
+        for index, item in enumerate(items):
+            normalized = cls._normalize_openai_tool_call(item)
+            if not (
+                isinstance(normalized, dict)
+                and normalized.get("name") is not None
+                and normalized.get("args") is not None
+            ):
+                raise ValueError(
+                    f"Could not normalize tool call at index {index} into a "
+                    f"`{{name, args}}` dict for `dspy.ToolCalls`. Got item of "
+                    f"type {type(item).__name__}: {item!r}"
+                )
+            tool_calls.append(cls.ToolCall(**normalized))
+        return {"tool_calls": tool_calls}
+
     @pydantic.model_validator(mode="before")
     @classmethod
     def validate_input(cls, data: Any):
         if isinstance(data, cls):
             return data
-
-        # Handle case where data is a list of dicts with "name" and "args" keys
-        if isinstance(data, list) and all(
-            isinstance(item, dict) and "name" in item and "args" in item for item in data
-        ):
-            return {"tool_calls": [cls.ToolCall(**item) for item in data]}
-        # Handle case where data is a dict
-        elif isinstance(data, dict):
-            if "tool_calls" in data:
-                # Handle case where data is a dict with "tool_calls" key
-                tool_calls_data = data["tool_calls"]
-                if isinstance(tool_calls_data, list):
-                    return {
-                        "tool_calls": [
-                            cls.ToolCall(**item) if isinstance(item, dict) else item for item in tool_calls_data
-                        ]
-                    }
-            elif "name" in data and "args" in data:
-                # Handle case where data is a dict with "name" and "args" keys
+        if isinstance(data, list):
+            return cls._validate_call_list(data)
+        if isinstance(data, dict):
+            inner = data.get("tool_calls")
+            if isinstance(inner, list):
+                return cls._validate_call_list(inner)
+            if "name" in data and "args" in data:
                 return {"tool_calls": [cls.ToolCall(**data)]}
-
-        raise ValueError(f"Received invalid value for `dspy.ToolCalls`: {data}")
+        raise ValueError(f"Received invalid value for `dspy.ToolCalls`: {data!r}")
 
 
 def _resolve_json_schema_reference(schema: dict) -> dict:
@@ -393,7 +471,7 @@ def _resolve_json_schema_reference(schema: dict) -> dict:
         return schema
 
     def resolve_refs(obj: Any) -> Any:
-        if not isinstance(obj, (dict, list)):
+        if not isinstance(obj, dict | list):
             return obj
         if isinstance(obj, dict):
             if "$ref" in obj:

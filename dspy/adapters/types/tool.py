@@ -1,7 +1,9 @@
 import asyncio
 import inspect
+import json
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
+import json_repair
 import pydantic
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, TypeAdapter, create_model
@@ -148,19 +150,57 @@ class Tool(Type):
     def format(self):
         return str(self)
 
-    def format_as_litellm_function_call(self):
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.desc,
-                "parameters": {
-                    "type": "object",
-                    "properties": self.args,
-                    "required": list(self.args.keys()),
-                },
+    # TODO(MaximeRivest): Change to be to_LMToolDefinitionPart
+    def format_as_litellm_tool_definition(self, model_type: str) -> dict[str, Any]:
+        """Outbound boundary: serialize this tool *definition* for the LiteLLM
+        ``tools=`` request payload.
+
+        Contract:
+
+        * ``model_type`` is required. Valid values are exactly ``"chat"`` and
+          ``"responses"``. Any other value raises ``ValueError``.
+        * Returns a plain ``dict``. Its concrete shape is determined entirely
+          by ``model_type``:
+
+          ``model_type="chat"`` — OpenAI Chat Completions wrapper::
+
+              {
+                  "type": "function",
+                  "function": {
+                      "name": <str>,
+                      "description": <str>,
+                      "parameters": <JSON Schema object>,
+                  },
+              }
+
+          ``model_type="responses"`` — OpenAI Responses API flattened shape::
+
+              {
+                  "type": "function",
+                  "name": <str>,
+                  "description": <str>,
+                  "parameters": <JSON Schema object>,
+              }
+
+        These two dialects are the only ones the boundary speaks; this is the
+        same set accepted by ``ToolCalls.ToolCall.format_as_litellm_tool_call``
+        and ``to_tool_call``. Keep all three in sync if a new dialect is
+        ever added.
+        """
+        fn = {
+            "name": self.name,
+            "description": self.desc,
+            "parameters": {
+                "type": "object",
+                "properties": self.args,
+                "required": list(self.args.keys()),
             },
         }
+        if model_type == "responses":
+            return {"type": "function", **fn}
+        if model_type == "chat":
+            return {"type": "function", "function": fn}
+        raise ValueError(f"Unknown model_type: {model_type!r}. Expected 'chat' or 'responses'.")
 
     def _run_async_in_sync(self, coroutine):
         try:
@@ -263,17 +303,75 @@ class ToolCalls(Type):
     class ToolCall(Type):
         name: str
         args: dict[str, Any]
+        id: str | None = None
 
-        def format(self):
-            return {
-                "type": "function",
-                "function": {
+        # TODO(MaximeRivest): Change to be to_LMToolCallPart
+        def format_as_litellm_tool_call(self, model_type: str) -> dict[str, Any]:
+            """Outbound boundary: serialize this tool *call* for replay in a
+            LiteLLM assistant message (multi-turn tool loops).
+
+            Symmetric with ``Tool.format_as_litellm_tool_definition``: same
+            two-dialect contract, same required ``model_type`` argument.
+
+            Contract:
+
+            * ``model_type`` is required and must be ``"chat"`` or
+              ``"responses"`` (anything else raises ``ValueError``).
+            * ``arguments`` is always emitted as a **JSON-encoded string**, as
+              required by both OpenAI APIs when this payload is dropped into
+              an ``assistant.tool_calls[...]`` entry. (Sending a Python dict
+              instead causes a 400 at request time.)
+            * The optional ``id`` field is included only when ``self.id`` is
+              set, and is named per the dialect: ``id`` for Chat Completions,
+              ``call_id`` for the Responses API.
+
+            Returned shapes::
+
+                model_type="chat":
+                    {
+                        "type": "function",
+                        "function": {"name": <str>, "arguments": <JSON str>},
+                        "id": <str>,            # only when self.id is set
+                    }
+
+                model_type="responses":
+                    {
+                        "type": "function_call",
+                        "name": <str>,
+                        "arguments": <JSON str>,
+                        "call_id": <str>,       # only when self.id is set
+                    }
+
+            Round-trip: ``to_tool_call(tc.format_as_litellm_tool_call(d), d)``
+            equals ``tc`` for any supported ``d``.
+            """
+            args_str = json.dumps(self.args)
+            if model_type == "responses":
+                payload: dict[str, Any] = {
+                    "type": "function_call",
                     "name": self.name,
-                    "arguments": self.args,
-                },
-            }
+                    "arguments": args_str,
+                }
+                if self.id is not None:
+                    payload["call_id"] = self.id
+                return payload
+            if model_type == "chat":
+                payload = {
+                    "type": "function",
+                    "function": {"name": self.name, "arguments": args_str},
+                }
+                if self.id is not None:
+                    payload["id"] = self.id
+                return payload
+            raise ValueError(f"Unknown model_type: {model_type!r}. Expected 'chat' or 'responses'.")
 
-        def execute(self, functions: dict[str, Any] | list[Tool] | None = None) -> Any:
+        def format(self) -> dict[str, Any]:
+            # `Type` contract — used by `Type.serialize_model` to embed this
+            # tool call inline in prompt text. Defaults to the Chat Completions
+            # dialect; switch dialects via `format_as_litellm_tool_call`.
+            return self.format_as_litellm_tool_call("chat")
+
+        def execute(self, functions: "dict[str, Any] | list[Tool] | None" = None) -> Any:
             """Execute this individual tool call and return its result.
 
             Args:
@@ -292,15 +390,11 @@ class ToolCalls(Type):
             func = None
 
             if functions is None:
-                # Automatic lookup in caller's globals and locals
                 frame = inspect.currentframe().f_back
                 try:
-                    caller_globals = frame.f_globals
-                    caller_locals = frame.f_locals
-                    func = caller_locals.get(self.name) or caller_globals.get(self.name)
+                    func = frame.f_locals.get(self.name) or frame.f_globals.get(self.name)
                 finally:
                     del frame
-
             elif isinstance(functions, dict):
                 func = functions.get(self.name)
             elif isinstance(functions, list):
@@ -310,38 +404,17 @@ class ToolCalls(Type):
                         break
 
             if func is None:
-                raise ValueError(f"Tool function '{self.name}' not found. Please pass the tool functions to the `execute` method.")
+                raise ValueError(
+                    f"Tool function '{self.name}' not found. "
+                    "Please pass the tool functions to the `execute` method."
+                )
 
             try:
-                args = self.args or {}
-                return func(**args)
+                return func(**(self.args or {}))
             except Exception as e:
                 raise RuntimeError(f"Error executing tool '{self.name}': {e}") from e
 
     tool_calls: list[ToolCall]
-
-    @classmethod
-    def from_dict_list(cls, tool_calls_dicts: list[dict[str, Any]]) -> "ToolCalls":
-        """Convert a list of dictionaries to a ToolCalls instance.
-
-        Args:
-            dict_list: A list of dictionaries, where each dictionary should have 'name' and 'args' keys.
-
-        Returns:
-            A ToolCalls instance.
-
-        Examples:
-
-            ```python
-            tool_calls_dict = [
-                {"name": "search", "args": {"query": "hello"}},
-                {"name": "translate", "args": {"text": "world"}}
-            ]
-            tool_calls = ToolCalls.from_dict_list(tool_calls_dict)
-            ```
-        """
-        tool_calls = [cls.ToolCall(**item) for item in tool_calls_dicts]
-        return cls(tool_calls=tool_calls)
 
     @classmethod
     def description(cls) -> str:
@@ -359,30 +432,115 @@ class ToolCalls(Type):
     @pydantic.model_validator(mode="before")
     @classmethod
     def validate_input(cls, data: Any):
+        def coerce(items):
+            return [it if isinstance(it, cls.ToolCall) else cls.ToolCall(**it) for it in items]
+
         if isinstance(data, cls):
             return data
-
-        # Handle case where data is a list of dicts with "name" and "args" keys
-        if isinstance(data, list) and all(
-            isinstance(item, dict) and "name" in item and "args" in item for item in data
-        ):
-            return {"tool_calls": [cls.ToolCall(**item) for item in data]}
-        # Handle case where data is a dict
-        elif isinstance(data, dict):
+        if isinstance(data, list):
+            return {"tool_calls": coerce(data)}
+        if isinstance(data, dict):
             if "tool_calls" in data:
-                # Handle case where data is a dict with "tool_calls" key
-                tool_calls_data = data["tool_calls"]
-                if isinstance(tool_calls_data, list):
-                    return {
-                        "tool_calls": [
-                            cls.ToolCall(**item) if isinstance(item, dict) else item for item in tool_calls_data
-                        ]
-                    }
-            elif "name" in data and "args" in data:
-                # Handle case where data is a dict with "name" and "args" keys
+                return {"tool_calls": coerce(data["tool_calls"])}
+            if "name" in data and "args" in data:
                 return {"tool_calls": [cls.ToolCall(**data)]}
+        raise ValueError(f"Invalid value for `dspy.ToolCalls`: {data!r}")
 
-        raise ValueError(f"Received invalid value for `dspy.ToolCalls`: {data}")
+
+# TODO(MaximeRivest): Change to be from_LMToolResultPart.
+def to_tool_call(item: Any, model_type: str) -> ToolCalls.ToolCall:
+    """Inbound boundary: normalize one LiteLLM tool-call into a canonical
+    ``ToolCalls.ToolCall``.
+
+    Contract:
+
+    * ``model_type`` is required and must be ``"chat"`` or ``"responses"`` —
+      the same two dialects served by ``Tool.format_as_litellm_tool_definition``
+      and ``ToolCalls.ToolCall.format_as_litellm_tool_call``. Any other value
+      raises ``ValueError``. Callers always know this:
+      ``base_lm._process_completion`` is always ``"chat"`` and
+      ``_process_response`` is always ``"responses"``.
+    * ``item`` may be either a ``dict`` in the dialect's wire shape (see
+      ``format_as_litellm_tool_call`` for the exact key sets) or a pydantic
+      object exposing ``model_dump`` that returns such a dict. Anything else
+      raises ``TypeError``.
+    * Wrong-dialect payloads (e.g. a Responses-API shape passed with
+      ``model_type="chat"``) raise ``ValueError`` with a precise message
+      instead of silently falling through to the other branch.
+    * Returns a fully-populated ``ToolCalls.ToolCall``. ``args`` is always a
+      ``dict`` (parsed from JSON when the wire side supplies a string);
+      ``id`` reflects ``id`` (chat) or ``call_id`` (responses) and is
+      ``None`` when the provider omitted it.
+
+    Fallback policy: when ``item.model_dump()`` raises ``TypeError`` because
+    of the MockValSer/SchemaSerializer bug (pydantic#7713 / litellm#9345),
+    we reach through to attribute access for the *same* fields the dict path
+    would have read. This is the only fallback in this boundary; everything
+    else is a hard error.
+    """
+    if model_type == "chat":
+        return _to_tool_call_chat(item)
+    if model_type == "responses":
+        return _to_tool_call_responses(item)
+    raise ValueError(f"Unknown model_type: {model_type!r}. Expected 'chat' or 'responses'.")
+
+
+def _to_tool_call_chat(item: Any) -> "ToolCalls.ToolCall":
+    if not isinstance(item, dict) and hasattr(item, "model_dump"):
+        try:
+            item = item.model_dump()
+        except TypeError:
+            fn = getattr(item, "function", None)
+            if fn is None:
+                raise
+            return ToolCalls.ToolCall(
+                name=fn.name,
+                args=_parse_args(fn.arguments),
+                id=getattr(item, "id", None),
+            )
+
+    if not isinstance(item, dict):
+        raise TypeError(f"Cannot normalize Chat Completions tool call from {type(item).__name__}: {item!r}")
+    if item.get("type") != "function" or not isinstance(item.get("function"), dict):
+        raise ValueError(f"Expected Chat Completions tool-call shape, got: {item!r}")
+
+    fn = item["function"]
+    return ToolCalls.ToolCall(
+        name=fn["name"],
+        args=_parse_args(fn.get("arguments")),
+        id=item.get("id"),
+    )
+
+
+def _to_tool_call_responses(item: Any) -> "ToolCalls.ToolCall":
+    if not isinstance(item, dict) and hasattr(item, "model_dump"):
+        try:
+            item = item.model_dump()
+        except TypeError:
+            if getattr(item, "name", None) is None:
+                raise
+            return ToolCalls.ToolCall(
+                name=item.name,
+                args=_parse_args(getattr(item, "arguments", None)),
+                id=getattr(item, "call_id", None) or getattr(item, "id", None),
+            )
+
+    if not isinstance(item, dict):
+        raise TypeError(f"Cannot normalize Responses API tool call from {type(item).__name__}: {item!r}")
+    if item.get("type") != "function_call" or not item.get("name"):
+        raise ValueError(f"Expected Responses API function_call shape, got: {item!r}")
+
+    return ToolCalls.ToolCall(
+        name=item["name"],
+        args=_parse_args(item.get("arguments")),
+        id=item.get("call_id") or item.get("id"),
+    )
+
+
+def _parse_args(args: Any) -> dict[str, Any]:
+    if args is None or args == "":
+        return {}
+    return json_repair.loads(args) if isinstance(args, str) else args
 
 
 def _resolve_json_schema_reference(schema: dict) -> dict:

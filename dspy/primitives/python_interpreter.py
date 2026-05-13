@@ -370,7 +370,7 @@ class PythonInterpreter:
         """Send a JSON-RPC request and return the parsed response.
 
         Non-JSON lines (e.g. Pyodide package loading messages) are skipped,
-        up to ``_MAX_SKIP_LINES`` to prevent unbounded blocking.
+        up to `_MAX_SKIP_LINES` to prevent unbounded blocking.
         """
         self._request_id += 1
         request_id = self._request_id

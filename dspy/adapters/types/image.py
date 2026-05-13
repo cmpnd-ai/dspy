@@ -38,10 +38,10 @@ class Image(Type):
         url:
             The image source. Supported values include
 
-            - ``str``: HTTP(S)/GS URL or local file path
-            - ``bytes``: raw image bytes
-            - ``PIL.Image.Image``: a PIL image instance
-            - ``dict`` with a single ``{"url": value}`` entry (legacy form)
+            - `str`: HTTP(S)/GS URL or local file path
+            - `bytes`: raw image bytes
+            - `PIL.Image.Image`: a PIL image instance
+            - `dict` with a single `{"url": value}` entry (legacy form)
             - already encoded data URI
 
         download:
@@ -55,12 +55,12 @@ class Image(Type):
         """
 
         if url is not None and "url" not in data:
-            # Support a positional argument while allowing ``url=`` in **data.
+            # Support a positional argument while allowing `url=` in **data.
             if isinstance(url, dict) and set(url.keys()) == {"url"}:
                 # Legacy dict form from previous model validator.
                 data["url"] = url["url"]
             else:
-                # ``url`` may be a string, bytes, or a PIL image.
+                # `url` may be a string, bytes, or a PIL image.
                 data["url"] = url
 
         if "url" in data:

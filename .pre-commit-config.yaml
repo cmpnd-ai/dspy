@@ -22,3 +22,11 @@ repos:
         args: ["--maxkb=1024"]
       - id: check-merge-conflict
       - id: debug-statements
+
+  - repo: local
+    hooks:
+      - id: no-rst-double-backticks
+        name: forbid RST ``code`` (use single backticks for mkdocs)
+        language: pygrep
+        types: [python]
+        entry: '(?<!`)``[^`\n]+``(?!`)'

@@ -100,12 +100,12 @@ class DatabricksRM(dspy.Retrieve):
         Args:
             databricks_index_name (str): The name of the Databricks Vector Search Index to query.
             databricks_endpoint (Optional[str]): The URL of the Databricks Workspace containing
-                the Vector Search Index. Defaults to the value of the ``DATABRICKS_HOST``
+                the Vector Search Index. Defaults to the value of the `DATABRICKS_HOST`
                 environment variable. If unspecified, the Databricks SDK is used to identify the
                 endpoint based on the current environment.
             databricks_token (Optional[str]): The Databricks Workspace authentication token to use
                 when querying the Vector Search Index. Defaults to the value of the
-                ``DATABRICKS_TOKEN`` environment variable. If unspecified, the Databricks SDK is
+                `DATABRICKS_TOKEN` environment variable. If unspecified, the Databricks SDK is
                 used to identify the token based on the current environment.
             databricks_client_id (str): Databricks service principal id. If not specified,
                 the token is resolved from the current environment (DATABRICKS_CLIENT_ID).
@@ -113,10 +113,10 @@ class DatabricksRM(dspy.Retrieve):
                 the endpoint is resolved from the current environment (DATABRICKS_CLIENT_SECRET).
             columns (Optional[list[str]]): Extra column names to include in response,
                 in addition to the document id and text columns specified by
-                ``docs_id_column_name`` and ``text_column_name``.
+                `docs_id_column_name` and `text_column_name`.
             filters_json (Optional[str]): A JSON string specifying additional query filters.
-                Example filters: ``{"id <": 5}`` selects records that have an ``id`` column value
-                less than 5, and ``{"id >=": 5, "id <": 10}`` selects records that have an ``id``
+                Example filters: `{"id <": 5}` selects records that have an `id` column value
+                less than 5, and `{"id >=": 5, "id <": 10}` selects records that have an `id`
                 column value greater than or equal to 5 and less than 10.
             k (int): The number of documents to retrieve.
             docs_id_column_name (str): The name of the column in the Databricks Vector Search Index
@@ -222,15 +222,15 @@ class DatabricksRM(dspy.Retrieve):
                 Search Index. Must be either 'ANN' (approximate nearest neighbor) or 'HYBRID'
                 (hybrid search).
             filters_json (Optional[str]): A JSON string specifying additional query filters.
-                Example filters: ``{"id <": 5}`` selects records that have an ``id`` column value
-                less than 5, and ``{"id >=": 5, "id <": 10}`` selects records that have an ``id``
+                Example filters: `{"id <": 5}` selects records that have an `id` column value
+                less than 5, and `{"id >=": 5, "id <": 10}` selects records that have an `id`
                 column value greater than or equal to 5 and less than 10. If specified, this
                 parameter overrides the `filters_json` parameter passed to the constructor.
 
         Returns:
-            A list of dictionaries when ``use_with_databricks_agent_framework`` is ``True``,
-            or a ``dspy.Prediction`` object when ``use_with_databricks_agent_framework`` is
-            ``False``.
+            A list of dictionaries when `use_with_databricks_agent_framework` is `True`,
+            or a `dspy.Prediction` object when `use_with_databricks_agent_framework` is
+            `False`.
         """
         if query_type in ["vector", "text"]:
             # Older versions of DSPy used a `query_type` argument to disambiguate between text

@@ -5,9 +5,9 @@ REPL environment used by :class:`dspy.RLM`. Subclasses implement four
 abstract methods describing how a value enters and appears inside the
 sandbox, and inherit:
 
-- ``__get_pydantic_core_schema__`` so the type can be used directly as a
+- `__get_pydantic_core_schema__` so the type can be used directly as a
   :class:`dspy.Signature` field annotation (see "The pydantic hook" below).
-- ``to_repl_variable()`` as a default helper that delegates to the free
+- `to_repl_variable()` as a default helper that delegates to the free
   :func:`build_repl_variable` function.
 
 The free function :func:`build_repl_variable` is also exported for the rare
@@ -16,10 +16,10 @@ case where you need to wrap a value without subclassing.
 The pydantic hook
 -----------------
 
-``__get_pydantic_core_schema__`` lets subclasses be used as
-``dspy.Signature`` field annotations. It is a pass-through (no validation,
-``str()`` serialization) — RLM owns real serialization via ``to_sandbox()``
-and ``sandbox_assignment()``.
+`__get_pydantic_core_schema__` lets subclasses be used as
+`dspy.Signature` field annotations. It is a pass-through (no validation,
+`str()` serialization) — RLM owns real serialization via `to_sandbox()`
+and `sandbox_assignment()`.
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ class SandboxSerializable(ABC):
 
     Subclasses implement four methods:
 
-    - ``sandbox_setup``: Python statements (usually imports) executed once
+    - `sandbox_setup`: Python statements (usually imports) executed once
       in the sandbox. The returned text is also surfaced to the LLM in the
       variable description, so the model knows which names are in scope
-      (e.g. ``pd`` when pandas is imported).
-    - ``to_sandbox``: serialize the value to text bytes or binary bytes.
-    - ``sandbox_assignment``: Python code that reconstructs the value from
+      (e.g. `pd` when pandas is imported).
+    - `to_sandbox`: serialize the value to text bytes or binary bytes.
+    - `sandbox_assignment`: Python code that reconstructs the value from
       a data expression.
-    - ``rlm_preview``: a short, LLM-friendly description of the value.
+    - `rlm_preview`: a short, LLM-friendly description of the value.
 
     Example::
 
@@ -71,7 +71,7 @@ class SandboxSerializable(ABC):
                 return f"DataFrame: {self.data.shape[0]} rows x {self.data.shape[1]} columns"
 
     Subclasses can be used directly as :class:`dspy.Signature` field
-    annotations because of the inherited ``__get_pydantic_core_schema__``
+    annotations because of the inherited `__get_pydantic_core_schema__`
     hook (see the module docstring for what that hook does and why it is
     needed).
     """
@@ -90,7 +90,7 @@ class SandboxSerializable(ABC):
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
-        """Pass-through schema so subclasses work as ``dspy.Signature`` annotations."""
+        """Pass-through schema so subclasses work as `dspy.Signature` annotations."""
         return core_schema.no_info_plain_validator_function(
             lambda v: v,
             serialization=core_schema.plain_serializer_function_ser_schema(lambda v: str(v)),
@@ -111,7 +111,7 @@ def build_repl_variable(
     Free function form of :meth:`SandboxSerializable.to_repl_variable`. Use
     it when you need to wrap a value imperatively without going through the
     method on the instance. The resulting variable's preview comes from
-    ``rlm_preview()``; ``sandbox_setup()`` imports are appended to the
+    `rlm_preview()`; `sandbox_setup()` imports are appended to the
     description so the model learns which names are bound in the sandbox
     before it writes code.
     """

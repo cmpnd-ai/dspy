@@ -2,11 +2,13 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any, Callable, get_origin, get_type_hints
 
+import json_repair
 import pydantic
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, TypeAdapter, create_model
 
 from dspy.adapters.types.base_type import Type, warn_legacy_type_method
+from dspy.core.types import LMToolCallPart
 from dspy.dsp.utils.settings import settings
 from dspy.utils.callback import with_callbacks
 
@@ -265,16 +267,23 @@ class ToolCalls(Type):
     class ToolCall(Type):
         name: str
         args: dict[str, Any]
+        id: str | None = None
 
         def format(self):
             warn_legacy_type_method("ToolCalls.ToolCall.format()")
-            return {
+            formatted = {
                 "type": "function",
                 "function": {
                     "name": self.name,
                     "arguments": self.args,
                 },
             }
+            if self.id is not None:
+                formatted["id"] = self.id
+            return formatted
+
+        def to_lm_part(self, tool_call_id: str | None = None) -> LMToolCallPart:
+            return LMToolCallPart(id=tool_call_id or self.id, name=self.name, args=self.args)
 
         def execute(self, functions: dict[str, Any] | list[Tool] | None = None) -> Any:
             """Execute this individual tool call and return its result.
@@ -343,8 +352,7 @@ class ToolCalls(Type):
             tool_calls = ToolCalls.from_dict_list(tool_calls_dict)
             ```
         """
-        tool_calls = [cls.ToolCall(**item) for item in tool_calls_dicts]
-        return cls(tool_calls=tool_calls)
+        return cls.model_validate(tool_calls_dicts)
 
     @classmethod
     def description(cls) -> str:
@@ -360,31 +368,107 @@ class ToolCalls(Type):
             "tool_calls": [tool_call.format() for tool_call in self.tool_calls],
         }
 
+    @classmethod
+    def parse_lm_response(cls, response: str | dict[str, Any]) -> "ToolCalls | None":
+        if not isinstance(response, dict):
+            return None
+        tool_calls = response.get("tool_calls")
+        if not tool_calls:
+            return None
+        return cls.model_validate(tool_calls)
+
+    def to_lm_parts(self, id_prefix: str | None = None) -> list[LMToolCallPart]:
+        return [
+            tool_call.to_lm_part(f"{id_prefix}_{idx}" if id_prefix is not None and tool_call.id is None else None)
+            for idx, tool_call in enumerate(self.tool_calls)
+        ]
+
+    def with_call_ids(self, id_prefix: str) -> "ToolCalls":
+        tool_calls = [
+            tool_call if tool_call.id is not None else tool_call.model_copy(update={"id": f"{id_prefix}_{idx}"})
+            for idx, tool_call in enumerate(self.tool_calls)
+        ]
+        return self.model_copy(update={"tool_calls": tool_calls})
+
+    @staticmethod
+    def _get_tool_call_value(item: Any, key: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    @staticmethod
+    def _parse_tool_call_args(args: Any) -> Any:
+        if isinstance(args, str):
+            return json_repair.loads(args)
+        return args
+
+    @classmethod
+    def _normalized_tool_call(cls, name: Any, args: Any, tool_call_id: Any = None) -> dict[str, Any] | None:
+        if name is None:
+            return None
+        normalized = {"name": name, "args": cls._parse_tool_call_args(args)}
+        if tool_call_id:
+            normalized["id"] = tool_call_id
+        return normalized
+
+    @classmethod
+    def _normalize_native_tool_call(cls, item: Any) -> Any:
+        if not isinstance(item, dict) and hasattr(item, "model_dump"):
+            try:
+                dumped_item = item.model_dump()
+            except TypeError:
+                dumped_item = None
+            if isinstance(dumped_item, dict):
+                item = dumped_item
+
+        function = cls._get_tool_call_value(item, "function")
+        if function is not None:
+            name = cls._get_tool_call_value(function, "name")
+            arguments = cls._get_tool_call_value(function, "arguments", {})
+            normalized = cls._normalized_tool_call(name, arguments, cls._get_tool_call_value(item, "id"))
+            if normalized is not None:
+                return normalized
+
+        name = cls._get_tool_call_value(item, "name")
+        if cls._get_tool_call_value(item, "type") == "function_call" and name is not None:
+            arguments = cls._get_tool_call_value(item, "arguments", {})
+            normalized = cls._normalized_tool_call(
+                name,
+                arguments,
+                cls._get_tool_call_value(item, "call_id") or cls._get_tool_call_value(item, "id"),
+            )
+            if normalized is not None:
+                return normalized
+
+        args = cls._get_tool_call_value(item, "args")
+        if args is not None:
+            normalized = cls._normalized_tool_call(name, args, cls._get_tool_call_value(item, "id"))
+            if normalized is not None:
+                return normalized
+
+        return item
+
     @pydantic.model_validator(mode="before")
     @classmethod
     def validate_input(cls, data: Any):
         if isinstance(data, cls):
             return data
 
-        # Handle case where data is a list of dicts with "name" and "args" keys
-        if isinstance(data, list) and all(
-            isinstance(item, dict) and "name" in item and "args" in item for item in data
-        ):
-            return {"tool_calls": [cls.ToolCall(**item) for item in data]}
-        # Handle case where data is a dict
+        tool_calls_data = None
+        if isinstance(data, list):
+            tool_calls_data = data
         elif isinstance(data, dict):
             if "tool_calls" in data:
-                # Handle case where data is a dict with "tool_calls" key
                 tool_calls_data = data["tool_calls"]
-                if isinstance(tool_calls_data, list):
-                    return {
-                        "tool_calls": [
-                            cls.ToolCall(**item) if isinstance(item, dict) else item for item in tool_calls_data
-                        ]
-                    }
-            elif "name" in data and "args" in data:
-                # Handle case where data is a dict with "name" and "args" keys
-                return {"tool_calls": [cls.ToolCall(**data)]}
+            else:
+                normalized = cls._normalize_native_tool_call(data)
+                if isinstance(normalized, dict) and "name" in normalized and "args" in normalized:
+                    return {"tool_calls": [normalized]}
+
+        if isinstance(tool_calls_data, list):
+            normalized = [cls._normalize_native_tool_call(item) for item in tool_calls_data]
+            if all(isinstance(item, dict) and "name" in item and "args" in item for item in normalized):
+                return {"tool_calls": normalized}
 
         raise ValueError(f"Received invalid value for `dspy.ToolCalls`: {data}")
 

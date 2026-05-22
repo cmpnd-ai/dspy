@@ -96,7 +96,13 @@ class Adapter:
             value = inputs[name]
             if field.annotation == History:
                 prompt_signature = prompt_signature.delete(name)
-                messages.extend(value.to_lm_messages(self, prompt_signature))
+                messages.extend(
+                    value.to_lm_messages(
+                        self,
+                        prompt_signature,
+                        use_native_tool_calls=self._uses_native_tool_calls(prompt_signature, lm),
+                    )
+                )
                 inputs.pop(name, None)
                 history_has_open_episode = value.has_open_episode()
             elif field.annotation == Image:
@@ -215,6 +221,13 @@ class Adapter:
 
     def _history_to_lm_messages(self, signature: type[Signature], history: History) -> list[LMMessage]:
         return history.to_lm_messages(self, signature)
+
+    def _uses_native_tool_calls(self, signature: type[Signature], lm: BaseLM) -> bool:
+        return (
+            self.use_native_function_calling
+            and getattr(lm, "supports_function_calling", False)
+            and self._get_tool_call_output_field_name(signature) is not None
+        )
 
     def _image_to_lm_part(self, image: Image) -> LMImagePart:
         source = image.url

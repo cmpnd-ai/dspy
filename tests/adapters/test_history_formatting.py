@@ -37,9 +37,9 @@ def test_chat_adapter_formats_open_history_without_duplicate_input():
         {"question": "What is 1+2?", "history": _history_with_open_tool_turn(), "tools": [dspy.Tool(add)]},
     )
 
-    texts = [message.text or "" for message in messages]
+    texts = [message["content"] or "" for message in messages]
 
-    assert [message.role for message in messages] == ["system", "user", "assistant", "user", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "assistant", "user", "user"]
     assert sum("What is 1+2?" in text for text in texts[1:]) == 1
     assert "[[ ## next_thought ## ]]\nI should add." in texts[2]
     assert "[[ ## tool_calls ## ]]" in texts[2]
@@ -54,10 +54,10 @@ def test_json_adapter_formats_open_history_without_duplicate_input():
         {"question": "What is 1+2?", "history": _history_with_open_tool_turn(), "tools": [dspy.Tool(add)]},
     )
 
-    texts = [message.text or "" for message in messages]
+    texts = [message["content"] or "" for message in messages]
     assistant = json.loads(texts[2])
 
-    assert [message.role for message in messages] == ["system", "user", "assistant", "user", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "assistant", "user", "user"]
     assert sum("What is 1+2?" in text for text in texts[1:]) == 1
     assert assistant["next_thought"] == "I should add."
     assert assistant["tool_calls"]["tool_calls"][0]["function"]["name"] == "add"

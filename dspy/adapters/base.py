@@ -2,10 +2,11 @@ import logging
 from typing import Any, get_origin
 
 from dspy.adapters.types import Audio, File, History, Image, Type
+from dspy.adapters.types.base_type import split_message_content_for_custom_types
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import Tool, ToolCalls
 from dspy.clients.base_lm import BaseLM
-from dspy.clients.openai_format import provider_tool_call_to_part, to_openai_chat_request
+from dspy.clients.openai_format import message_to_openai_chat, provider_tool_call_to_part, to_openai_chat_request
 from dspy.core.types import (
     LMAudioPart,
     LMBinaryPart,
@@ -26,7 +27,14 @@ from dspy.utils.exceptions import AdapterParseError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NATIVE_RESPONSE_TYPES = [Citations, Reasoning]
+_DEFAULT_NATIVE_RESPONSE_TYPES = [Citations, Reasoning, ToolCalls]
+
+
+def _native_tool_call_instruction(field_name: str) -> str:
+    return (
+        "When tool use is needed, call the available tools through the native tool-call interface. "
+        f"Do not emit `{field_name}` as a text or JSON output field."
+    )
 
 
 class Adapter:
@@ -51,6 +59,7 @@ class Adapter:
         callbacks: list[BaseCallback] | None = None,
         use_native_function_calling: bool = False,
         native_response_types: list[type[Type]] | None = None,
+        allow_parallel_tool_calls: bool | None = None,
     ):
         """
         Args:
@@ -61,11 +70,16 @@ class Adapter:
                 or `list[dspy.Tool]` types. Defaults to False.
             native_response_types: List of output field types that should be handled by native LM features rather than
                 adapter parsing. For example, `dspy.Citations` can be populated directly by citation APIs
-                (e.g., Anthropic's citation feature). Defaults to `[Citations]`.
+                (e.g., Anthropic's citation feature). Defaults to `[Citations, Reasoning, ToolCalls]`.
+            allow_parallel_tool_calls: Whether to request provider-side parallel tool calls when native function calling
+                is active. If `None`, leaves the provider default unchanged. Defaults to None.
         """
         self.callbacks = callbacks or []
         self.use_native_function_calling = use_native_function_calling
-        self.native_response_types = native_response_types or _DEFAULT_NATIVE_RESPONSE_TYPES
+        self.native_response_types = list(
+            _DEFAULT_NATIVE_RESPONSE_TYPES if native_response_types is None else native_response_types
+        )
+        self.allow_parallel_tool_calls = allow_parallel_tool_calls
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -88,6 +102,7 @@ class Adapter:
         messages: list[LMMessage] = []
         user_parts: list[LMPart] = []
         tools: list[LMToolSpec] = []
+        native_feature_instructions: list[str] = []
         history_has_open_episode = False
 
         for name, field in list(prompt_signature.input_fields.items()):
@@ -129,12 +144,18 @@ class Adapter:
                     "input field with type `list[dspy.Tool]`."
                 )
 
-            if tool_call_output_field_name and lm.supports_function_calling:
+            if tool_call_output_field_name and getattr(lm, "supports_function_calling", False):
                 tool_values = inputs[tool_call_input_field_name]
                 tool_values = tool_values if isinstance(tool_values, list) else [tool_values]
                 tools.extend(self._tool_to_lm_tool_spec(tool) for tool in tool_values)
                 prompt_signature = prompt_signature.delete(tool_call_output_field_name).delete(tool_call_input_field_name)
                 inputs.pop(tool_call_input_field_name, None)
+                if self.allow_parallel_tool_calls is not None:
+                    lm_kwargs["parallel_tool_calls"] = self.allow_parallel_tool_calls
+                native_feature_instructions.append(_native_tool_call_instruction(tool_call_output_field_name))
+
+        if "tool_choice" in lm_kwargs and not tools:
+            lm_kwargs.pop("tool_choice")
 
         if history_has_open_episode:
             for input_name in list(prompt_signature.input_fields):
@@ -149,6 +170,13 @@ class Adapter:
                 if getattr(lm, "model", "").startswith("anthropic/"):
                     prompt_signature = prompt_signature.delete(name)
 
+        if native_feature_instructions:
+            prompt_signature = self._with_native_feature_instructions(
+                signature,
+                prompt_signature,
+                native_feature_instructions,
+            )
+
         return {
             "original_signature": signature,
             "prompt_signature": prompt_signature,
@@ -159,6 +187,20 @@ class Adapter:
             "tools": tools,
         }
 
+    def _with_native_feature_instructions(
+        self,
+        original_signature: type[Signature],
+        prompt_signature: type[Signature],
+        native_feature_instructions: list[str],
+    ) -> type[Signature]:
+        original_default_instructions = Signature(original_signature.fields).instructions
+        prompt_default_instructions = Signature(prompt_signature.fields).instructions
+        if original_signature.instructions == original_default_instructions:
+            instructions = prompt_default_instructions
+        else:
+            instructions = prompt_signature.instructions
+        return prompt_signature.with_instructions("\n".join([instructions, *native_feature_instructions]))
+
     def render_request(
         self,
         plan: dict[str, Any],
@@ -167,7 +209,7 @@ class Adapter:
         inputs: dict[str, Any],
     ) -> LMRequest:
         """Render the prompt-facing signature into a normalized LM request."""
-        messages = self.format(plan["prompt_signature"], demos, plan["inputs"])
+        messages = self.render_messages(plan["prompt_signature"], demos, plan["inputs"])
         messages = self._apply_planned_messages(messages, plan)
         request_kwargs = dict(plan["lm_kwargs"])
         tools = list(plan.get("tools", []))
@@ -190,6 +232,7 @@ class Adapter:
         # `dspy.LM` converts those messages to text-completion or Responses requests internally.
         data = to_openai_chat_request(request)
         data.pop("model", None)
+        data["messages"] = split_message_content_for_custom_types(data["messages"])
         if request.config.cache is not None:
             if request.config.cache.enabled is not None:
                 data["cache"] = request.config.cache.enabled
@@ -228,6 +271,11 @@ class Adapter:
             and getattr(lm, "supports_function_calling", False)
             and self._get_tool_call_output_field_name(signature) is not None
         )
+
+    def force_tool_call_config(self, tool_name: str) -> dict[str, Any]:
+        if not self.use_native_function_calling:
+            return {}
+        return {"tool_choice": {"mode": "required", "allowed": [tool_name]}}
 
     def _image_to_lm_part(self, image: Image) -> LMImagePart:
         source = image.url
@@ -277,11 +325,48 @@ class Adapter:
         lm_kwargs["reasoning_effort"] = reasoning_effort
         return signature.delete(field_name)
 
+    def _call_preprocess(
+        self,
+        lm: BaseLM,
+        lm_kwargs: dict[str, Any],
+        signature: type[Signature],
+        inputs: dict[str, Any],
+    ) -> type[Signature]:
+        plan = self.plan_fields(lm, lm_kwargs, signature, inputs)
+        request = self.render_request(plan, lm, [], inputs)
+        legacy_kwargs = self._legacy_call_kwargs(request)
+        legacy_kwargs.pop("messages", None)
+        lm_kwargs.clear()
+        lm_kwargs.update(legacy_kwargs)
+        return plan["prompt_signature"]
+
+    def _call_postprocess(
+        self,
+        prompt_signature: type[Signature],
+        original_signature: type[Signature],
+        outputs: list[dict[str, Any] | str],
+        lm: BaseLM | None,
+        lm_kwargs: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        request = LMRequest.from_call(
+            model=getattr(lm, "model", ""),
+            messages=[LMMessage(role="user", parts=[LMTextPart(text="")])],
+            **(lm_kwargs or {}),
+        )
+        response = self.normalize_legacy_outputs(outputs, request)
+        plan = {
+            "original_signature": original_signature,
+            "prompt_signature": prompt_signature,
+        }
+        return self.parse_response(plan, response, lm)
+
     def normalize_legacy_outputs(self, outputs: list[dict[str, Any] | str], request: LMRequest) -> LMResponse:
         """Convert legacy adapter outputs into a normalized `LMResponse` immediately after the LM call."""
         return LMResponse(model=request.model, outputs=[self._legacy_output_to_lm_output(output) for output in outputs])
 
-    def _legacy_output_to_lm_output(self, output: dict[str, Any] | str) -> LMOutput:
+    def _legacy_output_to_lm_output(self, output: dict[str, Any] | str | None) -> LMOutput:
+        if output is None:
+            return LMOutput(parts=[])
         if isinstance(output, str):
             return LMOutput(parts=[LMTextPart(text=output)])
 
@@ -389,11 +474,13 @@ class Adapter:
         response = await self.acall_lm(lm, request)
         return self.parse_response(plan, response, lm)
 
-    def format(
+    def render_messages(
         self,
         signature: type[Signature],
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
+        *,
+        use_native_tool_calls: bool = False,
     ) -> list[LMMessage]:
         """Format the input messages for the LM call.
 
@@ -446,7 +533,15 @@ class Adapter:
 
             # In order to format the conversation history, we need to remove the history field from the signature.
             signature_without_history = signature.delete(history_field_name)
-            conversation_history = history_obj.to_lm_messages(self, signature_without_history) if history_obj else []
+            conversation_history = (
+                history_obj.to_lm_messages(
+                    self,
+                    signature_without_history,
+                    use_native_tool_calls=use_native_tool_calls,
+                )
+                if history_obj is not None
+                else []
+            )
             inputs_copy.pop(history_field_name, None)
             if has_open_episode:
                 for input_name in list(signature_without_history.input_fields):
@@ -468,6 +563,25 @@ class Adapter:
             messages.append({"role": "user", "content": content})
 
         return [message if isinstance(message, LMMessage) else LMMessage(**message) for message in messages]
+
+    def format(
+        self,
+        signature: type[Signature],
+        demos: list[dict[str, Any]],
+        inputs: dict[str, Any],
+        *,
+        use_native_tool_calls: bool = False,
+    ) -> list[dict[str, Any]]:
+        messages = [
+            message_to_openai_chat(message)
+            for message in self.render_messages(
+                signature,
+                demos,
+                inputs,
+                use_native_tool_calls=use_native_tool_calls,
+            )
+        ]
+        return split_message_content_for_custom_types(messages)
 
     def format_system_message(self, signature: type[Signature]) -> str:
         """Format the system message for the LM call.

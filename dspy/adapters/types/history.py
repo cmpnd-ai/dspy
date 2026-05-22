@@ -3,6 +3,7 @@ from typing import Any, Callable
 import pydantic
 from pydantic import Field, model_validator
 
+from dspy.adapters.types.tool import ToolCalls
 from dspy.core.types import LMMessage
 
 
@@ -26,6 +27,21 @@ class HistoryFrame(pydantic.BaseModel):
     source: str | None = None
 
     model_config = pydantic.ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize_tool_calls_outputs(self) -> "HistoryFrame":
+        normalized_outputs = {}
+        changed = False
+        for key, value in self.outputs.items():
+            if isinstance(value, dict) and set(value.keys()) == {"tool_calls"} and isinstance(value["tool_calls"], list):
+                normalized_outputs[key] = ToolCalls.model_validate(value)
+                changed = True
+            else:
+                normalized_outputs[key] = value
+
+        if changed:
+            self.outputs = normalized_outputs
+        return self
 
 
 HistoryEntry = HistoryFrame | dict[str, Any]

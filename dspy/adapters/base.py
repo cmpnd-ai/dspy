@@ -312,7 +312,7 @@ class Adapter:
 
             if output.tool_calls and tool_call_output_field_name:
                 value[tool_call_output_field_name] = ToolCalls.from_dict_list(
-                    [{"name": call.name, "args": call.args} for call in output.tool_calls]
+                    [{"name": call.name, "args": call.args, "id": call.id} for call in output.tool_calls]
                 )
 
             # Parse custom types that do not rely on the `Adapter.parse()` text parser.

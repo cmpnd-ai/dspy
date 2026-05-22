@@ -5,6 +5,7 @@ from dspy.adapters.types.history import (
     make_truncate_oldest_actions,
     truncate_oldest_actions,
 )
+from dspy.adapters.types.tool import ToolCalls
 
 
 def test_legacy_messages_key_still_constructs_history_frames():
@@ -18,18 +19,19 @@ def test_legacy_messages_key_still_constructs_history_frames():
 
 
 def test_field_frames_round_trip():
+    tool_calls = ToolCalls.from_dict_list([{"name": "search", "args": {"query": "hello"}, "id": "call_0"}])
     history = History(frames=[])
 
     history.append_inputs({"question": "hi"})
     history.append_outputs(
-        {"next_thought": "search first"},
+        {"next_thought": "search first", "tool_calls": tool_calls},
         observations=[Observation(value="result", source="tool", call_id="call_0", name="search")],
     )
     history.append_output({"answer": "bye"})
 
     assert isinstance(history.frames[0], HistoryFrame)
     assert history.frames[0].inputs == {"question": "hi"}
-    assert history.frames[1].outputs == {"next_thought": "search first"}
+    assert history.frames[1].outputs == {"next_thought": "search first", "tool_calls": tool_calls}
     assert history.frames[1].observations[0].call_id == "call_0"
     assert history.frames[2].outputs == {"answer": "bye"}
     assert history.frames[2].complete

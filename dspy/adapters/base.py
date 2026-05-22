@@ -88,6 +88,7 @@ class Adapter:
         messages: list[LMMessage] = []
         user_parts: list[LMPart] = []
         tools: list[LMToolSpec] = []
+        history_has_open_episode = False
 
         for name, field in list(prompt_signature.input_fields.items()):
             if name not in inputs:
@@ -95,8 +96,9 @@ class Adapter:
             value = inputs[name]
             if field.annotation == History:
                 prompt_signature = prompt_signature.delete(name)
-                messages.extend(self._history_to_lm_messages(prompt_signature, value))
+                messages.extend(value.to_lm_messages(self, prompt_signature))
                 inputs.pop(name, None)
+                history_has_open_episode = value.has_open_episode()
             elif field.annotation == Image:
                 prompt_signature = prompt_signature.delete(name)
                 user_parts.extend([LMTextPart(text=f"\n\n[[ ## {name} ## ]]\n"), self._image_to_lm_part(value)])
@@ -127,6 +129,10 @@ class Adapter:
                 tools.extend(self._tool_to_lm_tool_spec(tool) for tool in tool_values)
                 prompt_signature = prompt_signature.delete(tool_call_output_field_name).delete(tool_call_input_field_name)
                 inputs.pop(tool_call_input_field_name, None)
+
+        if history_has_open_episode:
+            for input_name in list(prompt_signature.input_fields):
+                inputs.pop(input_name, None)
 
         for name, field in list(prompt_signature.output_fields.items()):
             if field.annotation == Reasoning and Reasoning in self.native_response_types:
@@ -208,13 +214,7 @@ class Adapter:
         return None
 
     def _history_to_lm_messages(self, signature: type[Signature], history: History) -> list[LMMessage]:
-        messages: list[LMMessage] = []
-        for turn in history.messages:
-            messages.append(LMMessage(role="user", parts=[LMTextPart(text=self.format_user_message_content(signature, turn))]))
-            messages.append(
-                LMMessage(role="assistant", parts=[LMTextPart(text=self.format_assistant_message_content(signature, turn))])
-            )
-        return messages
+        return history.to_lm_messages(self, signature)
 
     def _image_to_lm_part(self, image: Image) -> LMImagePart:
         source = image.url
@@ -301,7 +301,7 @@ class Adapter:
                     if field_name not in value:
                         value[field_name] = None
             elif output.tool_calls and tool_call_output_field_name:
-                value = {field_name: None for field_name in original_signature.output_fields.keys()}
+                value = dict.fromkeys(original_signature.output_fields.keys())
             else:
                 raise AdapterParseError(
                     adapter_name=type(self).__name__,
@@ -426,14 +426,18 @@ class Adapter:
         # If the signature and inputs have conversation history, we need to format the conversation history and
         # remove the history field from the signature.
         history_field_name = self._get_history_field_name(signature)
+        has_open_episode = False
         if history_field_name:
+            history_obj = inputs_copy.get(history_field_name)
+            has_open_episode = hasattr(history_obj, "has_open_episode") and history_obj.has_open_episode()
+
             # In order to format the conversation history, we need to remove the history field from the signature.
             signature_without_history = signature.delete(history_field_name)
-            conversation_history = self.format_conversation_history(
-                signature_without_history,
-                history_field_name,
-                inputs_copy,
-            )
+            conversation_history = history_obj.to_lm_messages(self, signature_without_history) if history_obj else []
+            inputs_copy.pop(history_field_name, None)
+            if has_open_episode:
+                for input_name in list(signature_without_history.input_fields):
+                    inputs_copy.pop(input_name, None)
 
         messages = []
         system_message = self.format_system_message(signature)
@@ -443,7 +447,8 @@ class Adapter:
             # Conversation history and current input
             content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
             messages.extend(conversation_history)
-            messages.append({"role": "user", "content": content})
+            if content:
+                messages.append({"role": "user", "content": content})
         else:
             # Only current input
             content = self.format_user_message_content(signature, inputs_copy, main_request=True)

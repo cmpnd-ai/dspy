@@ -3,6 +3,8 @@ from typing import Any, Callable
 import pydantic
 from pydantic import Field, model_validator
 
+from dspy.core.types import LMMessage
+
 
 class Observation(pydantic.BaseModel):
     """External result produced by executing or evaluating a history frame."""
@@ -114,6 +116,97 @@ class History(pydantic.BaseModel):
             if frame.complete:
                 last_boundary = "output"
         return last_boundary == "input"
+
+    def to_lm_messages(self, adapter: Any, signature: type[Any]) -> list[LMMessage]:
+        messages: list[LMMessage] = []
+        for entry in self.frames:
+            frame = self._entry_to_frame(signature, entry)
+            if frame.inputs:
+                content = adapter.format_user_message_content(signature, frame.inputs)
+                if self._has_content(content):
+                    messages.append(self._content_message("user", content))
+
+            if frame.outputs:
+                messages.append(self._content_message("assistant", self._format_outputs(adapter, signature, frame.outputs)))
+            if frame.observations:
+                messages.append(self._content_message("user", self._format_observations(frame.observations)))
+        return messages
+
+    @staticmethod
+    def _entry_to_frame(signature: type[Any], entry: HistoryEntry) -> HistoryFrame:
+        if isinstance(entry, HistoryFrame):
+            return entry
+
+        inputs = {key: value for key, value in entry.items() if key in signature.input_fields}
+        outputs = {key: value for key, value in entry.items() if key in signature.output_fields}
+        unknown = {key: value for key, value in entry.items() if key not in inputs and key not in outputs}
+        if unknown and not outputs:
+            outputs = unknown
+        elif unknown:
+            outputs = {**outputs, **unknown}
+        return HistoryFrame(inputs=inputs, outputs=outputs, complete=True)
+
+    def _format_outputs(self, adapter: Any, signature: type[Any], outputs: dict[str, Any]) -> str:
+        signature_outputs = {key: value for key, value in outputs.items() if key in signature.output_fields}
+        unknown_outputs = {key: value for key, value in outputs.items() if key not in signature.output_fields}
+        if signature_outputs and not unknown_outputs:
+            return adapter.format_assistant_message_content(
+                signature,
+                signature_outputs,
+                missing_field_message="Not supplied for this conversation history message. ",
+            )
+
+        sections = []
+        if signature_outputs:
+            sections.append(
+                adapter.format_assistant_message_content(
+                    signature,
+                    signature_outputs,
+                    missing_field_message="Not supplied for this conversation history message. ",
+                ).strip()
+            )
+        for key, value in unknown_outputs.items():
+            sections.append(f"[[ ## {key} ## ]]\n{self._format_observation_content(value)}")
+        sections.append("[[ ## completed ## ]]")
+        return "\n\n".join(section for section in sections if section)
+
+    def _format_observations(self, observations: list[Observation]) -> str:
+        rendered = []
+        for idx, observation in enumerate(observations):
+            label = "Error" if observation.is_error else "Observation"
+            content = self._format_observation_content(observation.value)
+            subject = self._observation_subject(observation, idx)
+            if "\n" in content:
+                rendered.append(f"{subject}:\n{label}:\n{content}")
+            else:
+                rendered.append(f"{subject}:\n{label}: {content}")
+        observations_text = "\n\n".join(rendered)
+        return f"[[ ## observations ## ]]\n{observations_text}"
+
+    @staticmethod
+    def _observation_subject(observation: Observation, idx: int) -> str:
+        if observation.call_id is not None or observation.name is not None or observation.source == "tool":
+            tool_name = observation.name or f"unknown_{idx + 1}"
+            return f"Tool call {idx + 1} (`{tool_name}`)"
+        if observation.source:
+            return f"{observation.source} observation {idx + 1}"
+        return f"Observation {idx + 1}"
+
+    @staticmethod
+    def _format_observation_content(content: Any) -> str:
+        if isinstance(content, list):
+            return "\n".join(str(item) for item in content)
+        return str(content)
+
+    @staticmethod
+    def _has_content(content: Any) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        return bool(content)
+
+    @staticmethod
+    def _content_message(role: str, content: Any) -> LMMessage:
+        return LMMessage.model_validate({"role": role, "content": content})
 
 
 def truncate_oldest_actions(history: History, *, max_tokens: int = 200_000, keep_n: int = 3) -> None:

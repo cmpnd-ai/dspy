@@ -4,7 +4,7 @@ import pydantic
 from pydantic import Field, model_validator
 
 from dspy.adapters.types.tool import ToolCalls
-from dspy.core.types import LMMessage
+from dspy.core.types import LMMessage, LMTextPart, LMToolResultPart
 
 
 class Observation(pydantic.BaseModel):
@@ -133,9 +133,9 @@ class History(pydantic.BaseModel):
                 last_boundary = "output"
         return last_boundary == "input"
 
-    def to_lm_messages(self, adapter: Any, signature: type[Any]) -> list[LMMessage]:
+    def to_lm_messages(self, adapter: Any, signature: type[Any], *, use_native_tool_calls: bool = False) -> list[LMMessage]:
         messages: list[LMMessage] = []
-        for entry in self.frames:
+        for frame_idx, entry in enumerate(self.frames):
             frame = self._entry_to_frame(signature, entry)
             if frame.inputs:
                 content = adapter.format_user_message_content(signature, frame.inputs)
@@ -143,9 +143,41 @@ class History(pydantic.BaseModel):
                     messages.append(self._content_message("user", content))
 
             if frame.outputs:
-                messages.append(self._content_message("assistant", self._format_outputs(adapter, signature, frame.outputs)))
-            if frame.observations:
+                messages.extend(self._format_frame_outputs(adapter, signature, frame, frame_idx, use_native_tool_calls))
+            elif frame.observations:
                 messages.append(self._content_message("user", self._format_observations(frame.observations)))
+        return messages
+
+    def _format_frame_outputs(
+        self,
+        adapter: Any,
+        signature: type[Any],
+        frame: HistoryFrame,
+        frame_idx: int,
+        use_native_tool_calls: bool,
+    ) -> list[LMMessage]:
+        tool_calls = self._find_tool_calls(frame.outputs)
+        if use_native_tool_calls and tool_calls is not None:
+            parts = []
+            content = self._format_frame_native_content(adapter, signature, frame.outputs)
+            if content:
+                parts.append(LMTextPart(text=content))
+            parts.extend(tool_calls.to_lm_parts(id_prefix=f"call_{frame_idx}"))
+
+            messages = [LMMessage(role="assistant", parts=parts)]
+            non_native_observations = []
+            for observation in frame.observations:
+                if observation.call_id is not None:
+                    messages.append(self._native_tool_observation(observation))
+                else:
+                    non_native_observations.append(observation)
+            if non_native_observations:
+                messages.append(self._content_message("user", self._format_observations(non_native_observations)))
+            return messages
+
+        messages = [self._content_message("assistant", self._format_outputs(adapter, signature, frame.outputs))]
+        if frame.observations:
+            messages.append(self._content_message("user", self._format_observations(frame.observations)))
         return messages
 
     @staticmethod
@@ -186,6 +218,21 @@ class History(pydantic.BaseModel):
         sections.append("[[ ## completed ## ]]")
         return "\n\n".join(section for section in sections if section)
 
+    @staticmethod
+    def _find_tool_calls(outputs: dict[str, Any]) -> ToolCalls | None:
+        for value in outputs.values():
+            if isinstance(value, ToolCalls):
+                return value
+        return None
+
+    def _format_frame_native_content(self, adapter: Any, signature: type[Any], outputs: dict[str, Any]) -> str | None:
+        non_tool_outputs = {key: value for key, value in outputs.items() if not isinstance(value, ToolCalls)}
+        if not non_tool_outputs:
+            return None
+        if len(non_tool_outputs) == 1:
+            return str(next(iter(non_tool_outputs.values())))
+        return self._format_outputs(adapter, signature, non_tool_outputs)
+
     def _format_observations(self, observations: list[Observation]) -> str:
         rendered = []
         for idx, observation in enumerate(observations):
@@ -213,6 +260,19 @@ class History(pydantic.BaseModel):
         if isinstance(content, list):
             return "\n".join(str(item) for item in content)
         return str(content)
+
+    def _native_tool_observation(self, observation: Observation) -> LMMessage:
+        return LMMessage(
+            role="tool",
+            parts=[
+                LMToolResultPart(
+                    call_id=observation.call_id,
+                    name=observation.name,
+                    content=[LMTextPart(text=self._format_observation_content(observation.value))],
+                    is_error=observation.is_error,
+                )
+            ],
+        )
 
     @staticmethod
     def _has_content(content: Any) -> bool:

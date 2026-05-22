@@ -168,6 +168,11 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
+[dependency-groups]
+dev = [
+    "pytest-codspeed>=5.0.3",
+]
+
 [tool.ruff.lint.isort]
 known-first-party = ["dspy"]
 

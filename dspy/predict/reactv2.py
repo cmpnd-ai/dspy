@@ -22,6 +22,7 @@ _ANNOTATION_TO_JSON_TYPE = {
     bool: "boolean",
     list: "array",
 }
+_RECOVERABLE_FORCED_SUBMIT_ERRORS = (AdapterParseError, ContextWindowExceededError, ValueError)
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,16 @@ class ReActV2(Module):
             .append("next_thought", dspy.OutputField(), type_=dspy.Reasoning)
             .append("tool_calls", dspy.OutputField(), type_=dspy.ToolCalls)
         )
+        extract_signature = dspy.Signature(
+            {**signature.input_fields, **signature.output_fields},
+            signature.instructions,
+        ).append(
+            "trajectory",
+            dspy.InputField(desc="The agent's history of thoughts, actions, and observations"),
+            type_=str,
+        )
         self.react = dspy.Predict(react_signature)
+        self.extract = dspy.ChainOfThought(extract_signature)
 
     def _build_instructions(self) -> str:
         inputs = ", ".join([f"`{k}`" for k in self.signature.input_fields])
@@ -126,7 +136,53 @@ class ReActV2(Module):
                     history.append_output(obs.value)
                     return dspy.Prediction(history=history, termination_reason="submit", **obs.value)
 
-        return dspy.Prediction(history=history, termination_reason=break_reason or "max_iters")
+        return self._forced_submit(history, input_args, break_reason=break_reason)
+
+    def _forced_submit(self, history: History, input_args: dict[str, object], break_reason: str | None = None):
+        tool_list = list(self.tools.values())
+        adapter = dspy.settings.adapter or dspy.ChatAdapter()
+        call_config = adapter.force_tool_call_config("submit")
+
+        try:
+            pred = self.react(history=history, tools=tool_list, config=call_config, **input_args)
+        except _RECOVERABLE_FORCED_SUBMIT_ERRORS as err:
+            logger.debug(f"Forced submit tier 1 (react) failed: {_fmt_exc(err)}")
+            pred = None
+
+        if pred and pred.tool_calls and pred.tool_calls.tool_calls:
+            for tool_call in pred.tool_calls.tool_calls:
+                if tool_call.name != "submit":
+                    continue
+                try:
+                    result = self.tools["submit"](**tool_call.args)
+                except ValueError as err:
+                    logger.debug(f"Forced submit tool execution failed: {_fmt_exc(err)}")
+                    continue
+
+                tool_calls = ToolCalls(tool_calls=[tool_call]).with_call_ids(f"call_{len(history.frames)}")
+                self._append_tool_turn(
+                    history,
+                    next_thought=pred.next_thought,
+                    tool_calls=tool_calls,
+                    observations=[ToolObservation(value=result, is_error=False)],
+                )
+                try:
+                    history.append_output(result)
+                    return dspy.Prediction(history=history, termination_reason="forced_submit", **result)
+                except TypeError as err:
+                    logger.debug(f"Forced submit result was not a valid output mapping: {_fmt_exc(err)}")
+
+        try:
+            trajectory_text = self._render_history_as_text(history)
+            extract = self.extract(trajectory=trajectory_text, **input_args)
+            result = {k: getattr(extract, k) for k in self.signature.output_fields if hasattr(extract, k)}
+            if any(value is not None for value in result.values()):
+                history.append_output(result)
+                return dspy.Prediction(history=history, termination_reason="extract", **result)
+        except _RECOVERABLE_FORCED_SUBMIT_ERRORS as err:
+            logger.debug(f"Forced submit tier 2 (extract) failed: {_fmt_exc(err)}")
+
+        return dspy.Prediction(history=history, termination_reason=break_reason or "failed")
 
     def _execute_tool_call(self, tool_call: ToolCalls.ToolCall) -> ToolObservation:
         tool = self.tools.get(tool_call.name)
@@ -158,6 +214,32 @@ class ReActV2(Module):
                 for tool_call, observation in zip(tool_calls.tool_calls, observations, strict=True)
             ],
         )
+
+    @staticmethod
+    def _render_history_as_text(history: History) -> str:
+        lines = []
+        for event in history.frames:
+            if isinstance(event, dict):
+                for key, value in event.items():
+                    lines.append(f"[Input] {key}: {value}")
+                continue
+            for key, value in event.inputs.items():
+                lines.append(f"[Input] {key}: {value}")
+            thought = event.outputs.get("next_thought")
+            if thought:
+                lines.append(f"[Thought] {thought}")
+            tool_calls = event.outputs.get("tool_calls")
+            if tool_calls and hasattr(tool_calls, "tool_calls"):
+                for tool_call in tool_calls.tool_calls:
+                    args = ", ".join(f"{key}={value!r}" for key, value in (tool_call.args or {}).items())
+                    lines.append(f"[Action] {tool_call.name}({args})")
+            for key, value in event.outputs.items():
+                if key not in {"next_thought", "tool_calls"}:
+                    lines.append(f"[Output] {key}: {value}")
+            for observation in event.observations:
+                prefix = "[Error]" if observation.is_error else "[Observation]"
+                lines.append(f"{prefix} {observation.value}")
+        return "\n".join(lines)
 
 
 def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:

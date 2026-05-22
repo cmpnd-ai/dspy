@@ -67,3 +67,19 @@ def test_append_tool_turn_records_observation_ids():
 
     assert history.frames[0].observations[0].call_id == "call_add"
     assert history.frames[0].observations[0].name == "add"
+
+
+def test_forced_submit_runs_when_loop_returns_no_tool_calls():
+    lm = DummyLM(
+        [
+            {"next_thought": "No call.", "tool_calls": []},
+            {"next_thought": "Force submit.", "tool_calls": [{"name": "submit", "args": {"answer": "done"}}]},
+        ]
+    )
+    dspy.configure(lm=lm)
+    react = ReActV2("question -> answer", tools=[add])
+
+    result = react(question="test")
+
+    assert result.answer == "done"
+    assert result.termination_reason == "forced_submit"

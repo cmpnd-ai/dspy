@@ -20,7 +20,7 @@ from dspy.dsp.utils.settings import settings
 from dspy.utils.callback import BaseCallback
 from dspy.utils.exceptions import ContextWindowExceededError
 
-from .base_lm import BaseLM
+from .base_lm import BaseLM, LMCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,16 @@ class LM(BaseLM):
         if "/" in self.model:
             return self.model.split("/", 1)[0]
         return "openai"
+
+    def get_capabilities(self) -> LMCapabilities:
+        params = self.supported_params
+        return LMCapabilities(
+            function_calling=self.supports_function_calling,
+            reasoning=self.supports_reasoning,
+            response_schema=self.supports_response_schema,
+            streaming=True,
+            extensions={"supported_params": params},
+        )
 
     @property
     def supports_function_calling(self) -> bool:

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from dspy.clients._litellm import get_litellm
-from dspy.clients.base_lm import BaseLM, inspect_history
+from dspy.clients.base_lm import BaseLM, LMCapabilities, inspect_history
 from dspy.clients.cache import Cache
 from dspy.clients.embedding import Embedder
 from dspy.clients.lm import LM
@@ -39,7 +39,7 @@ def configure_cache(
         safe_types: Additional types to allow when restrict_pickle is True.
     """
 
-    DSPY_CACHE = Cache(
+    dspy_cache = Cache(
         enable_disk_cache,
         enable_memory_cache,
         disk_cache_dir,
@@ -52,7 +52,7 @@ def configure_cache(
     import dspy
 
     # Update the reference to point to the new cache
-    dspy.cache = DSPY_CACHE
+    dspy.cache = dspy_cache
 
 
 
@@ -112,6 +112,7 @@ def disable_litellm_logging():
 
 __all__ = [
     "BaseLM",
+    "LMCapabilities",
     "LM",
     "Provider",
     "TrainingJob",

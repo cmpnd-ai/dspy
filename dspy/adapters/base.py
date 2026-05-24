@@ -19,7 +19,6 @@ from dspy.adapters._type_feature_handlers import (
 from dspy.adapters._type_runtime import (
     _AdapterCallPlan,
     _CallContext,
-    _LMCapabilities,
     _merge_lm_config,
     _OutputParser,
     _TypeFeatureHandler,
@@ -30,7 +29,7 @@ from dspy.adapters.types import History, Type
 from dspy.adapters.types.reasoning import Reasoning
 from dspy.adapters.types.tool import ToolCallResults, ToolCalls
 from dspy.adapters.utils import format_field_value, parse_value
-from dspy.clients.base_lm import BaseLM
+from dspy.clients.base_lm import BaseLM, LMCapabilities
 from dspy.clients.openai_format import (
     lm_response_from_legacy_outputs,
     message_to_openai_chat,
@@ -57,6 +56,17 @@ class _RenderedAdapterRequest:
     @property
     def signature(self) -> type[Signature]:
         return self.call_plan.render_signature
+
+
+class _AdapterContextLM(BaseLM):
+    """Minimal BaseLM used when rendering adapter messages without a real LM."""
+
+    def __init__(self, *, use_native_tool_calls: bool = False):
+        super().__init__(model="", model_type="chat", temperature=None, max_tokens=None)
+        self._capabilities = LMCapabilities(function_calling=use_native_tool_calls)
+
+    def get_capabilities(self) -> LMCapabilities:
+        return self._capabilities
 
 
 class Adapter:
@@ -116,14 +126,7 @@ class Adapter:
             use_native_function_calling=self.use_native_function_calling,
             allow_parallel_tool_calls=self.allow_parallel_tool_calls,
             native_response_types=tuple(self.native_response_types),
-            lm=_LMCapabilities(
-                model=lm.model,
-                model_type=getattr(lm, "model_type", "chat"),
-                supported_params=frozenset(getattr(lm, "supported_params", set())),
-                supports_function_calling=bool(getattr(lm, "supports_function_calling", False)),
-                supports_response_schema=bool(getattr(lm, "supports_response_schema", False)),
-                supports_reasoning=bool(getattr(lm, "supports_reasoning", False)),
-            ),
+            lm=lm,
             lm_kwargs=dict(lm_kwargs or {}),
             lm_default_kwargs=dict(getattr(lm, "kwargs", {}) or {}),
         )
@@ -134,14 +137,7 @@ class Adapter:
             use_native_function_calling=use_native_tool_calls,
             allow_parallel_tool_calls=self.allow_parallel_tool_calls,
             native_response_types=tuple(self.native_response_types),
-            lm=_LMCapabilities(
-                model="",
-                model_type="chat",
-                supported_params=frozenset(),
-                supports_function_calling=use_native_tool_calls,
-                supports_response_schema=False,
-                supports_reasoning=False,
-            ),
+            lm=_AdapterContextLM(use_native_tool_calls=use_native_tool_calls),
         )
 
     def value_to_lm_parts(self, value: object, field_info: FieldInfo) -> list[LMPart]:

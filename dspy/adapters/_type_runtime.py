@@ -10,17 +10,8 @@ from dspy.core.types import LMConfig, LMMessage, LMOutput, LMPart, LMToolSpec
 
 if TYPE_CHECKING:
     from dspy.adapters.base import Adapter
+    from dspy.clients.base_lm import BaseLM
     from dspy.signatures.signature import Signature
-
-
-@dataclass(frozen=True)
-class _LMCapabilities:
-    model: str
-    model_type: str
-    supported_params: frozenset[str]
-    supports_function_calling: bool
-    supports_response_schema: bool
-    supports_reasoning: bool
 
 
 @dataclass(frozen=True)
@@ -29,7 +20,7 @@ class _CallContext:
     use_native_function_calling: bool
     allow_parallel_tool_calls: bool | None
     native_response_types: tuple[type[object], ...]
-    lm: _LMCapabilities
+    lm: BaseLM
     lm_kwargs: dict[str, object] = field(default_factory=dict)
     lm_default_kwargs: dict[str, object] = field(default_factory=dict)
 

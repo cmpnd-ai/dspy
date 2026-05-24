@@ -1,6 +1,10 @@
+import copy as copy_module
 import datetime
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, TextIO
+
+from typing_extensions import Self
 
 from dspy.dsp.utils import settings
 from dspy.utils.callback import with_callbacks
@@ -8,6 +12,27 @@ from dspy.utils.inspect_history import pretty_print_history
 
 MAX_HISTORY_SIZE = 10_000
 GLOBAL_HISTORY = []
+
+
+@dataclass(frozen=True)
+class LMCapabilities:
+    """Optional model and deployment metadata for an LM backend.
+
+    Capabilities are descriptive hints. Adapters can use them to select native
+    paths, but concrete LM implementations still decide how to handle requests.
+    """
+
+    function_calling: bool = False
+    reasoning: bool = False
+    response_schema: bool = False
+    streaming: bool = False
+    input_image: bool = False
+    input_audio: bool = False
+    input_file: bool = False
+    output_image: bool = False
+    output_audio: bool = False
+    tool_results: bool = False
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseLM:
@@ -60,32 +85,55 @@ class BaseLM:
     ```
     """
 
-    def __init__(self, model, model_type="chat", temperature=0.0, max_tokens=1000, cache=True, **kwargs):
+    def __init__(
+        self,
+        model,
+        model_type="chat",
+        temperature=0.0,
+        max_tokens=1000,
+        cache=True,
+        callbacks=None,
+        num_retries=0,
+        **kwargs,
+    ):
         self.model = model
         self.model_type = model_type
         self.cache = cache
+        self.callbacks = callbacks or []
+        self.num_retries = num_retries
         self.kwargs = dict(temperature=temperature, max_tokens=max_tokens, **kwargs)
         self.history = []
+        self._warned_zero_temp_rollout = False
+
+    @property
+    def capabilities(self) -> LMCapabilities:
+        """Native metadata available for this model instance."""
+        return self.get_capabilities()
+
+    def get_capabilities(self) -> LMCapabilities:
+        """Return optional native model and deployment hints."""
+        return LMCapabilities()
 
     @property
     def supports_function_calling(self) -> bool:
         """Whether the model supports function calling (tool use)."""
-        return False
+        return self.capabilities.function_calling
 
     @property
     def supports_reasoning(self) -> bool:
         """Whether the model supports native reasoning (extended thinking)."""
-        return False
+        return self.capabilities.reasoning
 
     @property
     def supports_response_schema(self) -> bool:
         """Whether the model supports structured output via response schema."""
-        return False
+        return self.capabilities.response_schema
 
     @property
     def supported_params(self) -> set[str]:
         """Set of supported OpenAI-style parameter names for the model."""
-        return set()
+        supported = self.capabilities.extensions.get("supported_params", set())
+        return set(supported) if supported else set()
 
     def _process_lm_response(self, response, prompt, messages, **kwargs):
         merged_kwargs = {**self.kwargs, **kwargs}
@@ -190,23 +238,43 @@ class BaseLM:
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
+    def dump_state(self) -> dict[str, Any]:
+        """Return a sanitized reconstruction state for this LM."""
+        filtered_kwargs = {key: value for key, value in self.kwargs.items() if key != "api_key"}
+        return {
+            "model": self.model,
+            "model_type": self.model_type,
+            "cache": self.cache,
+            "num_retries": self.num_retries,
+            **filtered_kwargs,
+        }
+
+    @classmethod
+    def load_state(cls, state: dict[str, Any]) -> Self:
+        """Reconstruct this LM from `dump_state()` output."""
+        return cls(**state)
+
     def copy(self, **kwargs):
         """Returns a copy of the language model with possibly updated parameters.
 
         Any provided keyword arguments update the corresponding attributes or LM kwargs of
         the copy. For example, ``lm.copy(rollout_id=1, temperature=1.0)`` returns an LM whose
         requests use a different rollout ID at non-zero temperature to bypass cache collisions.
+
+        The default implementation uses a shallow runtime copy so provider clients, sessions,
+        and local model handles are preserved by reference while DSPy-owned mutable state is
+        isolated on the copy.
         """
 
-        import copy
-
-        new_instance = copy.deepcopy(self)
+        new_instance = copy_module.copy(self)
         new_instance.history = []
+        new_instance.callbacks = list(getattr(self, "callbacks", []) or [])
+        new_instance.kwargs = dict(getattr(self, "kwargs", {}) or {})
 
         for key, value in kwargs.items():
-            if hasattr(self, key):
+            if hasattr(new_instance, key):
                 setattr(new_instance, key, value)
-            if (key in self.kwargs) or (not hasattr(self, key)):
+            if (key in new_instance.kwargs) or (not hasattr(self, key)):
                 if value is None:
                     new_instance.kwargs.pop(key, None)
                 else:

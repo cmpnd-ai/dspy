@@ -53,6 +53,25 @@ def test_prepare_request_state_copies_kwargs_and_extracts_tools():
     assert "tool_calls" not in state.render_signature.output_fields
     assert state.hidden_output_fields == ("tool_calls",)
 
+
+def test_public_format_omits_none_native_tool_results_field():
+    class ToolSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        tool_call_results: dspy.ToolCallResults = dspy.InputField(default=None)
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    adapter = dspy.ChatAdapter(use_native_function_calling=True)
+    inputs = {"question": "What is 1+2?", "tools": [dspy.Tool(add)], "tool_call_results": None}
+
+    state = adapter._prepare_request_state(NativeToolLM(), {}, ToolSignature, inputs)
+    messages = adapter.format(state.render_signature, [], state.inputs)
+
+    assert all(message["role"] != "tool" for message in messages)
+    assert "[[ ## tool_call_results ## ]]" not in messages[-1]["content"]
+    assert "None" not in messages[-1]["content"]
+
+
 def test_prepare_request_state_preserves_normal_signature_and_copies_data():
     class QASignature(dspy.Signature):
         question: str = dspy.InputField()
@@ -295,3 +314,35 @@ def test_native_tool_response_repairs_nonstandard_json_arguments():
     )[0]
 
     assert result["tool_calls"].tool_calls[0].args == {"a": 1, "b": 2}
+
+
+def test_native_tool_result_input_replays_as_tool_message():
+    class ToolResultSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        tool_call_results: dspy.ToolCallResults = dspy.InputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    result = dspy.ToolCallResults.from_dict_list([{"call_id": "call_1", "name": "add", "value": "3"}])
+    lm = NativeToolLM(
+        {
+            "tool_calls": [
+                {
+                    "id": "call_submit",
+                    "type": "function",
+                    "function": {"name": "submit", "arguments": '{"answer": "3"}'},
+                }
+            ],
+        }
+    )
+
+    dspy.ChatAdapter(use_native_function_calling=True)(
+        lm,
+        {},
+        ToolResultSignature,
+        [],
+        {"question": "What is 1+2?", "tools": [dspy.Tool(add)], "tool_call_results": result},
+    )
+
+    assert any(message["role"] == "tool" and message["tool_call_id"] == "call_1" for message in lm.messages)
+    assert "tool_call_results" not in lm.messages[-1]["content"]

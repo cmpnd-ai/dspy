@@ -11,10 +11,14 @@ from dspy.adapters._legacy_type_markers import (
 )
 from dspy.adapters.types import History, Type
 from dspy.adapters.types.reasoning import Reasoning
-from dspy.adapters.types.tool import Tool, ToolCalls
+from dspy.adapters.types.tool import Tool, ToolCallResults, ToolCalls
 from dspy.clients.base_lm import BaseLM
-from dspy.clients.openai_format import lm_response_from_legacy_outputs, message_to_openai_chat, to_openai_chat_request
-from dspy.core.types import LMMessage, LMRequest, LMResponse, LMToolSpec
+from dspy.clients.openai_format import (
+    lm_response_from_legacy_outputs,
+    message_to_openai_chat,
+    to_openai_chat_request,
+)
+from dspy.core.types import LMMessage, LMPart, LMRequest, LMResponse, LMTextPart, LMToolSpec
 from dspy.experimental import Citations
 from dspy.signatures.signature import Signature
 from dspy.utils.callback import BaseCallback, with_callbacks
@@ -183,6 +187,7 @@ class Adapter:
                     {
                         "name": v["function"]["name"],
                         "args": json_repair.loads(v["function"]["arguments"]),
+                        **({"id": v["id"]} if v.get("id") is not None else {}),
                     }
                     for v in tool_calls
                 ]
@@ -376,6 +381,25 @@ class Adapter:
             return LMToolSpec(**tool)
         raise TypeError(f"Cannot convert {type(tool)!r} to LMToolSpec.")
 
+    def _prepare_native_tool_result_inputs(
+        self,
+        render_signature: type[Signature],
+        inputs: dict[str, Any],
+    ) -> tuple[type[Signature], list[LMMessage]]:
+        messages: list[LMMessage] = []
+        for field_name, field_info in list(render_signature.input_fields.items()):
+            value = inputs.get(field_name)
+            tool_call_results = self._coerce_tool_call_results_value(value, field_info)
+            if tool_call_results is None:
+                if value is None and self._annotation_includes(getattr(field_info, "annotation", None), ToolCallResults):
+                    inputs.pop(field_name, None)
+                    render_signature = render_signature.delete(field_name)
+                continue
+            messages.extend(tool_call_results.to_lm_messages())
+            inputs.pop(field_name, None)
+            render_signature = render_signature.delete(field_name)
+        return render_signature, messages
+
     def _parse_response(self, state: _AdapterRequestState, response: LMResponse) -> list[dict[str, Any]]:
         """Parse normalized LM outputs against the original source signature.
 
@@ -402,6 +426,7 @@ class Adapter:
                         {
                             "name": tool_call.name,
                             "args": tool_call.args,
+                            **({"id": tool_call.id} if tool_call.id is not None else {}),
                         }
                         for tool_call in output.tool_calls
                     ]
@@ -438,6 +463,30 @@ class Adapter:
             values.append(value)
 
         return values
+
+    @classmethod
+    def _coerce_tool_call_results_value(cls, field_value: Any, field_info: Any = None) -> ToolCallResults | None:
+        if field_value is None:
+            return None
+        if isinstance(field_value, ToolCallResults):
+            return field_value
+
+        annotation = getattr(field_info, "annotation", None)
+        if cls._annotation_includes(annotation, ToolCallResults):
+            return ToolCallResults.model_validate(field_value)
+        return None
+
+    @classmethod
+    def _coerce_tool_calls_value(cls, field_value: Any, field_info: Any = None) -> ToolCalls | None:
+        if field_value is None:
+            return None
+        if isinstance(field_value, ToolCalls):
+            return field_value
+
+        annotation = getattr(field_info, "annotation", None)
+        if cls._annotation_includes(annotation, ToolCalls):
+            return ToolCalls.model_validate(field_value)
+        return None
 
     def __call__(
         self,
@@ -532,6 +581,13 @@ class Adapter:
         conversation_history: list[LMMessage] = []
         render_signature = signature
 
+        tool_result_messages: list[LMMessage] = []
+        if self.use_native_function_calling:
+            render_signature, tool_result_messages = self._prepare_native_tool_result_inputs(
+                render_signature,
+                inputs_copy,
+            )
+
         input_signature = render_signature
 
         history_field_name = self._get_history_field_name(render_signature)
@@ -539,7 +595,11 @@ class Adapter:
             input_signature = render_signature.delete(history_field_name)
             history_obj = inputs_copy.pop(history_field_name, None)
             if history_obj is not None:
-                conversation_history = self.format_history(history_obj, input_signature)
+                conversation_history = self.format_history(
+                    history_obj,
+                    input_signature,
+                    use_native_tool_calls=self.use_native_function_calling,
+                )
 
         messages: list[LMMessage | dict[str, Any]] = [
             {"role": "system", "content": self.format_system_message(render_signature)}
@@ -547,6 +607,7 @@ class Adapter:
 
         messages.extend(self.format_demos(render_signature, demos))
         messages.extend(conversation_history)
+        messages.extend(tool_result_messages)
         messages.extend(self._format_input_messages(input_signature, inputs_copy, main_request=True))
         return [message_to_openai_chat(message) for message in self._coerce_lm_messages(messages)]
 
@@ -799,6 +860,8 @@ class Adapter:
         self,
         history: History,
         signature: type[Signature],
+        *,
+        use_native_tool_calls: bool = False,
     ) -> list[LMMessage]:
         history = history if isinstance(history, History) else History.model_validate(history)
         messages: list[LMMessage] = []
@@ -809,18 +872,106 @@ class Adapter:
 
             input_values = {key: value for key, value in entry.items() if key in signature.input_fields}
             output_values = {key: value for key, value in entry.items() if key in signature.output_fields}
-            if input_values:
-                messages.extend(self._format_input_messages(signature, input_values, main_request=False))
-            if output_values:
-                messages.extend(
-                    self._format_output_messages(
-                        signature,
-                        output_values,
-                        missing_field_message="Not supplied for this conversation history message. ",
-                    )
-                )
+            known_keys = set(input_values) | set(output_values)
+            unknown_values = {key: value for key, value in entry.items() if key not in known_keys}
+
+            native_tool_results: list[LMMessage] = []
+            if use_native_tool_calls:
+                regular_inputs = {}
+                for key, value in input_values.items():
+                    tool_results = self._coerce_tool_call_results_value(value, signature.input_fields.get(key))
+                    if tool_results is None:
+                        regular_inputs[key] = value
+                    else:
+                        native_tool_results.extend(tool_results.to_lm_messages())
+                if "tool_call_results" in unknown_values:
+                    tool_results = self._coerce_tool_call_results_history_value(unknown_values.pop("tool_call_results"))
+                    if tool_results is not None:
+                        native_tool_results.extend(tool_results.to_lm_messages())
+            else:
+                regular_inputs = input_values
+
+            if regular_inputs:
+                messages.extend(self._format_input_messages(signature, regular_inputs, main_request=False))
+
+            native_tool_call_parts: list[LMPart] = []
+            regular_outputs = {}
+            for key, value in output_values.items():
+                tool_calls = None
+                if use_native_tool_calls:
+                    tool_calls = self._coerce_tool_calls_value(value, signature.output_fields.get(key))
+                if tool_calls is not None:
+                    native_tool_call_parts.extend(tool_calls.to_lm_parts())
+                else:
+                    regular_outputs[key] = value
+
+            if use_native_tool_calls and "tool_calls" in unknown_values:
+                tool_calls = self._coerce_tool_calls_history_value(unknown_values.pop("tool_calls"))
+                if tool_calls is not None:
+                    native_tool_call_parts.extend(tool_calls.to_lm_parts())
+
+            assistant_text = self._format_history_assistant_text(signature, regular_outputs, unknown_values)
+            if use_native_tool_calls and native_tool_call_parts:
+                parts: list[LMPart] = []
+                if assistant_text:
+                    parts.append(LMTextPart(text=assistant_text))
+                parts.extend(native_tool_call_parts)
+                messages.append(LMMessage(role="assistant", parts=parts))
+            elif assistant_text:
+                messages.append(LMMessage.model_validate({"role": "assistant", "content": assistant_text}))
+
+            messages.extend(native_tool_results)
 
         return messages
+
+    @staticmethod
+    def _coerce_tool_call_results_history_value(field_value: Any) -> ToolCallResults | None:
+        try:
+            return ToolCallResults.model_validate(field_value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_tool_calls_history_value(field_value: Any) -> ToolCalls | None:
+        try:
+            return ToolCalls.model_validate(field_value)
+        except Exception:
+            return None
+
+    def _format_history_assistant_text(
+        self,
+        signature: type[Signature],
+        outputs: dict[str, Any],
+        unknown_outputs: dict[str, Any],
+    ) -> str | None:
+        text_signature = signature
+        for field_name, field_info in signature.output_fields.items():
+            if self._annotation_includes(field_info.annotation, ToolCalls):
+                text_signature = text_signature.delete(field_name)
+
+        sections = []
+        signature_outputs = {key: value for key, value in outputs.items() if key in text_signature.output_fields}
+        if signature_outputs:
+            sections.append(
+                self.format_assistant_message_content(
+                    text_signature,
+                    signature_outputs,
+                    missing_field_message="Not supplied for this conversation history message. ",
+                )
+            )
+
+        for key, value in unknown_outputs.items():
+            formatted_value = "\n".join(str(item) for item in value) if isinstance(value, list) else str(value)
+            sections.append(f"[[ ## {key} ## ]]\n{formatted_value}")
+
+        if unknown_outputs and not any(section.endswith("[[ ## completed ## ]]") for section in sections):
+            sections.append("[[ ## completed ## ]]")
+
+        if signature_outputs and not unknown_outputs and len(sections) == 1:
+            content = sections[0]
+        else:
+            content = "\n\n".join(section.strip() for section in sections if section).strip()
+        return content or None
 
     def format_conversation_history(
         self,

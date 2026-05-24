@@ -180,6 +180,7 @@ class TwoStepAdapter(Adapter):
         inputs: dict[str, Any],
         prefix: str = "",
         suffix: str = "",
+        main_request: bool = False,
     ) -> str:
         parts = [prefix]
 

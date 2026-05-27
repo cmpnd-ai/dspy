@@ -6,6 +6,7 @@ from dspy.adapters.types.base_type import Type
 from dspy.clients.base_lm import BaseLM
 
 if TYPE_CHECKING:
+    from dspy.core.types import LMOutput
     from dspy.signatures.signature import Signature
 
 
@@ -81,6 +82,13 @@ class Reasoning(Type):
         """Parse the LM response into a Reasoning object."""
         if "reasoning_content" in response:
             return Reasoning(content=response["reasoning_content"])
+        return None
+
+    @classmethod
+    def parse_lm_output(cls, output: "LMOutput") -> Optional["Reasoning"]:
+        """Parse the LM output into a Reasoning object."""
+        if output.reasoning_content is not None:
+            return Reasoning(content=output.reasoning_content)
         return None
 
     @classmethod

@@ -10,6 +10,7 @@ from dspy.clients.base_lm import BaseLM
 if TYPE_CHECKING:
     from litellm import ModelResponseStream
 
+    from dspy.core.types import LMOutput
     from dspy.signatures.signature import Signature
 
 CUSTOM_TYPE_START_IDENTIFIER = "<<CUSTOM-TYPE-START-IDENTIFIER>>"
@@ -130,6 +131,20 @@ class Type(pydantic.BaseModel):
             A custom type object.
         """
         return None
+
+    @classmethod
+    def parse_lm_output(cls, output: "LMOutput") -> Optional["Type"]:
+        """Parse a normalized LM output into the custom type.
+
+        Args:
+            output: A normalized LM output.
+
+        Returns:
+            A custom type object.
+        """
+        data = output.to_output_dict()
+        response = data if any(key in data for key in ("reasoning_content", "citations", "tool_calls", "logprobs")) else output.text
+        return cls.parse_lm_response(response)
 
 
 def split_message_content_for_custom_types(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

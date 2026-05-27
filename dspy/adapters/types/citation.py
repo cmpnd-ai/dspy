@@ -1,9 +1,12 @@
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import pydantic
 
 from dspy.adapters.types.base_type import Type
 from dspy.utils.annotation import experimental
+
+if TYPE_CHECKING:
+    from dspy.core.types import LMOutput
 
 
 @experimental(version="3.0.4")
@@ -113,7 +116,7 @@ class Citations(Type):
             citations = Citations.from_dict_list(citations_dict)
             ```
         """
-        citations = [cls.Citation(**item) for item in citations_dicts]
+        citations = [cls.Citation(**_normalize_citation_dict(item)) for item in citations_dicts]
         return cls(citations=citations)
 
     @classmethod
@@ -219,3 +222,21 @@ class Citations(Type):
                     return cls.from_dict_list(citations_data)
 
         return None
+
+    @classmethod
+    def parse_lm_output(cls, output: "LMOutput") -> Optional["Citations"]:
+        """Parse a normalized LM output into Citations."""
+        if output.citations:
+            return cls.from_dict_list([citation.model_dump(exclude_none=True) for citation in output.citations])
+        return None
+
+
+def _normalize_citation_dict(item: dict[str, Any]) -> dict[str, Any]:
+    data = {**item.get("metadata", {}), **item}
+    data.pop("metadata", None)
+    data.pop("type", None)
+    if "cited_text" not in data and "text" in data:
+        data["cited_text"] = data.pop("text")
+    if "document_title" not in data and "title" in data:
+        data["document_title"] = data.pop("title")
+    return data

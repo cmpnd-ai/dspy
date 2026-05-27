@@ -1598,6 +1598,8 @@ def _history_message_parts_as_openai_content(parts: list[LMPart]) -> str | list[
 
 
 def _history_part_as_openai_content(part: LMPart) -> dict[str, Any]:
+    if legacy_block := getattr(part, "metadata", {}).get("legacy_content_block"):
+        return dict(legacy_block)
     if isinstance(part, LMTextPart):
         return {"type": "text", "text": part.text}
     if isinstance(part, LMImagePart):
@@ -1676,6 +1678,11 @@ def _history_media_format(media_type: str) -> str:
 def _history_request_kwargs(request: LMRequest) -> dict[str, Any]:
     data = request.config.model_dump(exclude_none=True)
     extensions = data.pop("extensions", {}) or {}
+    if (reasoning := data.pop("reasoning", None)) is not None:
+        if effort := reasoning.get("effort"):
+            data["reasoning_effort"] = effort
+        else:
+            data["reasoning"] = reasoning
     return {**extensions, **data}
 
 
@@ -1705,13 +1712,15 @@ def _messages_from_items(items: tuple[Any, ...], *, prompt: str | None = None) -
     if len(items) == 1 and _is_message_sequence(items[0]):
         items = tuple(items[0])
 
-    if all(isinstance(item, LMMessage) or isinstance(item, LMResponse) for item in items):
+    if all(_is_message_item(item) for item in items):
         messages: list[LMMessage] = []
         for item in items:
             if isinstance(item, LMMessage):
                 messages.append(item)
-            else:
+            elif isinstance(item, LMResponse):
                 messages.extend(_messages_from_response(item))
+            else:
+                messages.append(_coerce_message(item))
         return messages, []
 
     parts = [_coerce_part(item) for item in items]
@@ -1723,9 +1732,11 @@ def _messages_from_response(response: LMResponse) -> list[LMMessage]:
 
 
 def _is_message_sequence(value: Any) -> bool:
-    return isinstance(value, (list, tuple)) and all(
-        isinstance(item, LMMessage) or isinstance(item, LMResponse) for item in value
-    )
+    return isinstance(value, (list, tuple)) and all(_is_message_item(item) for item in value)
+
+
+def _is_message_item(value: Any) -> bool:
+    return isinstance(value, (LMMessage, LMResponse)) or (isinstance(value, dict) and "role" in value)
 
 
 def _coerce_part(value: Any) -> LMPart:

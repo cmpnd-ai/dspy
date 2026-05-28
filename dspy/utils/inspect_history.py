@@ -44,10 +44,13 @@ def pretty_print_history(history: list[dict[str, Any]], n: int = 1, file: TextIO
         print(_blue(f"[{timestamp}]", use_colors=use_colors), file=out)
 
         for msg in messages:
-            print(_red(f"{msg['role'].capitalize()} message:", use_colors=use_colors), file=out)
-            if isinstance(msg["content"], str):
+            role_label = f"{msg['role'].capitalize()} message:"
+            if msg["role"] == "tool" and msg.get("tool_call_id"):
+                role_label = f"Tool message: (tool_call_id={msg['tool_call_id']})"
+            print(_red(role_label, use_colors=use_colors), file=out)
+            if isinstance(msg.get("content"), str):
                 print(msg["content"].strip(), file=out)
-            else:
+            elif msg.get("content") is not None:
                 if isinstance(msg["content"], list):
                     for c in msg["content"]:
                         if c["type"] == "text":
@@ -75,6 +78,10 @@ def pretty_print_history(history: list[dict[str, Any]], n: int = 1, file: TextIO
                             file_data = file_info.get("file_data", "")
                             file_str = f"<file: name:{filename}, id:{file_id}, data_length:{len(file_data)}>"
                             print(_blue(file_str.strip(), use_colors=use_colors), file=out)
+            if msg.get("tool_calls"):
+                print(_red("Tool calls:", use_colors=use_colors), file=out)
+                for tool_call in msg["tool_calls"]:
+                    print(_green(f"{tool_call['function']['name']}: {tool_call['function']['arguments']}", use_colors=use_colors), file=out)
             print("\n", file=out)
 
         if isinstance(outputs[0], dict):

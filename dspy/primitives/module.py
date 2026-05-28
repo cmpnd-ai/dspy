@@ -16,19 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 class ProgramMeta(type):
-    """Metaclass ensuring every ``dspy.Module`` instance is properly initialised."""
+    """Metaclass ensuring every `dspy.Module` instance is properly initialised."""
 
     def __call__(cls, *args, **kwargs):
-        # Create the instance without invoking ``__init__`` so we can inject
+        # Create the instance without invoking `__init__` so we can inject
         # the base initialization beforehand.
         obj = cls.__new__(cls, *args, **kwargs)
         if isinstance(obj, cls):
-            # ``_base_init`` sets attributes that should exist on all modules
-            # even when a subclass forgets to call ``super().__init__``.
+            # `_base_init` sets attributes that should exist on all modules
+            # even when a subclass forgets to call `super().__init__`.
             Module._base_init(obj)
             cls.__init__(obj, *args, **kwargs)
 
-            # Guarantee existence of critical attributes if ``__init__`` didn't
+            # Guarantee existence of critical attributes if `__init__` didn't
             # create them.
             if not hasattr(obj, "callbacks"):
                 obj.callbacks = []
@@ -44,7 +44,7 @@ class Module(BaseModule, metaclass=ProgramMeta):
     sub-modules, and custom logic. Modules can be composed together to create
     complex pipelines and can be optimized using DSPy's teleprompters.
 
-    All DSPy programs should inherit from this class and implement a ``forward``
+    All DSPy programs should inherit from this class and implement a `forward`
     method that defines the program's logic.
 
     Args:
@@ -132,7 +132,7 @@ class Module(BaseModule, metaclass=ProgramMeta):
         """Return all named Predict modules in this module.
 
         Iterates through all parameters and returns those that are instances
-        of ``dspy.Predict``, along with their names.
+        of `dspy.Predict`, along with their names.
 
         Returns:
             list[tuple[str, Predict]]: A list of (name, predictor) tuples
@@ -284,7 +284,7 @@ class Module(BaseModule, metaclass=ProgramMeta):
             examples: List of dspy.Example instances to process.
             num_threads: Number of threads to use for parallel processing.
             max_errors: Maximum number of errors allowed before stopping execution.
-                If ``None``, inherits from ``dspy.settings.max_errors``.
+                If `None`, inherits from `dspy.settings.max_errors`.
             return_failed_examples: Whether to return failed examples and exceptions.
             provide_traceback: Whether to include traceback information in error logs.
             disable_progress_bar: Whether to display the progress bar.

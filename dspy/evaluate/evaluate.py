@@ -92,7 +92,7 @@ class Evaluate:
             display_table (Union[bool, int]): Whether to display the evaluation results in a table.
                 If a number is passed, the evaluation results will be truncated to that number before displayed.
             max_errors (Optional[int]): The maximum number of errors to allow before
-                stopping evaluation. If ``None``, inherits from ``dspy.settings.max_errors``.
+                stopping evaluation. If `None`, inherits from `dspy.settings.max_errors`.
             provide_traceback (Optional[bool]): Whether to provide traceback information during evaluation.
             failure_score (float): The default score to use if evaluation fails due to an exception.
             save_as_csv (Optional[str]): The file name where the csv will be saved.

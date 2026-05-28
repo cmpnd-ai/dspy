@@ -50,13 +50,13 @@ class BetterTogether(Teleprompter):
 
     The optimizer is initialized with a metric and custom optimizers. For example, you can combine
     GEPA for prompt optimization with BootstrapFinetune for weight optimization:
-    ``BetterTogether(metric=metric, p=GEPA(...), w=BootstrapFinetune(...))``. The ``compile()``
+    `BetterTogether(metric=metric, p=GEPA(...), w=BootstrapFinetune(...))`. The `compile()`
     method takes a student program, trainset, and strategy string where strategy keys correspond
     to the optimizer names from initialization. It executes each optimizer in the specified sequence.
     When a validation set is provided, the best performing program is returned; otherwise, the
     latest program is returned. Note: Weight optimizers like BootstrapFinetune require student
     programs to have LMs explicitly set (not relying on global dspy.settings.lm), and BetterTogether
-    mirrors this requirement for simplicity. Therefore we call ``set_lm`` before compiling.
+    mirrors this requirement for simplicity. Therefore we call `set_lm` before compiling.
 
         >>> from dspy.teleprompt import GEPA, BootstrapFinetune
         >>>
@@ -75,8 +75,8 @@ class BetterTogether(Teleprompter):
         ...     strategy="p -> w"
         ... )
 
-    You can pass optimizer-specific arguments to each optimizer's ``compile()`` method using
-    ``optimizer_compile_args``. This allows you to customize each optimizer's behavior:
+    You can pass optimizer-specific arguments to each optimizer's `compile()` method using
+    `optimizer_compile_args`. This allows you to customize each optimizer's behavior:
 
         >>> from dspy.teleprompt import MIPROv2
         >>>
@@ -123,11 +123,11 @@ class BetterTogether(Teleprompter):
 
     Note:
         Output Attributes: The returned program includes two additional attributes:
-        ``candidate_programs`` and ``flag_compilation_error_occurred``. The ``candidate_programs``
+        `candidate_programs` and `flag_compilation_error_occurred`. The `candidate_programs`
         attribute is a list of dicts, each containing 'program', 'score', and 'strategy' (e.g.,
         '', 'p', 'p -> w', 'p -> w -> p'), sorted by descending score (similar to
-        ``dspy.MIPROv2.candidate_programs``). If any optimizer step fails,
-        ``flag_compilation_error_occurred`` is set to True and the best program found so far is
+        `dspy.MIPROv2.candidate_programs`). If any optimizer step fails,
+        `flag_compilation_error_occurred` is set to True and the best program found so far is
         returned.
 
         Model Lifecycle Management: BetterTogether automatically manages language model lifecycle
@@ -148,14 +148,14 @@ class BetterTogether(Teleprompter):
 
         Args:
             metric: Evaluation metric function for scoring programs. Should accept
-                ``(example, prediction, trace=None)`` and return a numeric score (higher is better).
+                `(example, prediction, trace=None)` and return a numeric score (higher is better).
                 This metric is used to evaluate candidate programs during optimization and is passed
                 to the default optimizers if no custom optimizers are provided.
             **optimizers: Custom optimizers as keyword arguments, where keys become the optimizer
-                names used in the strategy string. For example, ``p=GEPA(...), w=BootstrapFinetune(...)``
-                makes 'p' and 'w' available for use in strategies like ``"p -> w"``. If not provided,
-                defaults to ``p=BootstrapFewShotWithRandomSearch(metric=metric)`` and
-                ``w=BootstrapFinetune(metric=metric)``. Any DSPy Teleprompter can be used.
+                names used in the strategy string. For example, `p=GEPA(...), w=BootstrapFinetune(...)`
+                makes 'p' and 'w' available for use in strategies like `"p -> w"`. If not provided,
+                defaults to `p=BootstrapFewShotWithRandomSearch(metric=metric)` and
+                `w=BootstrapFinetune(metric=metric)`. Any DSPy Teleprompter can be used.
 
         Examples:
             >>> # Use custom optimizers
@@ -218,39 +218,39 @@ class BetterTogether(Teleprompter):
                 program.set_lm(lm) can be used to assign a language model to all modules of a 
                 program.
             trainset: Training examples for optimization. Each optimizer receives the full trainset
-                (or a shuffled version if ``shuffle_trainset_between_steps=True``).
+                (or a shuffled version if `shuffle_trainset_between_steps=True`).
             teacher: Optional teacher module(s) for bootstrapping. Can be a single module or list.
                 Passed to optimizers.
             valset: Validation set for evaluating optimization steps. If not provided, a portion of
-                trainset is held out (controlled by ``valset_ratio``). If both ``valset`` and
-                ``valset_ratio`` are None/0, no validation occurs and the latest program is returned.
+                trainset is held out (controlled by `valset_ratio`). If both `valset` and
+                `valset_ratio` are None/0, no validation occurs and the latest program is returned.
             num_threads: Number of parallel evaluation threads. Default is None, which means sequential evaluation.
             max_errors: Maximum errors to tolerate during evaluation. Defaults to
-                ``dspy.settings.max_errors``.
+                `dspy.settings.max_errors`.
             provide_traceback: Whether to show detailed tracebacks for evaluation errors.
             seed: Random seed for reproducibility. Controls trainset shuffling and evaluation sampling.
             valset_ratio: Fraction of trainset to hold out as validation (range [0, 1)). For example,
                 0.1 holds out 10%. Set to 0 to skip validation. Default is 0.1.
             shuffle_trainset_between_steps: Whether to shuffle trainset before each optimization step.
                 Helps prevent overfitting to example ordering. Default is True.
-            strategy: Sequence of optimizers to apply, separated by ``" -> "``. Each element must be
-                a key from the optimizers provided in ``__init__``. For example, ``"p -> w -> p"``
+            strategy: Sequence of optimizers to apply, separated by `" -> "`. Each element must be
+                a key from the optimizers provided in `__init__`. For example, `"p -> w -> p"`
                 applies prompt optimization, then weight optimization, then prompt optimization again.
-                Default is ``"p -> w -> p"``.
-            optimizer_compile_args: Optional dict mapping optimizer keys to their ``compile()``
+                Default is `"p -> w -> p"`.
+            optimizer_compile_args: Optional dict mapping optimizer keys to their `compile()`
                 arguments. If trainset, valset, or teacher are provided in the dict for a specific
                 optimizer, they override the defaults from BetterTogether's compile method. For example:
-                ``{"p": {"num_trials": 10}, "w": {"trainset": custom_trainset}}``. This is useful to
-                override the default compile arguments for specific optimizers. The ``student`` argument
+                `{"p": {"num_trials": 10}, "w": {"trainset": custom_trainset}}`. This is useful to
+                override the default compile arguments for specific optimizers. The `student` argument
                 cannot be included in optimizer_compile_args; BetterTogether's compile method manages
                 the student reference for all optimizers.
 
         Returns:
             Optimized student program with two additional attributes:
 
-            - ``candidate_programs``: List of dicts with 'program', 'score', and 'strategy' keys,
+            - `candidate_programs`: List of dicts with 'program', 'score', and 'strategy' keys,
               sorted by score (best first). Contains all evaluated programs including the baseline.
-            - ``flag_compilation_error_occurred``: Boolean indicating if any optimization step failed.
+            - `flag_compilation_error_occurred`: Boolean indicating if any optimization step failed.
 
         Raises:
             ValueError: If trainset is empty, valset_ratio not in [0, 1), strategy is empty or

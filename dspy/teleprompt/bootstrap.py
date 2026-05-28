@@ -47,7 +47,7 @@ class BootstrapFewShot(Teleprompter):
         """A Teleprompter class that composes a set of demos/examples to go into a predictor's prompt.
         These demos come from a combination of labeled examples in the training set, and bootstrapped demos.
 
-        Each bootstrap round copies the LM with a new ``rollout_id`` at ``temperature=1.0`` to
+        Each bootstrap round copies the LM with a new `rollout_id` at `temperature=1.0` to
         bypass caches and gather diverse traces.
 
         Args:
@@ -63,12 +63,12 @@ class BootstrapFewShot(Teleprompter):
             max_labeled_demos (int): Maximum number of labeled demonstrations to include.
                 Defaults to 16.
             max_rounds (int): Maximum number of bootstrap attempts per training example.
-                Each round after the first uses a fresh rollout with ``temperature=1.0``
+                Each round after the first uses a fresh rollout with `temperature=1.0`
                 to bypass caches and gather diverse traces. If a successful bootstrap is
                 found on any round, the example is accepted and the optimizer moves to the
                 next one. Defaults to 1.
             max_errors (Optional[int]): Maximum number of errors until program ends.
-                If ``None``, inherits from ``dspy.settings.max_errors``.
+                If `None`, inherits from `dspy.settings.max_errors`.
         """
         self.metric = metric
         self.metric_threshold = metric_threshold

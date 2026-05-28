@@ -82,7 +82,7 @@ class _RestrictedDisk(Disk):
 def restricted_disk(allowed: frozenset[tuple[str, str]]) -> type[_RestrictedDisk]:
     """Return a Disk subclass bound to the given allowlist.
 
-    diskcache expects ``disk=`` to be a class it instantiates itself, so
-    we return a subclass with ``_allowed`` baked in as a class attribute.
+    diskcache expects `disk=` to be a class it instantiates itself, so
+    we return a subclass with `_allowed` baked in as a class attribute.
     """
     return type("RestrictedDisk", (_RestrictedDisk,), {"_allowed": allowed})

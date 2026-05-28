@@ -54,9 +54,9 @@ class LM(BaseLM):
         Create a new language model instance for use with DSPy modules and programs.
 
         Args:
-            model: The model to use. This should be a string of the form ``"llm_provider/llm_name"``
-                   supported by LiteLLM. For example, ``"openai/gpt-4o"``.
-            model_type: The type of the model, either ``"chat"`` or ``"text"``.
+            model: The model to use. This should be a string of the form `"llm_provider/llm_name"`
+                   supported by LiteLLM. For example, `"openai/gpt-4o"`.
+            model_type: The type of the model, either `"chat"` or `"text"`.
             temperature: The sampling temperature to use when generating responses.
             max_tokens: The maximum number of tokens to generate per response.
             cache: Whether to cache the model responses for reuse to improve performance

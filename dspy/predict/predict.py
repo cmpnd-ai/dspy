@@ -47,7 +47,7 @@ class Predict(Module, Parameter):
         callbacks: Optional list of callbacks for instrumentation.
         **config: Default keyword arguments forwarded to the underlying
             language model. These values can be overridden for a single
-            invocation by passing a ``config`` dictionary when calling the
+            invocation by passing a `config` dictionary when calling the
             module. For example::
 
                 predict = dspy.Predict("q -> a", rollout_id=1, temperature=1.0)

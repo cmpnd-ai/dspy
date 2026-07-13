@@ -160,7 +160,15 @@ class TestRLMInitialization:
         with pytest.raises(ValueError, match="must be a valid Python identifier"):
             RLM("context -> answer", tools=[tool])
 
-    @pytest.mark.parametrize("tool_name", ["llm_query", "SUBMIT", "print"])
+    def test_tool_validation_rejects_python_keyword(self):
+        def my_tool() -> str:
+            return "result"
+
+        tool = Tool(my_tool, name="for")
+        with pytest.raises(ValueError, match="not a keyword"):
+            RLM("context -> answer", tools=[tool])
+
+    @pytest.mark.parametrize("tool_name", ["llm_query", "llm_query_batched", "SUBMIT", "print"])
     def test_tool_validation_reserved_names(self, tool_name):
         """Test RLM rejects tool names that conflict with built-in functions."""
         def my_tool() -> str:
@@ -183,6 +191,28 @@ class TestRLMInitialization:
 
         with pytest.raises(TypeError, match="tools must be a list, not a dict"):
             RLM("context -> answer", tools={"my_tool": my_tool})
+
+    def test_duplicate_tool_names_rejected(self):
+        def first() -> str:
+            return "first"
+
+        def second() -> str:
+            return "second"
+
+        with pytest.raises(ValueError, match="Duplicate tool name 'lookup'"):
+            RLM("context -> answer", tools=[Tool(first, name="lookup"), Tool(second, name="lookup")])
+
+    @pytest.mark.parametrize("input_name", ["llm_query", "llm_query_batched", "SUBMIT", "print"])
+    def test_input_names_cannot_shadow_sandbox_functions(self, input_name):
+        with pytest.raises(ValueError, match="Input fields conflict with built-in sandbox functions"):
+            RLM(f"{input_name} -> answer")
+
+    def test_input_name_cannot_shadow_user_tool(self):
+        def lookup() -> str:
+            return "result"
+
+        with pytest.raises(ValueError, match="Input fields conflict with user tools: \\['lookup'\\]"):
+            RLM("lookup -> answer", tools=[lookup])
 
     def test_optional_parameters(self):
         """Test RLM optional parameters and their defaults."""

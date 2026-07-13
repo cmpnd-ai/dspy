@@ -376,15 +376,10 @@ class RLM(Module):
         if missing:
             raise ValueError(f"Missing required inputs: {sorted(missing)}")
 
-    def _prepare_serializable_vars(
+    def _initialize_inputs(
         self, input_args: dict[str, Any], repl: CodeInterpreter,
-    ) -> dict[str, Any]:
-        """Inject SandboxSerializable values into the interpreter.
-
-        For each SandboxSerializable value in input_args, serializes it and
-        executes setup + assignment code in the interpreter. Returns the
-        remaining non-serializable args (for per-iteration use).
-        """
+    ) -> None:
+        """Initialize the interpreter namespace once for this RLM run."""
         repl.start()
         regular_args = {}
         for name, value in input_args.items():
@@ -416,7 +411,8 @@ class RLM(Module):
             code_lines.append(assignment)
             repl.execute("\n".join(code_lines), variables=payload_vars)
 
-        return regular_args
+        if regular_args:
+            repl.execute("pass", variables=regular_args)
 
     # =========================================================================
     # CodeInterpreter Lifecycle
@@ -578,11 +574,10 @@ class RLM(Module):
         self,
         repl: CodeInterpreter,
         code: str,
-        input_args: dict[str, Any],
     ) -> Any:
         """Execute code in the interpreter, returning the result or an error string."""
         try:
-            return repl.execute(code, variables=dict(input_args))
+            return repl.execute(code)
         except (CodeInterpreterError, SyntaxError) as e:
             return f"[Error] {e}"
 
@@ -592,7 +587,6 @@ class RLM(Module):
         variables: list[REPLVariable],
         history: REPLHistory,
         iteration: int,
-        input_args: dict[str, Any],
         output_field_names: list[str],
     ) -> Prediction | REPLHistory:
         """Execute one iteration. Returns Prediction if done, else updated REPLHistory."""
@@ -614,7 +608,7 @@ class RLM(Module):
             code = action.code
             result = f"[Error] {e}"
             return self._process_execution_result(action, code, result, history, output_field_names)
-        result = self._execute_code(repl, code, input_args)
+        result = self._execute_code(repl, code)
         return self._process_execution_result(action, code, result, history, output_field_names)
 
     # =========================================================================
@@ -640,12 +634,12 @@ class RLM(Module):
         variables = self._build_variables(**input_args)
 
         with self._interpreter_context(execution_tools) as repl:
-            regular_args = self._prepare_serializable_vars(input_args, repl)
+            self._initialize_inputs(input_args, repl)
             history: REPLHistory = REPLHistory(max_output_chars=self.max_output_chars)
 
             for iteration in range(self.max_iters):
                 result: Prediction | REPLHistory = self._execute_iteration(
-                    repl, variables, history, iteration, regular_args, output_field_names
+                    repl, variables, history, iteration, output_field_names
                 )
                 if isinstance(result, Prediction):
                     return result
@@ -681,7 +675,6 @@ class RLM(Module):
         variables: list[REPLVariable],
         history: REPLHistory,
         iteration: int,
-        input_args: dict[str, Any],
         output_field_names: list[str],
     ) -> Prediction | REPLHistory:
         """Async version: Execute one iteration."""
@@ -703,7 +696,7 @@ class RLM(Module):
             code = pred.code
             result = f"[Error] {e}"
             return self._process_execution_result(pred, code, result, history, output_field_names)
-        result = self._execute_code(repl, code, input_args)
+        result = self._execute_code(repl, code)
         return self._process_execution_result(pred, code, result, history, output_field_names)
 
     async def aforward(self, **input_args) -> Prediction:
@@ -725,12 +718,12 @@ class RLM(Module):
         variables = self._build_variables(**input_args)
 
         with self._interpreter_context(execution_tools) as repl:
-            regular_args = self._prepare_serializable_vars(input_args, repl)
+            self._initialize_inputs(input_args, repl)
             history = REPLHistory(max_output_chars=self.max_output_chars)
 
             for iteration in range(self.max_iters):
                 result = await self._aexecute_iteration(
-                    repl, variables, history, iteration, regular_args, output_field_names
+                    repl, variables, history, iteration, output_field_names
                 )
                 if isinstance(result, Prediction):
                     return result

@@ -205,6 +205,10 @@ Sometimes, you may want to implement a custom logging solution. For instance, yo
 |`on_adapter_parse_start` / `on_adapter_parse_end`| Triggered when a `dspy.Adapter` subclass postprocess the output text from an LM. |
 |`on_tool_start` / `on_tool_end` | Triggered when a `dspy.Tool` subclass is invoked. |
 |`on_evaluate_start` / `on_evaluate_end` | Triggered when a `dspy.Evaluate` instance is invoked. |
+|`on_interpreter_execute_start` / `on_interpreter_execute_end` | Triggered around a `CodeInterpreter.execute()` call (e.g. each `dspy.RLM` REPL cell). |
+|`on_interpreter_tool_call_start` / `on_interpreter_tool_call_end` | Triggered around each sandbox->host tool dispatch, including plain closures like RLM's `llm_query`. |
+|`on_interpreter_startup_start` / `on_interpreter_startup_end` | Triggered around `CodeInterpreter.start()` (e.g. Deno process spawn). |
+|`on_interpreter_shutdown_start` / `on_interpreter_shutdown_end` | Triggered around `CodeInterpreter.shutdown()`. |
 
 Here's an example of custom callback that logs the intermediate steps of a ReAct agent:
 
@@ -245,3 +249,49 @@ dspy.configure(callbacks=[AgentLoggingCallback()])
 !!! info "Handling Inputs and Outputs in Callbacks"
 
     Be cautious when working with input or output data in callbacks. Mutating them in-place can modify the original data passed to the program, potentially leading to unexpected behavior. To avoid this, it's strongly recommended to create a copy of the data before performing any operations that may alter it.
+
+### Observing code execution with interpreter callbacks
+
+Code-executing modules such as [`dspy.RLM`](../../api/modules/RLM.md) run inside a sandboxed
+interpreter. The `on_interpreter_*` handlers let you observe each REPL cell in real time,
+along with the sandbox->host tool calls it triggers (including RLM's built-in `llm_query`).
+The example below logs per-cell execution time and every sub-tool call:
+
+```python
+import time
+import dspy
+from dspy.utils.callback import BaseCallback
+
+class InterpreterLoggingCallback(BaseCallback):
+    def __init__(self):
+        self._start = {}
+
+    def on_interpreter_execute_start(self, call_id, instance, inputs):
+        # inputs["variables"] can be very large (RLM passes input data through it every
+        # iteration), so avoid printing it verbatim - truncation is the handler's job.
+        self._start[call_id] = time.perf_counter()
+        code = inputs.get("code", "")
+        print(f"[cell] executing:\n{code[:200]}")
+
+    def on_interpreter_execute_end(self, call_id, outputs, exception):
+        elapsed = time.perf_counter() - self._start.pop(call_id, time.perf_counter())
+        status = f"error: {type(exception).__name__}" if exception else "ok"
+        print(f"[cell] finished in {elapsed:.3f}s ({status})")
+
+    def on_interpreter_tool_call_start(self, call_id, instance, inputs):
+        print(f"[tool] {inputs['tool_name']}(**{inputs['kwargs']})")
+
+dspy.configure(callbacks=[InterpreterLoggingCallback()])
+
+rlm = dspy.RLM("context, query -> answer")
+rlm(context="...very long text...", query="What is the magic number?")
+```
+
+Because the tool call runs synchronously inside `execute()`, its `call_id` nests under the
+enclosing cell's `call_id`, so you can reconstruct which cell issued which sub-tool call.
+
+!!! info "Custom interpreters"
+
+    The `CodeInterpreter` protocol cannot enforce these hooks. `dspy.PythonInterpreter` emits them
+    out of the box; a custom interpreter should decorate its `execute`/`start`/`shutdown` methods
+    (and its tool-dispatch seam) with `dspy.utils.callback.with_callbacks` to participate.

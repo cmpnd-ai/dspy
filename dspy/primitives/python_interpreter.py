@@ -19,6 +19,7 @@ from os import PathLike
 from typing import Any, Callable
 
 from dspy.primitives.code_interpreter import SIMPLE_TYPES, CodeInterpreterError, FinalOutput
+from dspy.utils.callback import with_callbacks
 
 __all__ = ["PythonInterpreter", "FinalOutput", "CodeInterpreterError"]
 
@@ -129,6 +130,7 @@ class PythonInterpreter:
         sync_files: bool = True,
         tools: dict[str, Callable[..., str]] | None = None,
         output_fields: list[dict] | None = None,
+        callbacks: list | None = None,
     ) -> None:
         """
         Args:
@@ -144,6 +146,9 @@ class PythonInterpreter:
                    Tools are callable directly from sandbox code by name.
             output_fields: List of output field definitions for typed SUBMIT signature.
                    Each dict should have 'name' and optionally 'type' keys.
+            callbacks: Instance-level `dspy.BaseCallback` handlers, combined with any globally
+                   configured callbacks. Interpreter execute/startup/shutdown and sandbox->host
+                   tool dispatch are surfaced through the `on_interpreter_*` handlers.
         """
         if isinstance(deno_command, dict):
             raise TypeError("deno_command must be a list of strings, not a dict")
@@ -155,6 +160,7 @@ class PythonInterpreter:
         self.sync_files = sync_files
         self.tools = dict(tools) if tools else {}
         self.output_fields = output_fields
+        self.callbacks = callbacks or []
         self._tools_registered = False
         # TODO later on add enable_run (--allow-run) by proxying subprocess.run through Deno.run() to fix 'emscripten does not support processes' error
 
@@ -313,6 +319,23 @@ class PythonInterpreter:
         self._send_request("register", params, "registering tools/outputs")
         self._tools_registered = True
 
+    @with_callbacks
+    def _invoke_tool(self, tool_name: str, kwargs: dict) -> Any:
+        """Invoke a single host-side tool by name.
+
+        Extracted from `_handle_tool_call` so it can be decorated with `@with_callbacks`:
+        this is the decoratable seam where the real exception is still in flight, before
+        `_handle_tool_call` converts it into a JSON-RPC error response. Decorating
+        `_handle_tool_call` directly would be useless because it swallows every exception,
+        so the end handler's `exception` would always be None.
+        """
+        if tool_name not in self.tools:
+            raise CodeInterpreterError(f"Unknown tool: {tool_name}")
+        result = self.tools[tool_name](**kwargs)
+        if asyncio.iscoroutine(result):
+            result = _await_in_sync(result)
+        return result
+
     def _handle_tool_call(self, request: dict) -> None:
         """Handle a tool call request from the sandbox."""
         request_id = request["id"]
@@ -321,11 +344,7 @@ class PythonInterpreter:
         kwargs = params.get("kwargs", {})
 
         try:
-            if tool_name not in self.tools:
-                raise CodeInterpreterError(f"Unknown tool: {tool_name}")
-            result = self.tools[tool_name](**kwargs)
-            if asyncio.iscoroutine(result):
-                result = _await_in_sync(result)
+            result = self._invoke_tool(tool_name, kwargs)
             is_json = isinstance(result, (list, dict))
             response = _jsonrpc_result(
                 {"value": json.dumps(result) if is_json else (str(result) if result is not None else ""), "type": "json" if is_json else "string"},
@@ -507,6 +526,7 @@ class PythonInterpreter:
         """Inject a large variable via the virtual filesystem."""
         self._send_request("inject_var", {"name": name, "value": value}, f"injecting variable '{name}'")
 
+    @with_callbacks
     def execute(
         self,
         code: str,
@@ -588,6 +608,7 @@ class PythonInterpreter:
 
         raise CodeInterpreterError(f"Too many non-JSON lines ({skipped}) during execution")
 
+    @with_callbacks
     def start(self) -> None:
         """Initialize the Deno/Pyodide sandbox.
 
@@ -612,6 +633,7 @@ class PythonInterpreter:
     ) -> Any:
         return self.execute(code, variables)
 
+    @with_callbacks
     def shutdown(self) -> None:
         if self.deno_process and self.deno_process.poll() is None:
             self.deno_process.stdin.write(_jsonrpc_notification("shutdown") + "\n")

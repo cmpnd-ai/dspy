@@ -80,6 +80,25 @@ class CodeInterpreter(Protocol):
     Pooling:
         For interpreter pooling, call start() to pre-warm instances, then
         distribute execute() calls across the pool.
+
+    Callbacks:
+        The Protocol cannot enforce observability, since callbacks are a per-method
+        behavior rather than part of the interface. Implementations that want to
+        participate in DSPy's callback system (`dspy.BaseCallback`) should apply the
+        `@dspy.utils.callback.with_callbacks` decorator to their methods. Callback routing
+        dispatches by method name (mirroring the Adapter's `format`/`parse` routing), so the
+        decorated methods must use these exact names to be recognized:
+
+        - `execute`  -> `on_interpreter_execute_*`
+        - `start`    -> `on_interpreter_startup_*`
+        - `shutdown` -> `on_interpreter_shutdown_*`
+        - `invoke_tool(self, tool_name, kwargs)` -> `on_interpreter_tool_call_*`, a public
+          seam wrapping a single sandbox->host tool invocation. Route your tool dispatch
+          through a method of this name (decorating a differently named method will not emit
+          tool-call events).
+
+        `dspy.PythonInterpreter` does this out of the box (it additionally emits startup from
+        its internal process-spawn seam so lazy start via `execute()` is covered).
     """
 
     @property

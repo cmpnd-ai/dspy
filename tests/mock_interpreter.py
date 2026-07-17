@@ -11,6 +11,7 @@ or uses a custom function to generate responses. Useful for:
 from typing import Any, Callable
 
 from dspy.primitives.code_interpreter import CodeInterpreterError, FinalOutput
+from dspy.utils.callback import with_callbacks
 
 __all__ = ["MockInterpreter"]
 
@@ -45,6 +46,7 @@ class MockInterpreter:
         responses: list[str | FinalOutput | Exception] | None = None,
         execute_fn: Callable[[str, dict[str, Any]], Any] | None = None,
         tools: dict[str, Callable[..., str]] | None = None,
+        callbacks: list | None = None,
     ):
         """Initialize the mock interpreter.
 
@@ -56,17 +58,23 @@ class MockInterpreter:
                        returns the result. Takes precedence over responses.
             tools: Dictionary mapping tool names to callable functions.
                    MockInterpreter doesn't use tools, but stores them for protocol compliance.
+            callbacks: Instance-level `dspy.BaseCallback` handlers, combined with globally
+                   configured callbacks. Mirrors PythonInterpreter so the mock participates
+                   in the `on_interpreter_*` callback system.
         """
         self.responses = list(responses) if responses else []
         self.execute_fn = execute_fn
         self.tools = tools or {}
+        self.callbacks = callbacks or []
         self.call_count = 0
         self.call_history: list[tuple[str, dict[str, Any]]] = []
         self._shutdown = False
 
+    @with_callbacks
     def start(self) -> None:
         pass
 
+    @with_callbacks
     def execute(
         self,
         code: str,
@@ -107,6 +115,7 @@ class MockInterpreter:
 
         return response
 
+    @with_callbacks
     def shutdown(self) -> None:
         self._shutdown = True
 

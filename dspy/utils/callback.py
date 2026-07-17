@@ -254,6 +254,147 @@ class BaseCallback:
         """
         pass
 
+    def on_interpreter_execute_start(
+        self,
+        call_id: str,
+        instance: Any,
+        inputs: dict[str, Any],
+    ):
+        """A handler triggered when execute() method of a CodeInterpreter is called.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            instance: The CodeInterpreter instance (e.g. dspy.PythonInterpreter).
+            inputs: The inputs to the interpreter's execute() method, stored as key-value pairs.
+                Includes ``code`` (the Python source to run) and ``variables`` (the namespace
+                injected before execution).
+
+                Note: ``inputs["variables"]`` can be very large. For example, dspy.RLM passes its
+                input data through it on every iteration. The framework does not truncate or copy
+                payloads, mirroring the ``on_lm_start`` precedent of passing full messages, so
+                handlers are responsible for any truncation or redaction they need.
+        """
+        pass
+
+    def on_interpreter_execute_end(
+        self,
+        call_id: str,
+        outputs: Any | None,
+        exception: Exception | None = None,
+    ):
+        """A handler triggered after execute() method of a CodeInterpreter is executed.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            outputs: The outputs of the interpreter's execute() method. This may be a
+                ``FinalOutput`` (when SUBMIT() was called), a string, a list, or None. If the
+                method is interrupted by an exception, this will be None.
+            exception: If an exception is raised during the execution, it will be stored here.
+                Interpreter execution errors surface as ``CodeInterpreterError`` and invalid
+                Python source surfaces as ``SyntaxError``.
+        """
+        pass
+
+    def on_interpreter_tool_call_start(
+        self,
+        call_id: str,
+        instance: Any,
+        inputs: dict[str, Any],
+    ):
+        """A handler triggered when the sandbox invokes a host-side tool.
+
+        This fires for every entry in ``interpreter.tools``, including plain closures such as
+        dspy.RLM's ``llm_query``/``llm_query_batched``, not just dspy.Tool objects.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            instance: The CodeInterpreter instance that dispatched the tool call.
+            inputs: The inputs to the tool dispatch, stored as key-value pairs. Includes
+                ``tool_name`` (the name of the invoked tool) and ``kwargs`` (the keyword
+                arguments passed from the sandbox).
+        """
+        pass
+
+    def on_interpreter_tool_call_end(
+        self,
+        call_id: str,
+        outputs: Any | None,
+        exception: Exception | None = None,
+    ):
+        """A handler triggered after the sandbox invokes a host-side tool.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            outputs: The value returned by the tool. If the tool raises, this will be None.
+            exception: If the tool raises during dispatch, the exception is stored here. The
+                interpreter still converts it into a sandbox-side error afterwards, so this
+                handler observes the real exception without changing sandbox behavior.
+        """
+        pass
+
+    def on_interpreter_startup_start(
+        self,
+        call_id: str,
+        instance: Any,
+        inputs: dict[str, Any],
+    ):
+        """A handler triggered when start() method of a CodeInterpreter is called.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            instance: The CodeInterpreter instance being started.
+            inputs: The inputs to the interpreter's start() method, stored as key-value pairs.
+        """
+        pass
+
+    def on_interpreter_startup_end(
+        self,
+        call_id: str,
+        outputs: Any | None,
+        exception: Exception | None = None,
+    ):
+        """A handler triggered after start() method of a CodeInterpreter is executed.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            outputs: The outputs of the interpreter's start() method. If the method is interrupted
+                by an exception, this will be None.
+            exception: If an exception is raised during startup (e.g. the sandbox process fails to
+                spawn), it will be stored here.
+        """
+        pass
+
+    def on_interpreter_shutdown_start(
+        self,
+        call_id: str,
+        instance: Any,
+        inputs: dict[str, Any],
+    ):
+        """A handler triggered when shutdown() method of a CodeInterpreter is called.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            instance: The CodeInterpreter instance being shut down.
+            inputs: The inputs to the interpreter's shutdown() method, stored as key-value pairs.
+        """
+        pass
+
+    def on_interpreter_shutdown_end(
+        self,
+        call_id: str,
+        outputs: Any | None,
+        exception: Exception | None = None,
+    ):
+        """A handler triggered after shutdown() method of a CodeInterpreter is executed.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            outputs: The outputs of the interpreter's shutdown() method. If the method is
+                interrupted by an exception, this will be None.
+            exception: If an exception is raised during the execution, it will be stored here.
+        """
+        pass
+
 
 def with_callbacks(fn):
     """Decorator to add callback functionality to instance methods."""
@@ -348,6 +489,24 @@ def with_callbacks(fn):
         return sync_wrapper
 
 
+# Maps the decorated CodeInterpreter method name to the corresponding callback handler. The
+# tool-call hook is routed via the extracted `_invoke_tool` seam (see PythonInterpreter) rather
+# than the exception-swallowing `_handle_tool_call`, so the end handler observes real exceptions.
+_INTERPRETER_START_HANDLERS = {
+    "execute": "on_interpreter_execute_start",
+    "start": "on_interpreter_startup_start",
+    "shutdown": "on_interpreter_shutdown_start",
+    "_invoke_tool": "on_interpreter_tool_call_start",
+}
+
+_INTERPRETER_END_HANDLERS = {
+    "execute": "on_interpreter_execute_end",
+    "start": "on_interpreter_startup_end",
+    "shutdown": "on_interpreter_shutdown_end",
+    "_invoke_tool": "on_interpreter_tool_call_end",
+}
+
+
 def _get_on_start_handler(callback: BaseCallback, instance: Any, fn: Callable) -> Callable:
     """Selects the appropriate on_start handler of the callback based on the instance and function name."""
     if isinstance(instance, dspy.BaseLM):
@@ -365,6 +524,16 @@ def _get_on_start_handler(callback: BaseCallback, instance: Any, fn: Callable) -
 
     if isinstance(instance, dspy.Tool):
         return callback.on_tool_start
+
+    # CodeInterpreter is a runtime_checkable Protocol, so this isinstance check is structural
+    # (it only checks for the presence of start/execute/shutdown/tools). None of the branches
+    # above are structural interpreters, so ordering relative to them is safe; this branch must
+    # stay before the module fallback so interpreter events do not masquerade as module events.
+    if isinstance(instance, dspy.CodeInterpreter):
+        handler_name = _INTERPRETER_START_HANDLERS.get(fn.__name__)
+        if handler_name is None:
+            raise ValueError(f"Unsupported interpreter method for using callback: {fn.__name__}.")
+        return getattr(callback, handler_name)
 
     # We treat everything else as a module.
     return callback.on_module_start
@@ -387,6 +556,14 @@ def _get_on_end_handler(callback: BaseCallback, instance: Any, fn: Callable) -> 
 
     if isinstance(instance, dspy.Tool):
         return callback.on_tool_end
+
+    # See the note in _get_on_start_handler: this structural Protocol check must stay before the
+    # module fallback so interpreter events do not masquerade as module events.
+    if isinstance(instance, dspy.CodeInterpreter):
+        handler_name = _INTERPRETER_END_HANDLERS.get(fn.__name__)
+        if handler_name is None:
+            raise ValueError(f"Unsupported interpreter method for using callback: {fn.__name__}.")
+        return getattr(callback, handler_name)
 
     # We treat everything else as a module.
     return callback.on_module_end

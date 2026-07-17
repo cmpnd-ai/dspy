@@ -320,14 +320,18 @@ class PythonInterpreter:
         self._tools_registered = True
 
     @with_callbacks
-    def _invoke_tool(self, tool_name: str, kwargs: dict) -> Any:
+    def invoke_tool(self, tool_name: str, kwargs: dict) -> Any:
         """Invoke a single host-side tool by name.
 
-        Extracted from `_handle_tool_call` so it can be decorated with `@with_callbacks`:
-        this is the decoratable seam where the real exception is still in flight, before
-        `_handle_tool_call` converts it into a JSON-RPC error response. Decorating
-        `_handle_tool_call` directly would be useless because it swallows every exception,
-        so the end handler's `exception` would always be None.
+        This is the callback seam for sandbox->host tool dispatch, routed to the
+        `on_interpreter_tool_call_*` handlers. It is deliberately a public method so custom
+        `CodeInterpreter` implementations can decorate an identically named method to
+        participate in the callback system (see `CodeInterpreter`'s docstring).
+
+        It is extracted from `_handle_tool_call` so the callback observes the real exception
+        while it is still in flight: `_handle_tool_call` catches every exception to convert it
+        into a JSON-RPC error response, so decorating it directly would always report
+        `exception=None`.
         """
         if tool_name not in self.tools:
             raise CodeInterpreterError(f"Unknown tool: {tool_name}")
@@ -344,7 +348,7 @@ class PythonInterpreter:
         kwargs = params.get("kwargs", {})
 
         try:
-            result = self._invoke_tool(tool_name, kwargs)
+            result = self.invoke_tool(tool_name, kwargs)
             is_json = isinstance(result, (list, dict))
             response = _jsonrpc_result(
                 {"value": json.dumps(result) if is_json else (str(result) if result is not None else ""), "type": "json" if is_json else "string"},
@@ -360,30 +364,42 @@ class PythonInterpreter:
 
     def _ensure_deno_process(self) -> None:
         if self.deno_process is None or self.deno_process.poll() is not None:
-            # Process identity changed (or process missing), so replay setup.
-            self._tools_registered = False
-            self._mounted_files = False
-            try:
-                self.deno_process = subprocess.Popen(
-                    self.deno_command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="UTF-8",
-                    env=os.environ.copy()
-                )
-            except FileNotFoundError as e:
-                install_instructions = (
-                    "Deno executable not found. Please install Deno to proceed.\n"
-                    "Installation instructions:\n"
-                    "> curl -fsSL https://deno.land/install.sh | sh\n"
-                    "*or*, on macOS with Homebrew:\n"
-                    "> brew install deno\n"
-                    "For additional configurations: https://docs.deno.com/runtime/getting_started/installation/"
-                )
-                raise CodeInterpreterError(install_instructions) from e
-            self._health_check()
+            self._spawn_process()
+
+    @with_callbacks
+    def _spawn_process(self) -> None:
+        """Spawn the Deno subprocess and health-check it.
+
+        This is the real startup seam: it runs both when start() is called explicitly and,
+        more commonly, lazily on the first execute() (the default RLM path). Decorating it
+        (rather than the public start()) means on_interpreter_startup_* fires exactly once
+        per actual process spawn on either path, instead of on every execute() or only on an
+        explicit start(). start() is intentionally left undecorated to avoid double-emission.
+        """
+        # Process identity changed (or process missing), so replay setup.
+        self._tools_registered = False
+        self._mounted_files = False
+        try:
+            self.deno_process = subprocess.Popen(
+                self.deno_command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="UTF-8",
+                env=os.environ.copy()
+            )
+        except FileNotFoundError as e:
+            install_instructions = (
+                "Deno executable not found. Please install Deno to proceed.\n"
+                "Installation instructions:\n"
+                "> curl -fsSL https://deno.land/install.sh | sh\n"
+                "*or*, on macOS with Homebrew:\n"
+                "> brew install deno\n"
+                "For additional configurations: https://docs.deno.com/runtime/getting_started/installation/"
+            )
+            raise CodeInterpreterError(install_instructions) from e
+        self._health_check()
 
     _MAX_SKIP_LINES = 100
 
@@ -608,7 +624,6 @@ class PythonInterpreter:
 
         raise CodeInterpreterError(f"Too many non-JSON lines ({skipped}) during execution")
 
-    @with_callbacks
     def start(self) -> None:
         """Initialize the Deno/Pyodide sandbox.
 
@@ -617,6 +632,11 @@ class PythonInterpreter:
         on first execute().
 
         Idempotent: safe to call multiple times.
+
+        Note: this method is not decorated with @with_callbacks. The startup callbacks
+        (on_interpreter_startup_*) fire from the underlying process-spawn seam (_spawn_process),
+        so they are emitted once per actual spawn whether startup is explicit (start()) or lazy
+        (first execute()), and are not emitted when the process is already running.
         """
         self._ensure_deno_process()
 

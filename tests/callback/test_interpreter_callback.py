@@ -13,6 +13,7 @@ import pytest
 
 import dspy
 from dspy.predict.rlm import RLM
+from dspy.primitives import python_interpreter
 from dspy.primitives.code_interpreter import CodeInterpreterError, FinalOutput
 from dspy.primitives.prediction import Prediction
 from dspy.primitives.python_interpreter import PythonInterpreter
@@ -178,8 +179,8 @@ def test_invoke_tool_fires_events_with_tool_name_and_kwargs():
         return f"{a}:{b}"
 
     interp = PythonInterpreter(tools={"my_tool": my_tool})
-    # _invoke_tool is the decorated seam; it does not require a running Deno process.
-    result = interp._invoke_tool("my_tool", {"a": "x", "b": "y"})
+    # invoke_tool is the decorated seam; it does not require a running Deno process.
+    result = interp.invoke_tool("my_tool", {"a": "x", "b": "y"})
 
     assert result == "x:y"
     assert callback.handlers() == ["on_interpreter_tool_call_start", "on_interpreter_tool_call_end"]
@@ -201,7 +202,7 @@ def test_plain_closure_tool_fires_events():
         return f"answer to {prompt}"
 
     interp = PythonInterpreter(tools={"llm_query": llm_query})
-    result = interp._invoke_tool("llm_query", {"prompt": "hi"})
+    result = interp.invoke_tool("llm_query", {"prompt": "hi"})
 
     assert result == "answer to hi"
     start = callback.by_handler("on_interpreter_tool_call_start")[0]
@@ -263,7 +264,7 @@ def test_unknown_tool_still_converted_to_jsonrpc_error():
 def test_tool_call_nests_under_execute_call_id():
     """A decorated tool call invoked synchronously inside a decorated execute() nests under it.
 
-    This exercises the same ACTIVE_CALL_ID mechanism PythonInterpreter relies on: _invoke_tool
+    This exercises the same ACTIVE_CALL_ID mechanism PythonInterpreter relies on: invoke_tool
     runs on the same thread inside execute(), so its parent is the execute call_id.
     """
     callback = RecordingCallback()
@@ -276,7 +277,7 @@ def test_tool_call_nests_under_execute_call_id():
 
     def execute_fn(code, variables):
         # Simulate the sandbox calling back into a host tool mid-execution.
-        return interp._invoke_tool("my_tool", {"x": "nested"})
+        return interp.invoke_tool("my_tool", {"x": "nested"})
 
     mock = MockInterpreter(execute_fn=execute_fn)
     mock.execute("my_tool(x='nested')")
@@ -313,6 +314,61 @@ def test_startup_and_shutdown_events_fire_and_shutdown_is_idempotent():
     ]
     for end in callback.by_handler("on_interpreter_shutdown_end"):
         assert end["exception"] is None
+
+
+def _stub_spawn(monkeypatch):
+    """Stub the Deno subprocess spawn + health check so startup can be tested without Deno."""
+
+    class _FakeAliveProcess:
+        def poll(self):
+            return None  # report the process as alive
+
+    spawns = {"count": 0}
+
+    def fake_popen(*args, **kwargs):
+        spawns["count"] += 1
+        return _FakeAliveProcess()
+
+    monkeypatch.setattr(python_interpreter.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(PythonInterpreter, "_health_check", lambda self: None)
+    return spawns
+
+
+def test_lazy_spawn_emits_startup_events_once(monkeypatch):
+    """The lazy Deno spawn inside execute()/_ensure_deno_process (the default RLM path) emits
+    startup events, exactly once per actual spawn."""
+    callback = RecordingCallback()
+    dspy.configure(callbacks=[callback])
+    spawns = _stub_spawn(monkeypatch)
+
+    interp = PythonInterpreter()
+    # _ensure_deno_process is what execute() calls before talking to the sandbox (lazy start).
+    interp._ensure_deno_process()
+    assert spawns["count"] == 1
+    assert callback.handlers() == ["on_interpreter_startup_start", "on_interpreter_startup_end"]
+    assert callback.by_handler("on_interpreter_startup_end")[0]["exception"] is None
+
+    # Process already running: no re-spawn and no new startup events.
+    interp._ensure_deno_process()
+    assert spawns["count"] == 1
+    assert callback.handlers() == ["on_interpreter_startup_start", "on_interpreter_startup_end"]
+
+
+def test_explicit_start_emits_startup_events_once(monkeypatch):
+    """Explicit start() also emits startup events (via the same spawn seam), once per spawn."""
+    callback = RecordingCallback()
+    dspy.configure(callbacks=[callback])
+    spawns = _stub_spawn(monkeypatch)
+
+    interp = PythonInterpreter()
+    interp.start()
+    assert spawns["count"] == 1
+    assert callback.handlers() == ["on_interpreter_startup_start", "on_interpreter_startup_end"]
+
+    # start() is idempotent: no duplicate startup events when already running.
+    interp.start()
+    assert spawns["count"] == 1
+    assert callback.handlers() == ["on_interpreter_startup_start", "on_interpreter_startup_end"]
 
 
 def test_mock_interpreter_lifecycle_events():
@@ -488,6 +544,12 @@ def test_deno_execute_events_and_nesting():
         assert exec_start["inputs"]["code"] == "print('hi')"
         exec_end = callback.by_handler("on_interpreter_execute_end")[0]
         assert exec_end["outputs"] == "hi\n"
+
+        # The Deno process was spawned lazily inside this first execute(), so the startup
+        # events fired and nest under the execute call_id.
+        startup_start = callback.by_handler("on_interpreter_startup_start")
+        assert len(startup_start) == 1
+        assert startup_start[0]["parent_call_id"] == exec_start["call_id"]
 
         # A tool call dispatched from inside execute nests under that execute call_id.
         callback.calls.clear()

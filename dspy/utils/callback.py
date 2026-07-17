@@ -489,21 +489,29 @@ def with_callbacks(fn):
         return sync_wrapper
 
 
-# Maps the decorated CodeInterpreter method name to the corresponding callback handler. The
-# tool-call hook is routed via the extracted `_invoke_tool` seam (see PythonInterpreter) rather
-# than the exception-swallowing `_handle_tool_call`, so the end handler observes real exceptions.
+# Maps the decorated CodeInterpreter method name to the corresponding callback handler.
+#
+# The tool-call hook is routed via the extracted `invoke_tool` seam (see PythonInterpreter)
+# rather than the exception-swallowing `_handle_tool_call`, so the end handler observes real
+# exceptions. `invoke_tool` is a public method name so custom implementations can adopt it.
+#
+# Startup routes both `start` (the public method some implementations decorate directly, e.g.
+# MockInterpreter) and `_spawn_process` (PythonInterpreter's real process-spawn seam, so the
+# common lazy-start path via execute() emits startup exactly once per actual spawn).
 _INTERPRETER_START_HANDLERS = {
     "execute": "on_interpreter_execute_start",
     "start": "on_interpreter_startup_start",
+    "_spawn_process": "on_interpreter_startup_start",
     "shutdown": "on_interpreter_shutdown_start",
-    "_invoke_tool": "on_interpreter_tool_call_start",
+    "invoke_tool": "on_interpreter_tool_call_start",
 }
 
 _INTERPRETER_END_HANDLERS = {
     "execute": "on_interpreter_execute_end",
     "start": "on_interpreter_startup_end",
+    "_spawn_process": "on_interpreter_startup_end",
     "shutdown": "on_interpreter_shutdown_end",
-    "_invoke_tool": "on_interpreter_tool_call_end",
+    "invoke_tool": "on_interpreter_tool_call_end",
 }
 
 

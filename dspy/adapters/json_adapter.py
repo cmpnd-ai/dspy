@@ -4,7 +4,6 @@ from typing import Any, get_origin
 
 import json_repair
 import pydantic
-import regex
 from pydantic.fields import FieldInfo
 
 from dspy.adapters.chat_adapter import ChatAdapter, FieldInfoWithName
@@ -22,6 +21,37 @@ from dspy.utils.callback import BaseCallback
 from dspy.utils.exceptions import AdapterParseError, LMError
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_outermost_json_object(text: str) -> str | None:
+    """Find the first top-level ``{…}`` substring with balanced braces."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def _has_open_ended_mapping(signature: SignatureMeta) -> bool:
@@ -168,10 +198,9 @@ class JSONAdapter(ChatAdapter):
         fields = json_repair.loads(completion)
 
         if not isinstance(fields, dict):
-            pattern = r"\{(?:[^{}]|(?R))*\}"
-            match = regex.search(pattern, completion, regex.DOTALL)
-            if match:
-                completion = match.group(0)
+            extracted = _extract_outermost_json_object(completion)
+            if extracted is not None:
+                completion = extracted
                 fields = json_repair.loads(completion)
 
         if not isinstance(fields, dict):

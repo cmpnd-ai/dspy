@@ -6,9 +6,8 @@ Original license: https://github.com/facebookresearch/DPR/blob/main/LICENSE
 
 import copy
 import logging
+import re
 import unicodedata
-
-import regex
 
 logger = logging.getLogger(__name__)
 
@@ -149,17 +148,17 @@ class Tokenizer:
 
 
 class SimpleTokenizer(Tokenizer):
-    ALPHA_NUM = r"[\p{L}\p{N}\p{M}]+"
-    NON_WS = r"[^\p{Z}\p{C}]"
+    ALPHA_NUM = r"[\w\u0300-\u036f]+"
+    NON_WS = r"\S"
 
     def __init__(self, **kwargs):
         """
         Args:
             annotators: None or empty set (only tokenizes).
         """
-        self._regexp = regex.compile(
+        self._regexp = re.compile(
             "(%s)|(%s)" % (self.ALPHA_NUM, self.NON_WS),
-            flags=regex.IGNORECASE + regex.UNICODE + regex.MULTILINE,
+            flags=re.IGNORECASE | re.UNICODE | re.MULTILINE,
         )
         if len(kwargs.get("annotators", {})) > 0:
             logger.warning(

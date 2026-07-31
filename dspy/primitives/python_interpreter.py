@@ -157,6 +157,10 @@ class PythonInterpreter:
         ```
     """
 
+    execution_instructions = """This is CPython running in Pyodide. The Python standard library and
+Pyodide-compatible packages are available, but subprocesses and native system interfaces are unavailable. Host
+filesystem, environment, and network access exist only when explicitly enabled by the interpreter configuration."""
+
     def __init__(
         self,
         deno_command: list[str] | None = None,

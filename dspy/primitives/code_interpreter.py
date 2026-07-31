@@ -169,6 +169,12 @@ def _create_interpreter(factory: Callable[[], CodeInterpreter]) -> CodeInterpret
     return interpreter
 
 
+def _execution_instructions(interpreter: CodeInterpreter) -> str | None:
+    """Return optional generated-code guidance without expanding the required protocol."""
+    instructions = getattr(interpreter, "execution_instructions", None)
+    return instructions.strip() if isinstance(instructions, str) and instructions.strip() else None
+
+
 def _validate_interpreter(interpreter: Any) -> None:
     """Validate a caller-owned interpreter."""
     if not isinstance(interpreter, CodeInterpreter):

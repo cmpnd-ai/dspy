@@ -10,7 +10,6 @@ Reference: "Recursive Language Models" (Zhang, Kraska, Khattab, 2025)
 
 from __future__ import annotations
 
-import base64
 import contextvars
 import functools
 import inspect
@@ -32,6 +31,7 @@ from dspy.primitives.code_interpreter import (
     CodeInterpreter,
     FinalOutput,
     _create_interpreter,
+    _execution_instructions,
     _validate_interpreter,
     _validate_interpreter_factory,
 )
@@ -62,7 +62,6 @@ Available:
 - `llm_query_batched(prompts)` - query multiple prompts concurrently (much faster for multiple queries)
 - `print()` - ALWAYS print to see results
 - `SUBMIT({final_output_names})` - submit final output when done
-- Standard libraries: re, json, collections, math, etc.
 
 IMPORTANT: This is ITERATIVE. Each code block you write will execute, you'll see the output, then you decide what to do next. Do NOT try to solve everything in one step.
 
@@ -457,12 +456,9 @@ class RLM(Module):
                 try:
                     payload_vars[raw_var_name] = payload.decode("utf-8")
                 except UnicodeDecodeError:
-                    encoded_var_name = f"{raw_var_name}_base64"
-                    payload_vars[encoded_var_name] = base64.b64encode(payload).decode("ascii")
-                    code_lines.extend([
-                        "import base64",
-                        f"{raw_var_name} = base64.b64decode({encoded_var_name})",
-                    ])
+                    encoded_var_name = f"{raw_var_name}_hex"
+                    payload_vars[encoded_var_name] = payload.hex()
+                    code_lines.append(f"{raw_var_name} = bytes.fromhex({encoded_var_name})")
             else:
                 payload_vars[raw_var_name] = str(payload)
 
@@ -479,7 +475,7 @@ class RLM(Module):
 
     def _make_interpreter_tool(self, tool: Tool) -> Callable:
         """Preserve function metadata while routing execution through Tool."""
-        if inspect.iscoroutinefunction(tool.func) or inspect.iscoroutinefunction(getattr(tool.func, "__call__", None)):
+        if inspect.iscoroutinefunction(tool.func) or inspect.iscoroutinefunction(type(tool.func).__call__):
             async def invoke(**kwargs):
                 return await tool.acall(**kwargs)
         else:
@@ -668,11 +664,17 @@ class RLM(Module):
     ) -> Prediction | REPLHistory:
         """Execute one iteration. Returns Prediction if done, else updated REPLHistory."""
         variables_info = [variable.format() for variable in variables]
-        action = self.generate_action(
-            variables_info=variables_info,
-            repl_history=history,
-            iteration=f"{iteration + 1}/{self.max_iters}",
-        )
+        action_args = {
+            "variables_info": variables_info,
+            "repl_history": history,
+            "iteration": f"{iteration + 1}/{self.max_iters}",
+        }
+        if instructions := _execution_instructions(repl):
+            if action_signature := getattr(self.generate_action, "signature", None):
+                action_args["signature"] = action_signature.append_instructions(
+                    f"\n\nExecution environment:\n{instructions}"
+                )
+        action = self.generate_action(**action_args)
         if self.verbose:
             logger.info(
                 f"RLM iteration {iteration + 1}/{self.max_iters}\n"
@@ -761,11 +763,17 @@ class RLM(Module):
     ) -> Prediction | REPLHistory:
         """Async version: Execute one iteration."""
         variables_info = [variable.format() for variable in variables]
-        pred = await self.generate_action.acall(
-            variables_info=variables_info,
-            repl_history=history,
-            iteration=f"{iteration + 1}/{self.max_iters}",
-        )
+        action_args = {
+            "variables_info": variables_info,
+            "repl_history": history,
+            "iteration": f"{iteration + 1}/{self.max_iters}",
+        }
+        if instructions := _execution_instructions(repl):
+            if action_signature := getattr(self.generate_action, "signature", None):
+                action_args["signature"] = action_signature.append_instructions(
+                    f"\n\nExecution environment:\n{instructions}"
+                )
+        pred = await self.generate_action.acall(**action_args)
         if self.verbose:
             logger.info(
                 f"RLM iteration {iteration + 1}/{self.max_iters}\n"

@@ -145,6 +145,36 @@ class CodeInterpreter(Protocol):
         ...
 
 
+def runs_in_process(interpreter: Any) -> bool:
+    """True if `interpreter` executes code in *this* interpreter's object space.
+
+    A `CodeInterpreter` normally denotes a value boundary: submitted code runs somewhere
+    the host cannot hand an object to, so callers marshal what crosses and proxy what
+    cannot. `PythonInterpreter` is that -- a Deno subprocess reached over a pipe.
+
+    Not every isolated environment is a separate object space. A wasm component, an
+    embedded interpreter, or a test double runs the submission in the same CPython that
+    called `execute`, so an object passed in `variables` arrives as itself and the value
+    of a trailing expression comes back as itself. Isolation, where such a backend has
+    it, comes from the environment around the interpreter rather than from marshalling.
+
+    An implementation opts in by setting `runs_in_process = True`. The attribute is
+    optional and absent means False, so this reads a capability rather than requiring
+    one -- adding a member to a `runtime_checkable` Protocol would make every existing
+    implementation fail `isinstance`.
+
+    Declaring it is a claim about two things, and both have to hold:
+
+    * `execute(code, variables=...)` binds `variables` by reference, not by copy.
+    * The value of a trailing expression is returned as the object it is.
+
+    A backend that marshals -- even one whose far side has dspy installed -- must leave
+    this False. The far side having dspy is a different and larger capability; this one
+    is only about whether an object survives the trip.
+    """
+    return bool(getattr(interpreter, "runs_in_process", False))
+
+
 def _validate_interpreter_factory(factory: Any) -> None:
     """Validate the configured provider without invoking it."""
     if not isinstance(factory, type) and isinstance(factory, CodeInterpreter):

@@ -21,13 +21,18 @@ class Flex(Module, Parameter):
     source — a single ``dspy.Module`` subclass, exposed as ``module_src`` — into decomposed predictors
     plus plain Python instead of only tuning instructions.
 
-    The optimizer-authored code runs inside an interpreter. ``Flex`` never
-    runs it in the host Python process. ``interpreter_factory`` defaults to ``dspy.PythonInterpreter``
+    The optimizer-authored code runs inside an interpreter, never in the caller's own namespace.
+    ``interpreter_factory`` defaults to ``dspy.PythonInterpreter``
     (Deno/Pyodide) and must be a zero-argument callable returning a new ``CodeInterpreter``.
     Flex may validate or lower source and install its guest shim before execution; a custom
     interpreter therefore defines the Python and standard-library subset available to that source.
     The optimizer-authored glue runs isolated; only provided-tool calls, predictor construction,
     and predictor calls bridge back to the host, which makes the real LM calls.
+
+    An interpreter that declares ``runs_in_process`` skips the bridge: the submission sees the
+    real ``dspy``, builds ordinary predictors, and returns a real ``Prediction``. That suits a
+    backend whose isolation comes from the environment around the interpreter — a container, a
+    wasm component — rather than from a value boundary.
 
     Args:
         signature: A ``dspy.Signature`` class or string declaring inputs/outputs.
@@ -35,7 +40,8 @@ class Flex(Module, Parameter):
         interpreter_factory: Zero-argument callable returning a fresh ``CodeInterpreter`` for each
             sandbox session. Defaults to ``dspy.PythonInterpreter`` (sandbox, requires Deno).
         max_predictor_calls: Cap on predictor invocations admitted by the Flex bridge per
-            ``forward``; ``None`` disables it.
+            ``forward``; ``None`` disables it. Not enforced for a ``runs_in_process``
+            interpreter, where no call passes through the bridge to be counted.
     """
 
     def __init__(

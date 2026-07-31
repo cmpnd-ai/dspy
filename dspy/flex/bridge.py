@@ -12,7 +12,7 @@ from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 import dspy
 from dspy.adapters.types.base_type import Type as _CustomType
-from dspy.primitives.code_interpreter import CodeInterpreterError, _create_interpreter
+from dspy.primitives.code_interpreter import CodeInterpreterError, _create_interpreter, runs_in_process
 from dspy.utils.exceptions import LMError
 
 logger = logging.getLogger(__name__)
@@ -191,6 +191,12 @@ class BridgeRuntime:
     nothing outlives the call and parallel forwards are isolated.
     ``_max_predictor_calls`` caps bridged LM calls per ``forward``.
 
+    An interpreter that declares ``runs_in_process`` takes ``_forward_in_process`` instead, and
+    none of the above applies to it: there is no shim, no handle, and no ``_Invocation``, because
+    the submission builds and calls real predictors itself. What the two paths share is the
+    contract at the edges — a fresh interpreter per forward, user tools registered by name, and a
+    ``Prediction`` matching the signature coming back.
+
     User ``tools`` are registered with the interpreter (callable by name from sandbox) and
     resolved by name when passed to a bridged sub-predictor; tools authored inside the generated module
     live in the sandbox. A code-executing sub-predictor (RLM/CodeAct/ProgramOfThought)
@@ -211,12 +217,15 @@ class BridgeRuntime:
         self._class_name = parse_module_class_name(module_src)
 
     def forward(self, inputs: dict[str, Any]) -> Any:
+        interp = _create_interpreter(self._factory)
+        if runs_in_process(interp):
+            return self._forward_in_process(interp, inputs)
+
         originals: dict[str, Any] = {}
         for v in inputs.values():
             _collect_custom_type_originals(v, originals)
 
         invocation = _Invocation(self, originals)
-        interp = _create_interpreter(self._factory)
         try:
             interp.tools.update({CONSTRUCT_TOOL: invocation.construct, CALL_TOOL: invocation.call})
             interp.tools.update(self._tool_callables())  # user tools callable by name in the sandbox
@@ -246,6 +255,70 @@ class BridgeRuntime:
                 f"a dspy.Prediction (got {result!r})"
             )
         return self._to_prediction(json.loads(result))
+
+    def _forward_in_process(self, interp: Any, inputs: dict[str, Any]) -> Any:
+        """Run the bound source in an interpreter that shares this process's objects.
+
+        The bridge exists to carry dspy across a value boundary: the shim stands in for
+        `dspy` on the far side, a constructed predictor becomes a handle, a `Prediction`
+        becomes a JSON field dict, and a custom type becomes its serialized string and is
+        restored on the way back. None of that is needed when there is no boundary --
+        `dspy` inside the submission is this `dspy`, a predictor it builds is an ordinary
+        predictor, and the `Prediction` it returns is the object itself.
+
+        So this path submits the source and the driver, and nothing else. User tools are
+        still registered by name, because that is the interpreter's contract rather than
+        the shim's.
+
+        `max_predictor_calls` is not enforced here. It counts calls that pass through
+        `_Invocation.call`, and in this mode none do -- the generated code holds the
+        predictors and calls them directly. An in-process backend that needs a budget
+        enforces it where it can actually be trusted, which is around the interpreter
+        rather than inside the object space the submission shares.
+        """
+        try:
+            interp.tools.update(self._tool_callables())
+            # Generated source says `dspy.Predict(...)` without importing it -- on the
+            # bridged path the shim binds the name. Bind the real one the same way, so
+            # both paths agree on what a submission may assume is already there.
+            interp.execute("import dspy")
+            interp.execute(self._module_src)  # defines the class; `dspy` is the real one
+            result = interp.execute(
+                f"{_INSTANCE_VAR} = {self._class_name}()\n"
+                f"{_INSTANCE_VAR}.forward(**{_INPUTS_VAR})",
+                variables={_INPUTS_VAR: dict(inputs)},
+            )
+        finally:
+            try:
+                interp.shutdown()
+            except Exception:
+                logger.warning("dspy.Flex: interpreter.shutdown() raised after forward", exc_info=True)
+        return self._check_prediction(result)
+
+    def _check_prediction(self, result: Any) -> Any:
+        """Hold an in-process result to the signature, without reparsing it.
+
+        The bridged path has to rebuild every output field with `parse_value`, because
+        what came back is JSON and the declared annotation is the only record of what it
+        was. Here the value never left, so the annotation is already satisfied by
+        construction and checking it again would only find bugs in dspy. What is still
+        worth checking is the generated code's side of the contract: that it returned a
+        `Prediction`, and that the `Prediction` has the fields the signature declares.
+        """
+        store = getattr(result, "_store", None)
+        if store is None:
+            raise CodeInterpreterError(
+                "The generated forward must return a dspy.Prediction; got "
+                f"{type(result).__name__}"
+            )
+        missing = [name for name in self._flex.signature.output_fields if name not in store]
+        if missing:
+            raise CodeInterpreterError(
+                f"The generated forward returned a dspy.Prediction missing declared output "
+                f"field(s) {missing}; the signature declares "
+                f"{list(self._flex.signature.output_fields)}."
+            )
+        return result
 
     def _to_prediction(self, fields: dict[str, Any]) -> Any:
         from dspy.adapters.utils import parse_value

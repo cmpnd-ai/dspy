@@ -1,3 +1,4 @@
+import functools
 import inspect
 import logging
 from typing import Callable
@@ -6,7 +7,7 @@ import dspy
 from dspy.adapters.types.tool import Tool
 from dspy.predict.program_of_thought import ProgramOfThought
 from dspy.predict.react import ReAct
-from dspy.primitives.code_interpreter import CodeInterpreter, _validate_interpreter_factory
+from dspy.primitives.code_interpreter import CodeInterpreter, _execution_instructions, _validate_interpreter_factory
 from dspy.primitives.python_interpreter import PythonInterpreter
 from dspy.signatures.signature import Signature, ensure_signature
 
@@ -87,13 +88,26 @@ class CodeAct(ReAct, ProgramOfThought):
             "For each iteration, you will generate a code snippet that either solves the task or progresses towards the solution.\n"
             "Ensure any output you wish to extract from the code is printed to the console. The code should be enclosed in a fenced code block.\n"
             f"When all information for producing the outputs ({outputs}) are available to be extracted, mark `finished=True` besides the final Python code.\n"
-            "You have access to the Python Standard Library and the following functions:"
+            "You have access to the execution environment and the following approved functions:"
         )
 
         for idx, tool in enumerate(tools.values()):
             instructions.append(f"({idx + 1}) {tool}")
 
         return instructions
+
+    @staticmethod
+    def _make_interpreter_tool(tool: Tool):
+        if inspect.iscoroutinefunction(tool.func):
+            async def invoke(**kwargs):
+                return await tool.acall(**kwargs)
+        else:
+            def invoke(**kwargs):
+                return tool(**kwargs)
+
+        functools.update_wrapper(invoke, tool.func)
+        invoke.__signature__ = inspect.signature(tool.func)
+        return invoke
 
     def forward(self, interpreter: CodeInterpreter | None = None, /, **kwargs):
         """Run the program with a fresh interpreter or a caller-owned override.
@@ -110,14 +124,23 @@ class CodeAct(ReAct, ProgramOfThought):
                 "To use a caller-owned interpreter, pass it as the first positional argument when calling the module."
             )
         with self._interpreter_context(interpreter) as interpreter:
-            # Define the tool functions in the interpreter
+            # Register approved host functions instead of copying their source
+            # into the guest, which breaks closures and bypasses host policy.
             for tool in self.tools.values():
-                interpreter.execute(inspect.getsource(tool.func))
+                interpreter.tools[tool.name] = self._make_interpreter_tool(tool)
+            if hasattr(interpreter, "_tools_registered"):
+                interpreter._tools_registered = False
 
             trajectory = {}
             max_iters = kwargs.pop("max_iters", self.max_iters)
             for idx in range(max_iters):
-                code_data = self.codeact(trajectory=trajectory, **kwargs)
+                codeact_args = {"trajectory": trajectory, **kwargs}
+                if instructions := _execution_instructions(interpreter):
+                    if codeact_signature := getattr(self.codeact, "signature", None):
+                        codeact_args["signature"] = codeact_signature.append_instructions(
+                            f"\n\nExecution environment:\n{instructions}"
+                        )
+                code_data = self.codeact(**codeact_args)
                 output = None
                 code, error = self._parse_code(code_data)
 

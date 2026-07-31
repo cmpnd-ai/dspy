@@ -6,7 +6,6 @@ Test organization:
 - Integration tests (@pytest.mark.deno): PythonInterpreter with Deno
 """
 
-import base64
 from contextlib import contextmanager
 
 import pytest
@@ -556,6 +555,26 @@ class TestRLMFormatting:
         rlm = RLM("context -> answer")
         action_sig = rlm.generate_action.signature
         assert "iteration" in action_sig.input_fields
+        assert "execution_instructions" not in action_sig.input_fields
+
+    def test_action_receives_interpreter_execution_instructions(self):
+        seen = {}
+
+        class CapturingPredictor:
+            def __call__(self, **kwargs):
+                seen.update(kwargs)
+                return Prediction(reasoning="done", code="SUBMIT(answer='ok')")
+
+        mock = MockInterpreter(responses=[FinalOutput({"answer": "ok"})])
+        mock.execution_instructions = "Use only the constrained test dialect."
+        rlm = RLM("context -> answer", max_iters=1)
+        predictor = CapturingPredictor()
+        predictor.signature = rlm.generate_action.signature
+        rlm.generate_action = predictor
+
+        assert rlm.forward(mock, context="test").answer == "ok"
+        assert "execution_instructions" not in seen
+        assert mock.execution_instructions in seen["signature"].instructions
 
     def test_format_output(self):
         """Test output formatting."""
@@ -1620,8 +1639,8 @@ class TestPrepareSerializableVars:
         assert regular == {"query": "hello"}
         assert mock.call_count == 0
 
-    def test_binary_payload_uses_base64_transport(self):
-        """Non-UTF8 bytes should be transported via base64 and decoded in sandbox code."""
+    def test_binary_payload_uses_portable_hex_transport(self):
+        """Non-UTF8 bytes should use a transport supported by constrained interpreters."""
         mock = MockInterpreter(responses=[""])
         rlm = RLM("data, query -> answer")
 
@@ -1631,8 +1650,8 @@ class TestPrepareSerializableVars:
 
         assert mock.call_count == 1
         code, variables = mock.call_history[0]
-        assert "_raw_data = base64.b64decode(_raw_data_base64)" in code
-        assert variables["_raw_data_base64"] == base64.b64encode(b"\xff\xfe\xfd").decode("ascii")
+        assert "_raw_data = bytes.fromhex(_raw_data_hex)" in code
+        assert variables["_raw_data_hex"] == "fffefd"
 
     def test_large_payload_not_inlined_in_code(self):
         """Large payloads should ride in the variables kwarg, not the code string.

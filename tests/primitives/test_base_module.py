@@ -9,8 +9,49 @@ from litellm import Choices, Message, ModelResponse
 from litellm.types.utils import Usage
 
 import dspy
+from dspy.predict.parameter import Parameter
 from dspy.primitives.prediction import Prediction
 from dspy.utils.dummies import DummyLM
+
+
+def test_load_state_forwards_safe_flag_to_custom_parameter_kwargs():
+    class CustomParameter(Parameter):
+        def __init__(self):
+            self.received = None
+
+        def dump_state(self, json_mode=True):
+            return {}
+
+        def load_state(self, state, **kwargs):
+            self.received = kwargs
+
+    class CustomModule(dspy.Module):
+        def __init__(self):
+            self.parameter = CustomParameter()
+
+    module = CustomModule()
+    module.load_state({"parameter": {}}, allow_unsafe_lm_state=True)
+    assert module.parameter.received == {"allow_unsafe_lm_state": True}
+
+
+def test_load_state_preserves_custom_parameter_without_safe_flag():
+    class CustomParameter(Parameter):
+        def __init__(self):
+            self.loaded = False
+
+        def dump_state(self, json_mode=True):
+            return {}
+
+        def load_state(self, state):
+            self.loaded = True
+
+    class CustomModule(dspy.Module):
+        def __init__(self):
+            self.parameter = CustomParameter()
+
+    module = CustomModule()
+    module.load_state({"parameter": {}}, allow_unsafe_lm_state=True)
+    assert module.parameter.loaded is True
 
 
 def test_deepcopy_basic():

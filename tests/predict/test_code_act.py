@@ -1,4 +1,3 @@
-import threading
 from unittest.mock import Mock
 
 import pytest
@@ -82,7 +81,7 @@ def test_codeact_support_multiple_fields(pooled_interpreter):
     assert res.maximum == "6"
     assert res.minimum == "2"
     assert res.trajectory == {
-        "code_output_0": '"{\'maximum\': 6.0, \'minimum\': 2.0}\\n"',
+        "code_output_0": '"{\'maximum\': 6, \'minimum\': 2}\\n"',
         "generated_code_0": "result = extract_maximum_minimum('2, 3, 5, 6')\nprint(result)",
     }
 
@@ -144,12 +143,7 @@ def test_codeact_code_execution_failure(pooled_interpreter):
 
 
 def test_codeact_evaluate_creates_one_interpreter_per_example():
-    tool_registration_barrier = threading.Barrier(4)
-
     def execute(code, variables):
-        if code.startswith("def add"):
-            tool_registration_barrier.wait(timeout=30)
-            return ""
         return "2\n"
 
     factory = MockInterpreterFactory(execute_fn=execute)
@@ -172,13 +166,14 @@ def test_codeact_evaluate_creates_one_interpreter_per_example():
     assert len(factory.instances) == 4
     assert len({id(interpreter) for interpreter in factory.instances}) == 4
     for interpreter in factory.instances:
-        assert interpreter.call_count == 2
+        assert interpreter.call_count == 1
+        assert interpreter.tools["add"](a=1, b=1) == 2
         with pytest.raises(CodeInterpreterError, match="shutdown"):
             interpreter.execute("print('closed')")
 
 
 def test_codeact_factory_creates_fresh_interpreter_per_sequential_call():
-    factory = MockInterpreterFactory(responses=["", "2\n"])
+    factory = MockInterpreterFactory(responses=["2\n"])
     program = CodeAct(BasicQA, tools=[add], interpreter_factory=factory)
     program.codeact = StaticPredictor(generated_code="print(add(1, 1))", finished=True)
     program.extractor = StaticPredictor(answer="2")
@@ -192,6 +187,37 @@ def test_codeact_factory_creates_fresh_interpreter_per_sequential_call():
     for interpreter in factory.instances:
         with pytest.raises(CodeInterpreterError, match="shutdown"):
             interpreter.execute("print('closed')")
+
+
+def test_codeact_uses_interpreter_instructions_without_changing_predictor_schema():
+    seen = {}
+
+    class CapturingPredictor:
+        def __init__(self, signature):
+            self.signature = signature
+
+        def __call__(self, **kwargs):
+            seen.update(kwargs)
+            return dspy.Prediction(generated_code="print(add(1, 1))", finished=True)
+
+    interpreter = MockInterpreter(responses=["2\n"])
+    interpreter.execution_instructions = "Use the constrained test dialect."
+    program = CodeAct(BasicQA, tools=[add])
+    program.codeact = CapturingPredictor(program.codeact.signature)
+    program.extractor = StaticPredictor(answer="2")
+
+    assert program(interpreter, question="What is 1+1?").answer == "2"
+    assert "execution_instructions" not in seen
+    assert interpreter.execution_instructions in seen["signature"].instructions
+
+
+@pytest.mark.asyncio
+async def test_codeact_preserves_async_host_tool():
+    async def async_add(a: int, b: int) -> int:
+        return a + b
+
+    wrapped = CodeAct._make_interpreter_tool(dspy.Tool(async_add))
+    assert await wrapped(a=20, b=22) == 42
 
 
 def test_codeact_allows_interpreter_as_signature_input():
@@ -229,7 +255,7 @@ def test_codeact_does_not_shutdown_caller_owned_interpreter():
     program = CodeAct(BasicQA, tools=[add], interpreter_factory=factory)
     program.codeact = StaticPredictor(generated_code="print(add(1, 1))", finished=True)
     program.extractor = StaticPredictor(answer="2")
-    interpreter = MockInterpreter(responses=["", "2\n"])
+    interpreter = MockInterpreter(responses=["2\n"])
 
     try:
         result = program(interpreter, question="What is 1+1?")
@@ -256,7 +282,7 @@ def test_codeact_shuts_down_factory_interpreter_when_extractor_raises():
 
 
 def test_codeact_propagates_terminal_interpreter_failure_and_shuts_down():
-    factory = MockInterpreterFactory(responses=["", CodeInterpreterError("protocol corrupt")])
+    factory = MockInterpreterFactory(responses=[CodeInterpreterError("protocol corrupt")])
     program = CodeAct(BasicQA, tools=[add], interpreter_factory=factory)
     program.codeact = StaticPredictor(generated_code="print(add(1, 1))", finished=True)
 

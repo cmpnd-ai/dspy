@@ -36,8 +36,8 @@ from dspy.primitives.code_interpreter import (
     _validate_interpreter_factory,
 )
 from dspy.primitives.module import Module
+from dspy.primitives.monty_interpreter import MontyInterpreter
 from dspy.primitives.prediction import Prediction
-from dspy.primitives.python_interpreter import PythonInterpreter
 from dspy.primitives.repl_types import REPLEntry, REPLHistory, REPLVariable
 from dspy.primitives.sandbox_serializable import SandboxSerializable, build_repl_variable
 from dspy.signatures.signature import ensure_signature
@@ -120,7 +120,7 @@ class RLM(Module):
     through code execution. The LLM writes Python code to examine data, call
     sub-LLMs for semantic analysis, and build up answers iteratively.
 
-    The default interpreter is PythonInterpreter (Deno/Pyodide/WASM), but
+    The default interpreter is MontyInterpreter, but
     ``interpreter_factory`` can create another CodeInterpreter implementation,
     such as an adapter for a remote sandbox. RLM updates the interpreter's
     mutable ``tools`` dictionary with invocation-scoped tools before execution.
@@ -145,7 +145,7 @@ class RLM(Module):
         verbose: bool = False,
         tools: list[Callable] | None = None,
         sub_lm: dspy.LM | None = None,
-        interpreter_factory: Callable[[], CodeInterpreter] = PythonInterpreter,
+        interpreter_factory: Callable[[], CodeInterpreter] = MontyInterpreter,
     ):
         """
         Args:

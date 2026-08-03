@@ -3,7 +3,7 @@ Mock interpreter for testing RLM and other code-executing modules.
 
 This interpreter doesn't actually execute code - it returns scripted responses
 or uses a custom function to generate responses. Useful for:
-- Unit testing without Deno/Pyodide dependencies
+- Unit testing without real sandbox dependencies
 - Testing specific execution paths (errors, SUBMIT, etc.)
 - Recording what code was submitted for execution
 """

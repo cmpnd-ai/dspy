@@ -257,7 +257,7 @@
                 <div class="line">&nbsp;</div>
                 <div class="line"><span class="tok-k">def</span> <span class="tok-m">calc</span>(expr: <span class="tok-t">str</span>) -&gt; <span class="tok-t">float</span>:</div>
                 <div class="line">    <span class="tok-s">"""Evaluate a math expression."""</span></div>
-                <div class="line">    <span class="tok-k">return</span> dspy.<span class="tok-m">PythonInterpreter</span>({}).execute(expr)</div>
+                <div class="line">    <span class="tok-k">return</span> dspy.<span class="tok-m">MontyInterpreter</span>({}).execute(expr)</div>
                 <div class="line">&nbsp;</div>
                 <div class="line">agent = dspy.<span class="tok-m">ReAct</span>(</div>
                 <div class="line">    <span class="tok-s">"question -&gt; answer"</span>,</div>

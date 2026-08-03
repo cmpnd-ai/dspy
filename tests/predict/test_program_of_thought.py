@@ -7,7 +7,7 @@ import dspy
 from dspy import ProgramOfThought, Signature
 from dspy.evaluate.metrics import answer_exact_match
 from dspy.primitives.code_interpreter import CodeInterpreterError, FinalOutput
-from dspy.primitives.python_interpreter import PythonInterpreter
+from dspy.primitives.monty_interpreter import MontyInterpreter
 from dspy.utils import DummyLM
 from tests.mock_interpreter import MockInterpreter, MockInterpreterFactory
 
@@ -25,22 +25,21 @@ class StaticPredictor:
         return dspy.Prediction(**self.fields)
 
 
-class RecordingPythonInterpreterFactory:
+class RecordingMontyInterpreterFactory:
     def __init__(self, parties: int):
         self.instances = []
         self._lock = threading.Lock()
         self._barrier = threading.Barrier(parties)
 
     def __call__(self):
-        interpreter = PythonInterpreter()
+        interpreter = MontyInterpreter()
         with self._lock:
             self.instances.append(interpreter)
         self._barrier.wait(timeout=30)
         return interpreter
 
 
-@pytest.mark.deno
-def test_pot_code_generation(pooled_interpreter):
+def test_pot_code_generation(monty_interpreter):
     lm = DummyLM(
         [
             {
@@ -52,13 +51,12 @@ def test_pot_code_generation(pooled_interpreter):
     )
     dspy.configure(lm=lm)
     pot = ProgramOfThought(BasicQA)
-    res = pot(pooled_interpreter, question="What is 1+1?")
+    res = pot(monty_interpreter, question="What is 1+1?")
     assert res.answer == "2"
 
 
 # This test ensures the old finetuned saved models still work
-@pytest.mark.deno
-def test_old_style_pot(pooled_interpreter):
+def test_old_style_pot(monty_interpreter):
     lm = DummyLM(
         [
             {"reasoning": "Reason_A", "generated_code": "```python\nresult = 1+1\n```"},
@@ -67,7 +65,7 @@ def test_old_style_pot(pooled_interpreter):
     )
     dspy.configure(lm=lm)
     pot = ProgramOfThought(BasicQA)
-    res = pot(pooled_interpreter, question="What is 1+1?")
+    res = pot(monty_interpreter, question="What is 1+1?")
     assert res.answer == "2"
 
 
@@ -77,8 +75,7 @@ class ExtremumFinder(Signature):
     minimum = dspy.OutputField(desc="The minimum of the given numbers")
 
 
-@pytest.mark.deno
-def test_pot_support_multiple_fields(pooled_interpreter):
+def test_pot_support_multiple_fields(monty_interpreter):
     lm = DummyLM(
         [
             {
@@ -90,13 +87,12 @@ def test_pot_support_multiple_fields(pooled_interpreter):
     )
     dspy.configure(lm=lm)
     pot = ProgramOfThought(ExtremumFinder)
-    res = pot(pooled_interpreter, input_list="2, 3, 5, 6")
+    res = pot(monty_interpreter, input_list="2, 3, 5, 6")
     assert res.maximum == "6"
     assert res.minimum == "2"
 
 
-@pytest.mark.deno
-def test_pot_code_generation_with_one_error(pooled_interpreter):
+def test_pot_code_generation_with_one_error(monty_interpreter):
     lm = DummyLM(
         [
             {
@@ -112,13 +108,12 @@ def test_pot_code_generation_with_one_error(pooled_interpreter):
     )
     dspy.configure(lm=lm)
     pot = ProgramOfThought(BasicQA)
-    res = pot(pooled_interpreter, question="What is 1+1?")
+    res = pot(monty_interpreter, question="What is 1+1?")
     assert res.answer == "2"
 
 
-@pytest.mark.deno
 def test_pot_evaluate_creates_one_interpreter_per_example():
-    factory = RecordingPythonInterpreterFactory(parties=4)
+    factory = RecordingMontyInterpreterFactory(parties=4)
     pot = ProgramOfThought(BasicQA, interpreter_factory=factory)
     pot.code_generate = StaticPredictor(generated_code="SUBMIT({'answer': 2})")
     pot.generate_output = StaticPredictor(answer="2")
@@ -137,7 +132,7 @@ def test_pot_evaluate_creates_one_interpreter_per_example():
     assert result.score == 100.0
     assert len(factory.instances) == 4
     assert len({id(interpreter) for interpreter in factory.instances}) == 4
-    assert all(interpreter.deno_process is None for interpreter in factory.instances)
+    assert all(interpreter._pool is None for interpreter in factory.instances)
 
 
 def test_pot_factory_creates_fresh_interpreter_per_sequential_call():
@@ -227,7 +222,6 @@ def test_pot_propagates_terminal_interpreter_failure_and_shuts_down():
         factory.instances[0].execute("print('closed')")
 
 
-@pytest.mark.deno
 def test_pot_code_generation_persistent_errors():
     max_iters = 3
     lm = DummyLM(

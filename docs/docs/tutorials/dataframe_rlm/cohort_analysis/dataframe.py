@@ -12,7 +12,7 @@ Usage with RLM:
     result = rlm(data=DataFrame(my_pandas_df), query="What is the total revenue?")
 
 The DataFrame is serialized as base64-encoded Parquet for efficient, type-preserving
-transfer into the Deno/Pyodide sandbox.
+transfer into the Monty sandbox.
 """
 
 import base64

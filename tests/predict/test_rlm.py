@@ -2,8 +2,8 @@
 Tests for the RLM (Recursive Language Model) module.
 
 Test organization:
-- Unit tests (no Deno required): MockInterpreter, RLM formatting, signatures
-- Integration tests (@pytest.mark.deno): PythonInterpreter with Deno
+- Unit tests (without a real interpreter): MockInterpreter, RLM formatting, signatures
+- Integration tests: MontyInterpreter behavior
 """
 
 import base64
@@ -16,7 +16,6 @@ from dspy.predict.rlm import RLM, _strip_code_fences
 from dspy.primitives.code_interpreter import CodeExecutionError, CodeInterpreterError, FinalOutput
 from dspy.primitives.monty_interpreter import MontyInterpreter
 from dspy.primitives.prediction import Prediction
-from dspy.primitives.python_interpreter import PythonInterpreter
 from dspy.primitives.repl_types import REPLEntry, REPLHistory, REPLVariable
 from dspy.primitives.sandbox_serializable import SandboxSerializable
 from tests.mock_interpreter import MockInterpreter, MockInterpreterFactory
@@ -299,7 +298,7 @@ class TestRLMInitialization:
 
         tools = RLM("context -> answer", sub_lm=MagicMock(return_value="untyped response"))._make_llm_tools()
 
-        with pytest.raises(TypeError, match="Sub-LM must return dspy.LMResponse or a non-empty list"):
+        with pytest.raises(TypeError, match=r"Sub-LM must return dspy.LMResponse or a non-empty list"):
             tools["llm_query"]("test prompt")
 
     def test_llm_query_reports_textless_response_type(self):
@@ -918,24 +917,22 @@ class TestRLMDynamicSignature:
 
 
 # ============================================================================
-# Integration Tests: PythonInterpreter (require Deno)
+# Integration Tests: MontyInterpreter (use Monty)
 # ============================================================================
 
 
-@pytest.mark.deno
-class TestPythonInterpreter:
+class TestMontyInterpreter:
     """Integration tests for the secure sandbox with tool support."""
 
     def test_start_prewarms_sandbox(self):
         """Test that start() pre-warms the sandbox."""
-        interp = PythonInterpreter()
+        interp = MontyInterpreter()
         try:
-            # Before start, deno_process should be None
-            assert interp.deno_process is None
+            # Before start, _pool should be None
+            assert interp._pool is None
             # After start, it should be running
             interp.start()
-            assert interp.deno_process is not None
-            assert interp.deno_process.poll() is None  # Still running
+            assert interp._pool is not None
             # Execute should work
             result = interp.execute("print(42)")
             assert "42" in result
@@ -944,33 +941,33 @@ class TestPythonInterpreter:
 
     def test_start_is_idempotent(self):
         """Test that start() can be called multiple times safely."""
-        interp = PythonInterpreter()
+        interp = MontyInterpreter()
         try:
             interp.start()
-            first_process = interp.deno_process
+            first_process = interp._pool
             interp.start()  # Second call - should be idempotent
-            assert interp.deno_process is first_process  # Same process
+            assert interp._pool is first_process  # Same process
         finally:
             interp.shutdown()
 
-    def test_basic_execution(self, pooled_interpreter):
+    def test_basic_execution(self, monty_interpreter):
         """Test basic code execution."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         result = interp.execute("print(1 + 1)")
         assert "2" in result
 
-    def test_variable_injection(self, pooled_interpreter):
+    def test_variable_injection(self, monty_interpreter):
         """Test variable injection."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         result = interp.execute(
             "print(x + y)",
             variables={"x": 10, "y": 5}
         )
         assert "15" in result
 
-    def test_variable_injection_with_none_values(self, pooled_interpreter):
+    def test_variable_injection_with_none_values(self, monty_interpreter):
         """Test variable injection with None values in dicts/lists (JSON null -> Python None)."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         # Test None in dict
         result = interp.execute(
             "print(data['key'] is None)",
@@ -992,25 +989,25 @@ class TestPythonInterpreter:
         )
         assert "True" in result
 
-    def test_tool_call_kwargs(self, configure_pooled_interpreter):
+    def test_tool_call_kwargs(self, configure_monty_interpreter):
         """Test tool call with keyword arguments."""
         def echo(message: str = "") -> str:
             return f"Echo: {message}"
 
-        interp = configure_pooled_interpreter(tools={"echo": echo})
+        interp = configure_monty_interpreter(tools={"echo": echo})
         result = interp.execute('print(echo(message="hello"))')
         assert "Echo: hello" in result
 
-    def test_tool_call_positional(self, configure_pooled_interpreter):
+    def test_tool_call_positional(self, configure_monty_interpreter):
         """Test tool call with positional arguments."""
         def greet(name: str) -> str:
             return f"Hello: {name}"
 
-        interp = configure_pooled_interpreter(tools={"greet": greet})
+        interp = configure_monty_interpreter(tools={"greet": greet})
         result = interp.execute('print(greet("world"))')
         assert "Hello: world" in result
 
-    def test_multiple_tools(self, configure_pooled_interpreter):
+    def test_multiple_tools(self, configure_monty_interpreter):
         """Test multiple tools."""
         def add(a: int = 0, b: int = 0) -> str:
             return str(a + b)
@@ -1018,7 +1015,7 @@ class TestPythonInterpreter:
         def multiply(a: int = 0, b: int = 0) -> str:
             return str(a * b)
 
-        interp = configure_pooled_interpreter(tools={"add": add, "multiply": multiply})
+        interp = configure_monty_interpreter(tools={"add": add, "multiply": multiply})
         result = interp.execute("""
 sum_result = add(a=3, b=4)
 prod_result = multiply(a=3, b=4)
@@ -1027,13 +1024,13 @@ print(f"Sum: {sum_result}, Product: {prod_result}")
         assert "Sum: 7" in result
         assert "Product: 12" in result
 
-    def test_tool_returns_list(self, configure_pooled_interpreter):
+    def test_tool_returns_list(self, configure_monty_interpreter):
         """Test tool that returns a list (like llm_query_batched)."""
         def batch_process(items: list | None = None) -> list:
             items = items or []
             return [f"processed_{item}" for item in items]
 
-        interp = configure_pooled_interpreter(tools={"batch_process": batch_process})
+        interp = configure_monty_interpreter(tools={"batch_process": batch_process})
         result = interp.execute("""
 results = batch_process(items=["a", "b", "c"])
 print(f"Type: {type(results).__name__}")
@@ -1045,12 +1042,12 @@ print(f"All: {results}")
         assert "Length: 3" in result
         assert "First: processed_a" in result
 
-    def test_tool_returns_dict(self, configure_pooled_interpreter):
+    def test_tool_returns_dict(self, configure_monty_interpreter):
         """Test tool that returns a dict."""
         def get_info() -> dict:
             return {"name": "test", "count": 42}
 
-        interp = configure_pooled_interpreter(tools={"get_info": get_info})
+        interp = configure_monty_interpreter(tools={"get_info": get_info})
         result = interp.execute("""
 info = get_info()
 print(f"Type: {type(info).__name__}")
@@ -1061,61 +1058,32 @@ print(f"Count: {info['count']}")
         assert "Name: test" in result
         assert "Count: 42" in result
 
-    def test_state_persists(self, pooled_interpreter):
+    def test_state_persists(self, monty_interpreter):
         """Test that state persists across executions."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         interp.execute("x = 10")
         result = interp.execute("print(x + 5)")
         assert "15" in result
 
-    def test_syntax_error(self, pooled_interpreter):
+    def test_syntax_error(self, monty_interpreter):
         """Test syntax error handling."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         with pytest.raises(SyntaxError):
             interp.execute("def incomplete(")
 
-    def test_runtime_error(self, pooled_interpreter):
+    def test_runtime_error(self, monty_interpreter):
         """Test runtime error handling."""
-        interp = pooled_interpreter
+        interp = monty_interpreter
         with pytest.raises(CodeExecutionError):
             interp.execute("undefined_variable")
 
-
-@pytest.mark.deno
-class TestSandboxSecurity:
-    """Integration tests for sandbox security restrictions."""
-
-    def test_no_network_access(self, pooled_interpreter):
-        """Test that network access is blocked."""
-        interp = pooled_interpreter
-        with pytest.raises(CodeInterpreterError) as exc_info:
-            interp.execute("""
-from pyodide.http import pyfetch
-import asyncio
-asyncio.get_event_loop().run_until_complete(pyfetch("https://example.com"))
-""")
-        assert "net access" in str(exc_info.value).lower() or "allow-net" in str(exc_info.value).lower()
-
-    def test_imports_work(self, pooled_interpreter):
-        """Test that standard library imports work."""
-        interp = pooled_interpreter
-        result = interp.execute("""
-import json
-import re
-from collections import Counter
-data = {"key": "value"}
-print(json.dumps(data))
-""")
-        assert "key" in result
-
-
 # ============================================================================
-# Unit Tests: RLM with MockInterpreter (no Deno required)
+# Unit Tests: RLM with MockInterpreter (without a real interpreter)
 # ============================================================================
 
 
 class TestRLMAsyncMock:
-    """Unit tests for RLM aforward() using MockInterpreter (no Deno required)."""
+    """Unit tests for RLM aforward() using MockInterpreter (without a real interpreter)."""
 
     @pytest.mark.asyncio
     async def test_aforward_rejects_undeclared_inputs_before_interpreter_execution(self):
@@ -1173,7 +1141,7 @@ class TestRLMAsyncMock:
 
 
 class TestRLMTypeCoercionMock:
-    """Unit tests for RLM type coercion using MockInterpreter (no Deno required)."""
+    """Unit tests for RLM type coercion using MockInterpreter (without a real interpreter)."""
 
     @pytest.mark.parametrize("output_field,output_type,final_value,code,expected", [
         ("count", "int", 42, "SUBMIT(42)", 42),
@@ -1482,11 +1450,11 @@ class TestRLMWithDummyLM:
 
 
 # ============================================================================
-# Integration Tests: RLM with real LM (require API key and Deno)
+# Integration Tests: RLM with real LM (require API key)
 # ============================================================================
 
 
-@pytest.mark.skip(reason="Requires actual LM and Deno - run manually")
+@pytest.mark.skip(reason="Requires actual LM - run manually")
 class TestRLMIntegration:
     """Integration tests that require a configured LM."""
 
@@ -1686,11 +1654,10 @@ class TestPrepareSerializableVars:
         assert mock.call_count == 2
 
 
-@pytest.mark.deno
 class TestLargeSerializableRoundTrip:
     """End-to-end test that large SandboxSerializable payloads survive the sandbox."""
 
-    def test_large_payload_round_trips_through_real_sandbox(self, pooled_interpreter):
+    def test_large_payload_round_trips_through_real_sandbox(self, monty_interpreter):
         """A multi-MB payload should be reconstructable inside the real interpreter."""
         large_text = "abc123" * (200 * 1024)  # ~1.2 MB UTF-8
 
@@ -1707,7 +1674,7 @@ class TestLargeSerializableRoundTrip:
             def rlm_preview(self, max_chars: int = 500) -> str:
                 return f"LargeText({len(large_text)} chars)"
 
-        interp = pooled_interpreter
+        interp = monty_interpreter
         rlm = RLM("data -> answer")
         rlm._inject_execution_context(interp, rlm._prepare_execution_tools())
         rlm._prepare_serializable_vars({"data": _LargeText()}, interp)

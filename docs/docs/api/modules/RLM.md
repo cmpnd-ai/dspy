@@ -32,22 +32,6 @@ result = rlm(
 print(result.answer)
 ```
 
-## Deno Installation
-
-RLM relies on [Deno](https://deno.land/) and [Pyodide](https://pyodide.org/) to create a local WASM sandbox for secure Python execution.
-
-You can install Deno with: `brew install deno` on MacOS or `curl -fsSL https://deno.land/install.sh | sh` on MacOS and Linux. See the [Deno Installation Docs](https://docs.deno.com/runtime/getting_started/installation/) for more details. Make sure to accept the prompt when it asks to add it to your shell profile. 
-
-After you have installed Deno, **Make sure to restart your shell.**
-
-Deno may get confused by existing `package.json` files it happens to find; use the environment variable `DENO_NO_PACKAGE_JSON=1` to ignore `package.json` entirely and resolve `npm:pyodide` from its own cache, which is what DSPy expects.
-
-Then you can run `dspy.RLM`.
-
-Users have reported issues with the Deno cache not being found by DSPy. We are actively investigating these issues, and your feedback is greatly appreciated.
-
-You can also work with an external sandbox provider. We are still working on creating an example of using external sandbox providers.
-
 
 ## How It Works
 
@@ -115,7 +99,7 @@ $20,000,000
 | `verbose` | `bool` | `False` | Log detailed execution info |
 | `tools` | `list[Union[Callable, dspy.Tool]]` | `None` | Additional tool functions callable from interpreter code |
 | `sub_lm` | `dspy.LM` | `None` | LM for sub-queries. Defaults to `dspy.settings.lm`. Use a cheaper model here. |
-| `interpreter_factory` | `Callable[[], CodeInterpreter]` | `PythonInterpreter` | Creates one interpreter per invocation. RLM shuts down each returned interpreter. |
+| `interpreter_factory` | `Callable[[], CodeInterpreter]` | `MontyInterpreter` | Creates one interpreter per invocation. RLM shuts down each returned interpreter. |
 
 ## Built-in Tools
 
@@ -192,14 +176,9 @@ rlm = dspy.RLM(
 Pass the interpreter class directly when it needs no arguments. For configured construction, use any zero-argument callable, such as `functools.partial`:
 
 ```python
-from functools import partial
-
 rlm = dspy.RLM(
     "context, query -> answer",
-    interpreter_factory=partial(
-        dspy.PythonInterpreter,
-        enable_network_access=["example.com"],
-    ),
+    interpreter_factory=dspy.MontyInterpreter,
 )
 ```
 
@@ -265,10 +244,10 @@ RLM returns a `Prediction` with:
     RLM is marked as experimental. The API may change in future releases.
 
 !!! note "Thread Safety"
-    `interpreter_factory` may be called concurrently and must return a fresh interpreter each time. An interpreter passed as the first positional argument to `rlm(...)` or `rlm.acall(...)` is caller-owned and may be reused only for sequential calls to the same RLM instance. `PythonInterpreter` must also stay on the thread where it was first used.
+    `interpreter_factory` may be called concurrently and must return a fresh interpreter each time. An interpreter passed as the first positional argument to `rlm(...)` or `rlm.acall(...)` is caller-owned and may be reused only for sequential calls to the same RLM instance.
 
 !!! note "Interpreter Requirements"
-    The default `PythonInterpreter` requires [Deno](https://deno.land/) to be installed for the Pyodide WASM sandbox.
+    The default `MontyInterpreter` runs in the bundled Monty sandbox.
 
 ## API Reference
 

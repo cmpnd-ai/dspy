@@ -14,7 +14,7 @@ from dspy.primitives.code_interpreter import (
     _validate_interpreter_factory,
 )
 from dspy.primitives.module import Module
-from dspy.primitives.python_interpreter import PythonInterpreter
+from dspy.primitives.monty_interpreter import MontyInterpreter
 from dspy.signatures.signature import Signature, ensure_signature
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ProgramOfThought(Module):
     """
     A DSPy module that runs Python programs to solve a problem.
-    This module requires deno to be installed. Please install deno following https://docs.deno.com/runtime/getting_started/installation/
+    Generated code runs in the sandboxed Monty interpreter by default.
 
     Examples:
     ```
@@ -40,7 +40,7 @@ class ProgramOfThought(Module):
         self,
         signature: str | type[Signature],
         max_iters: int = 3,
-        interpreter_factory: Callable[[], CodeInterpreter] = PythonInterpreter,
+        interpreter_factory: Callable[[], CodeInterpreter] = MontyInterpreter,
     ):
         """
         Args:

@@ -7,7 +7,7 @@ from dspy.adapters.types.tool import Tool
 from dspy.predict.program_of_thought import ProgramOfThought
 from dspy.predict.react import ReAct
 from dspy.primitives.code_interpreter import CodeInterpreter, _validate_interpreter_factory
-from dspy.primitives.python_interpreter import PythonInterpreter
+from dspy.primitives.monty_interpreter import MontyInterpreter
 from dspy.signatures.signature import Signature, ensure_signature
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class CodeAct(ReAct, ProgramOfThought):
         signature: str | type[Signature],
         tools: list[Callable],
         max_iters: int = 5,
-        interpreter_factory: Callable[[], CodeInterpreter] = PythonInterpreter,
+        interpreter_factory: Callable[[], CodeInterpreter] = MontyInterpreter,
     ):
         """
         Initializes the CodeAct class with the specified model, temperature, and max tokens.

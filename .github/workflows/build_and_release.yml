@@ -38,19 +38,15 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python3 -m pip install --upgrade setuptools wheel twine build semver packaging
-      - name: Install Deno
-        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
-        with:
-          deno-version: v2.7.7
       - name: Get correct version for TestPyPI release
         id: check_version
         env:
           VERSION: ${{ needs.extract-tag.outputs.version }}
         run: |
           PACKAGE_NAME="dspy-ai-test-isaac"
-          echo "Checking if $VERSION for $PACKAGE_NAME exists on TestPyPI"  
-          NEW_VERSION=$(python3 .github/workflows/build_utils/test_version.py "$PACKAGE_NAME" "$VERSION")  
-          echo "Version to be used for TestPyPI release: $NEW_VERSION"  
+          echo "Checking if $VERSION for $PACKAGE_NAME exists on TestPyPI"
+          NEW_VERSION=$(python3 .github/workflows/build_utils/test_version.py "$PACKAGE_NAME" "$VERSION")
+          echo "Version to be used for TestPyPI release: $NEW_VERSION"
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
       - name: Update version in pyproject.toml
         env:
@@ -100,10 +96,6 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python3 -m pip install --upgrade setuptools wheel twine build
-      - name: Install Deno
-        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
-        with:
-          deno-version: v2.7.7
       - name: Update version in pyproject.toml
         env:
           VERSION: ${{ needs.extract-tag.outputs.version }}

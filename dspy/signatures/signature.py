@@ -38,6 +38,29 @@ def _default_instructions(cls) -> str:
     return f"Given the fields {inputs_}, produce the fields {outputs_}."
 
 
+def _normalize_annotation(ann):
+    """Normalize a type annotation to a canonical form for equality comparison.
+
+    Converts typing-module generics (e.g. ``typing.List[str]``) to their
+    built-in equivalents (e.g. ``list[str]``) so that schema-equivalent
+    spellings compare equal.  Recursively normalizes type arguments.
+    """
+    if ann is None:
+        return None
+    origin = typing.get_origin(ann)
+    args = typing.get_args(ann)
+    if origin is None:
+        return ann
+    normalized_args = tuple(_normalize_annotation(a) for a in args)
+    try:
+        return origin[normalized_args] if normalized_args else origin
+    except TypeError:
+        # Some origins (e.g. types.UnionType for PEP 604 ``str | int``) are
+        # not subscriptable; they already compare equal to typing.Union
+        # equivalents, so return as-is.
+        return ann
+
+
 class SignatureMeta(type(BaseModel)):
     def __call__(cls, *args, **kwargs):
         if cls is Signature:
@@ -521,7 +544,7 @@ class Signature(BaseModel, metaclass=SignatureMeta):
         for name in cls.fields.keys() | other.fields.keys():
             if name not in other.fields or name not in cls.fields:
                 return False
-            if cls.fields[name].annotation != other.fields[name].annotation:
+            if _normalize_annotation(cls.fields[name].annotation) != _normalize_annotation(other.fields[name].annotation):
                 return False
             if cls.fields[name].json_schema_extra != other.fields[name].json_schema_extra:
                 return False

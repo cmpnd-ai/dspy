@@ -75,9 +75,7 @@ def parse_module_class_name(module_src: str) -> str:
     """Return the name of the generated ``dspy.Module`` subclass in ``module_src``."""
     tree = ast.parse(module_src)
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
-    with_forward = [
-        c for c in classes if any(isinstance(b, ast.FunctionDef) and b.name == "forward" for b in c.body)
-    ]
+    with_forward = [c for c in classes if any(isinstance(b, ast.FunctionDef) and b.name == "forward" for b in c.body)]
     chosen = with_forward or classes
     if not chosen:
         raise CodeInterpreterError("module_src must define a dspy.Module subclass with a `forward` method")
@@ -117,9 +115,7 @@ def prediction_to_fields(pred: Any) -> dict[str, Any]:
         if isinstance(pred, dict):
             store = pred
         else:
-            raise CodeInterpreterError(
-                f"A bridged predictor must return a dspy.Prediction; got {type(pred).__name__}"
-            )
+            raise CodeInterpreterError(f"A bridged predictor must return a dspy.Prediction; got {type(pred).__name__}")
     fields = {k: _jsonable(v) for k, v in dict(store).items()}
     try:
         json.dumps(fields)
@@ -177,6 +173,46 @@ def _restore_custom_types(value: Any, originals: dict[str, Any]) -> Any:
     return value
 
 
+def _looks_like_uncaught_lm_tool_failure(caught: CodeInterpreterError, tool_msg: str) -> bool:
+    """Whether ``caught`` is the boundary-flattened form of this forward's stashed LM tool error,
+    i.e. the generated ``forward`` let it propagate UNCAUGHT — versus catching the flattened
+    boundary error and raising a different (e.g. wrapped) error that merely embeds its text.
+
+    ``tool_msg`` is the message of the ``CodeInterpreterError`` ``_Invocation.call`` raised for the
+    LM failure; it carries the ``[dspy bridge lm-error #N]`` tag. The bridge raises that error as a
+    host tool, so the sandbox boundary flattens it to a message string and reconstructs a fresh
+    ``CodeExecutionError`` on the host (the typed ``LMError`` can't ride on the exception object
+    itself across the JSON-RPC boundary). We correlate back to the stashed ``LMError`` only when
+    the host-side message is EXACTLY the form an uncaught tool failure produces — so a later error
+    that wraps the recovered boundary exception's ``str()`` (a standard idiom, e.g.
+    ``raise RuntimeError(f"forward failed: {err}")``) injects its own text and does NOT match.
+
+    Two boundary shapes are recognized (both tested by ``tests/flex/test_flex_interpreter.py``):
+
+    - the mock boundary flattens the tool's ``CodeInterpreterError`` directly to
+      ``f"{type(err).__name__}: {err}"`` -> ``"CodeInterpreterError: <tool_msg>"``;
+    - the real (Deno/Pyodide) boundary's sandbox tool wrapper raises a ``RuntimeError`` whose sole
+      arg is ``"<err type>: <err message>"``, and host-side ``execute()`` formats that as
+      ``f"RuntimeError: {args!r}"`` -> ``"<OuterType>: ['CodeInterpreterError: <tool_msg>']"``.
+
+    In both, ``"CodeInterpreterError: <tool_msg>"`` is the SOLE content the boundary itself
+    produced for this failure; generated code that recovered and re-raised with extra text either
+    replaces the outer descriptor (mock) or injects text before ``"CodeInterpreterError: "`` inside
+    the single arg (real), so the exact-tail match fails and the later crash is NOT repainted.
+    """
+    msg = str(caught)
+    # Mock-shaped boundary: the tool's CodeInterpreterError flattened directly.
+    if msg == f"{CodeInterpreterError.__name__}: {tool_msg}":
+        return True
+    # Real (JSON-RPC) boundary: "<OuterType>: " + repr(["CodeInterpreterError: <tool_msg>"]).
+    # Matching the args-list repr as an exact tail (and that it follows "<X>: ") avoids hardcoding
+    # the outer type, and rejects any user text injected into the single arg.
+    sole_arg = repr([f"{CodeInterpreterError.__name__}: {tool_msg}"])
+    if msg.endswith(sole_arg) and msg[: -len(sole_arg)].endswith(": "):
+        return True
+    return False
+
+
 class _Invocation:
     """Per-forward bridge state: the predictors this forward constructed (keyed by the sandbox
     attribute name), its predictor-call budget, and the original custom-type objects to restore
@@ -216,8 +252,14 @@ class _Invocation:
             return prediction_to_fields(predictor(**restored))
         except LMError as e:
             tag = f"[dspy bridge lm-error #{self._calls}]"
-            self._lm_error = (e, tag)
-            raise CodeInterpreterError(f"{tag} {type(e).__name__}: {e}") from e
+            tool_msg = f"{tag} {type(e).__name__}: {e}"
+            err = CodeInterpreterError(tool_msg)
+            # Structured attribute for any (non-flattening) propagation path that preserves the
+            # exception object itself; across the JSON-RPC sandbox boundary the object is rebuilt
+            # and this attribute is lost, so forward() also correlates via the stashed tool_msg.
+            err.__dspy_lm_error__ = e
+            self._lm_error = (e, tool_msg)
+            raise err from e
 
 
 class BridgeRuntime:
@@ -271,9 +313,18 @@ class BridgeRuntime:
             )
             result = interp.execute(code, variables={_INPUTS_VAR: dict(inputs)})
         except CodeInterpreterError as e:
+            # Preserve the typed LMError across the sandbox boundary, which flattens host-tool
+            # exceptions to message strings. If the exception object itself reached us (no flattening
+            # lost the attribute), re-raise directly; otherwise correlate via the stashed tool error
+            # message, but ONLY when the host-side message is exactly the form an UNCAUGHT tool
+            # failure produces — so a failure the generated code recovered from and then wrapped into
+            # a later, unrelated crash is not repainted as an infrastructure LMError.
+            lm_err = getattr(e, "__dspy_lm_error__", None)
+            if lm_err is not None:
+                raise lm_err from e
             if invocation._lm_error is not None:
-                lm_error, tag = invocation._lm_error
-                if tag in str(e):
+                lm_error, tool_msg = invocation._lm_error
+                if _looks_like_uncaught_lm_tool_failure(e, tool_msg):
                     raise lm_error from e
             raise
         finally:

@@ -62,10 +62,13 @@ class Embeddings:
         q_embeds = self.embedder(queries)
         q_embeds = self._normalize(q_embeds) if self.normalize else q_embeds
 
-        pids = self._faiss_search(q_embeds, self.k * 10) if self.index else None
-        pids = np.tile(np.arange(len(self.corpus)), (len(queries), 1)) if pids is None else pids
+        if self.index is not None:
+            pids, mask = self._faiss_search(q_embeds, self.k * 10)
+        else:
+            pids = np.tile(np.arange(len(self.corpus)), (len(queries), 1))
+            mask = None
 
-        return self._rerank_and_predict(q_embeds, pids)
+        return self._rerank_and_predict(q_embeds, pids, mask)
 
     def _build_faiss(self):
         nbytes = 32
@@ -91,18 +94,35 @@ class Embeddings:
         return index
 
     def _faiss_search(self, query_embeddings: np.ndarray, num_candidates: int):
-        return self.index.search(query_embeddings, num_candidates)[1]
+        # Never ask FAISS for more candidates than the corpus has; the nprobe-limited probed pool may still be
+        # smaller than num_candidates, in which case FAISS fills the excess slots with the sentinel id -1.
+        num_candidates = min(num_candidates, len(self.corpus))
+        _distances, ids = self.index.search(query_embeddings, num_candidates)
+        # FAISS returns -1 for slots it cannot fill. Keep the array rectangular by remapping -1 to 0 and
+        # return a mask so the caller can drop sentinel candidates from ranking.
+        mask = ids >= 0
+        ids = np.where(mask, ids, 0)
+        return ids, mask
 
-    def _rerank_and_predict(self, q_embeds: np.ndarray, candidate_indices: np.ndarray):
+    def _rerank_and_predict(self, q_embeds: np.ndarray, candidate_indices: np.ndarray, mask: np.ndarray | None = None):
         candidate_embeddings = self.corpus_embeddings[candidate_indices]
         scores = np.einsum("qd,qkd->qk", q_embeds, candidate_embeddings)
+        if mask is not None:
+            # Sentinel candidates (FAISS -1, remapped to 0) must never rank into the top-k.
+            scores = np.where(mask, scores, -np.inf)
 
         top_k_indices = np.argsort(-scores, axis=1)[:, : self.k]
-        top_indices = candidate_indices[np.arange(len(q_embeds))[:, None], top_k_indices]
-        top_scores = scores[np.arange(len(q_embeds))[:, None], top_k_indices]
+        batch_idx = np.arange(len(q_embeds))[:, None]
+        top_indices = candidate_indices[batch_idx, top_k_indices]
+        top_scores = scores[batch_idx, top_k_indices]
 
         results = []
         for indices, query_scores in zip(top_indices, top_scores, strict=True):
+            # If fewer than k real candidates were probed, some top-k slots hold sentinels with -inf score;
+            # drop them so every returned id is a valid, distinct corpus index.
+            valid = np.isfinite(query_scores)
+            indices = indices[valid]
+            query_scores = query_scores[valid]
             passages = [self.corpus[idx] for idx in indices]
             results.append((passages, indices.tolist(), query_scores.tolist()))
         return results
@@ -141,6 +161,7 @@ class Embeddings:
         if self.index is not None:
             try:
                 import faiss
+
                 faiss.write_index(self.index, os.path.join(path, "faiss_index.bin"))
             except ImportError:
                 # If FAISS is not available, we can't save the index
@@ -197,6 +218,7 @@ class Embeddings:
         if config["has_faiss_index"] and os.path.exists(faiss_index_path):
             try:
                 import faiss
+
                 self.index = faiss.read_index(faiss_index_path)
             except ImportError:
                 # If FAISS is not available, fall back to brute force

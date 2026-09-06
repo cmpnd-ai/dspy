@@ -79,7 +79,9 @@ def colbertv2_post_request_v2(url: str, query: str, k: int):
     if "topk" not in res_json:
         raise ValueError(f"ColBERTv2 server returned an unexpected response: {res_json}")
 
-    return res_json["topk"][:k]
+    topk = res_json["topk"][:k]
+    topk = [{**d, "long_text": d["text"]} for d in topk]
+    return topk[:k]
 
 
 @request_cache()

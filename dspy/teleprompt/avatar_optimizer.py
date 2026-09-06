@@ -76,6 +76,8 @@ class AvatarOptimizer(Teleprompter):
         optimize_for: str = "max",
     ):
         assert metric is not None, "`metric` argument cannot be None. Please provide a metric function."
+        if optimize_for not in ("max", "min"):
+            raise ValueError("`optimize_for` must be either 'max' or 'min'.")
         self.metric = metric
         self.optimize_for = optimize_for
 
@@ -149,7 +151,14 @@ class AvatarOptimizer(Teleprompter):
         print(f"Average Score: {avg_score}")
 
         for example, prediction, score in results:
-            if score >= self.upper_bound:
+            if self.optimize_for == "max":
+                is_pos = score >= self.upper_bound
+                is_neg = score <= self.lower_bound
+            else:
+                is_pos = score <= self.lower_bound
+                is_neg = score >= self.upper_bound
+
+            if is_pos:
                 pos_inputs.append(
                     EvalResult(
                         example=example.inputs().toDict(),
@@ -157,7 +166,7 @@ class AvatarOptimizer(Teleprompter):
                         actions=prediction.actions if prediction else None
                     )
                 )
-            elif score <= self.lower_bound:
+            elif is_neg:
                 neg_inputs.append(
                     EvalResult(
                         example=example.inputs().toDict(),
@@ -167,9 +176,15 @@ class AvatarOptimizer(Teleprompter):
                 )
 
         if len(pos_inputs) == 0:
-            raise ValueError("No positive examples found, try lowering the upper_bound or providing more training data")
+            if self.optimize_for == "max":
+                raise ValueError("No positive examples found, try lowering the upper_bound or providing more training data")
+            else:
+                raise ValueError("No positive examples found, try raising the lower_bound or providing more training data")
         if len(neg_inputs) == 0:
-            raise ValueError("No negative examples found, try raising the lower_bound or providing more training data")
+            if self.optimize_for == "max":
+                raise ValueError("No negative examples found, try raising the lower_bound or providing more training data")
+            else:
+                raise ValueError("No negative examples found, try lowering the upper_bound or providing more training data")
 
         return (avg_score, pos_inputs, neg_inputs)
 

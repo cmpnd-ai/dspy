@@ -22,7 +22,7 @@ class KNN:
 
             # Create a training dataset with examples
             trainset = [
-                dspy.Example(input="hello", output="world"),
+                dspy.Example(input="hello", output="world").with_inputs("input"),
                 # ... more examples ...
             ]
 
@@ -41,8 +41,7 @@ class KNN:
         self.trainset = trainset
         self.embedding = vectorizer
         trainset_casted_to_vectorize = [
-            " | ".join([f"{key}: {value}" for key, value in example.items() if key in example._input_keys])
-            for example in self.trainset
+            " | ".join([f"{key}: {value}" for key, value in example.inputs().items()]) for example in self.trainset
         ]
         self.trainset_vectors = self.embedding(trainset_casted_to_vectorize).astype(np.float32)
 

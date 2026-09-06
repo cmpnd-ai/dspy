@@ -1716,3 +1716,186 @@ def test_missing_optional_output_fields_fall_back_to_defaults():
 
     with pytest.raises(AdapterParseError):
         adapter.parse(OptionalOutputSignature, '{"note": "present"}')
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for `enforce_required` preserving typed dict/map fields on
+# the OpenAI Structured Outputs ("strict") path. See b8d9092: the no-`properties`
+# branch used to unconditionally rewrite any `type: object` schema lacking a
+# `properties` key to `{"properties": {}, "required": [], "additionalProperties":
+# false}`, which destroyed the typed `additionalProperties` pydantic emits for
+# dict/map fields (e.g. `dict[str, int]` -> `{"type": "object",
+# "additionalProperties": {"type": "integer"}}`). OpenAI's own strict converter
+# (openai/lib/_pydantic.py:49-51) preserves a typed `additionalProperties`, so we
+# mirror that and only collapse `additionalProperties: true` (open-ended dicts)
+# to `false`.
+# ---------------------------------------------------------------------------
+
+
+def _structured_output_model(signature):
+    from dspy.adapters.json_adapter import _get_structured_outputs_response_format
+
+    return _get_structured_outputs_response_format(signature)
+
+
+def _capture_response_format(signature):
+    dspy.configure(lm=dspy.LM(model="openai/gpt-4o", cache=False), adapter=dspy.JSONAdapter())
+    program = dspy.Predict(signature)
+    with mock.patch("litellm.completion") as mock_completion:
+        try:
+            program(q="x")
+        except Exception:
+            pass
+    _, call_kwargs = mock_completion.call_args
+    return call_kwargs["response_format"]
+
+
+def test_enforce_required_preserves_typed_map_in_array_items():
+    """list[dict[str, int]] must ship a typed map (additionalProperties: {integer})
+    on the strict path, not the closed empty object."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: list[dict[str, int]] = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    items = schema["properties"]["metadata"]["items"]
+    assert items == {
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+        "required": [],
+    }
+    # No vacuous `properties: {}` key is installed (it would forbid real entries).
+    assert "properties" not in items
+
+
+def test_enforce_required_collapses_open_ended_nested_map():
+    """list[dict[str, Any]] (open-ended) stays a closed empty object:
+    additionalProperties: false; only the vacuous properties: {} key is dropped."""
+
+    from typing import Any
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: list[dict[str, Any]] = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    items = schema["properties"]["metadata"]["items"]
+    assert items["type"] == "object"
+    assert items["additionalProperties"] is False
+    assert items["required"] == []
+    assert "properties" not in items
+
+
+def test_enforce_required_preserves_nested_typed_map():
+    """dict[str, dict[str, int]] recursion: the inner typed map is preserved."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        nested: list[dict[str, dict[str, int]]] = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    outer = schema["properties"]["nested"]["items"]
+    assert outer["additionalProperties"]["additionalProperties"] == {"type": "integer"}
+
+
+def test_enforce_required_preserves_dict_subfield_in_pydantic_submodel():
+    """A dict[str, int] sub-field of a pydantic BaseModel output field reaches
+    enforce_required via $defs recursion and must be preserved."""
+
+    class Inner(pydantic.BaseModel):
+        kv: dict[str, int]
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        out: Inner = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    kv = schema["$defs"]["Inner"]["properties"]["kv"]
+    assert kv["type"] == "object"
+    assert kv["additionalProperties"] == {"type": "integer"}
+    assert kv["required"] == []
+
+
+def test_enforce_required_keeps_fixed_property_object_behaviour():
+    """Inverse regression: fixed-property pydantic submodels still get
+    required = [all keys] and additionalProperties = false."""
+
+    class Inner(pydantic.BaseModel):
+        a: int
+        b: str
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        out: Inner = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    inner = schema["$defs"]["Inner"]
+    assert set(inner["required"]) == {"a", "b"}
+    assert inner["additionalProperties"] is False
+
+
+def test_enforce_required_keeps_scalar_array_items():
+    """Inverse regression: list[int] still ships items: {type: integer}."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        scores: list[int] = dspy.OutputField()
+
+    schema = _structured_output_model(S).model_json_schema()
+    assert schema["properties"]["scores"]["items"] == {"type": "integer"}
+
+
+def test_typed_nested_dict_stays_on_structured_output_path():
+    """End-to-end: list[dict[str, int]] routes through the strict path (a pydantic
+    model is sent), not the json_object fallback."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: list[dict[str, int]] = dspy.OutputField()
+
+    response_format = _capture_response_format(S)
+    assert issubclass(response_format, pydantic.BaseModel)
+    items = response_format.model_json_schema()["properties"]["metadata"]["items"]
+    assert items["additionalProperties"] == {"type": "integer"}
+
+
+def test_top_level_dict_still_routes_to_json_object():
+    """Inverse regression: top-level dict[str, int] still routes to the json_object
+    fallback via _has_open_ended_mapping (the guard is untouched by the fix)."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: dict[str, int] = dspy.OutputField()
+
+    response_format = _capture_response_format(S)
+    assert response_format == {"type": "json_object"}
+
+
+def test_typed_nested_dict_parse_preserves_populated_entries():
+    """End-to-end parse: now that the on-wire schema allows real entries, a populated
+    emission parses back into the declared typed dicts (no silent data loss)."""
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: list[dict[str, int]] = dspy.OutputField()
+
+    adapter = dspy.JSONAdapter()
+    parsed = adapter.parse(S, '{"metadata": [{"score": 3, "rank": 1}, {"score": 9}]}')
+    assert parsed["metadata"] == [{"score": 3, "rank": 1}, {"score": 9}]
+
+
+def test_on_wire_typed_map_schema_preserved_after_openai_strict_converter():
+    """The schema the OpenAI strict API receives (after litellm's
+    to_strict_json_schema conversion) preserves the typed additionalProperties."""
+    pytest.importorskip("openai")
+    from openai.lib._pydantic import to_strict_json_schema
+
+    class S(dspy.Signature):
+        q: str = dspy.InputField()
+        metadata: list[dict[str, int]] = dspy.OutputField()
+
+    model = _structured_output_model(S)
+    on_wire_items = to_strict_json_schema(model)["properties"]["metadata"]["items"]
+    assert on_wire_items["additionalProperties"] == {"type": "integer"}
+    assert on_wire_items["type"] == "object"

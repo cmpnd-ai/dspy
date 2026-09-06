@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 
 _OPENAI_REASONING_MODEL_RE = re.compile(
-    r"^(?:o[1345](?:-(?:mini|nano|pro))?(?:-\d{4}-\d{2}-\d{2})?|gpt-5(?!-chat)(?:-.*)?)$"
+    r"^(?:o1-preview|o[1345](?:-(?:mini|nano|pro))?(?:-\d{4}-\d{2}-\d{2})?|gpt-5(?!-chat)(?:-.*)?)$"
 )
 
 

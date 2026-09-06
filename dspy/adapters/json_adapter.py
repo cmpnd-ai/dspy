@@ -278,7 +278,9 @@ def _get_structured_outputs_response_format(
         """
         Recursively ensure that:
             - for any object schema, a "required" key is added with all property names (or [] if no properties)
-            - additionalProperties is set to False regardless of the previous value.
+            - additionalProperties is set to False for fixed-property objects and open-ended maps,
+              while a typed additionalProperties (dict/map value schema) is preserved and recursed
+              into, mirroring OpenAI's own strict-mode converter (openai/lib/_pydantic.py:49-51).
             - the same enforcement is run for nested arrays and definitions.
         """
         if schema_part.get("type") == "object":
@@ -291,10 +293,21 @@ def _get_structured_outputs_response_format(
                     if isinstance(sub_schema, dict):
                         enforce_required(sub_schema)
             else:
-                # For objects with no properties (should not happen normally but a fallback).
-                schema_part["properties"] = {}
-                schema_part["required"] = []
-                schema_part["additionalProperties"] = False
+                # Objects with no `properties` key are map/dict types in pydantic
+                # (additionalProperties describes the value schema). OpenAI's own
+                # strict converter (openai/lib/_pydantic.py:49-51) preserves a
+                # typed additionalProperties rather than collapsing it to false,
+                # so mirror that: preserve and recurse into typed value schemas.
+                # For open-ended dicts (dict[str, Any] -> additionalProperties: true)
+                # collapse to false, preserving the prior closed-empty-object
+                # behaviour (semantically identical to today; only the vacuous
+                # `properties: {}` key is dropped on the wire).
+                ap = schema_part.get("additionalProperties")
+                if isinstance(ap, dict):
+                    enforce_required(ap)
+                elif ap is True or "additionalProperties" not in schema_part:
+                    schema_part["additionalProperties"] = False
+                schema_part.setdefault("required", [])
         if schema_part.get("type") == "array" and isinstance(schema_part.get("items"), dict):
             enforce_required(schema_part["items"])
         # Also enforce in any nested definitions / $defs.

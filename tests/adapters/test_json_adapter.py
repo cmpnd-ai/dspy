@@ -1,4 +1,5 @@
 import enum
+import json
 from typing import Literal
 from unittest import mock
 
@@ -9,6 +10,7 @@ from litellm.utils import ChatCompletionMessageToolCall, Choices, Function, Mess
 from openai.types.responses import ResponseOutputMessage
 
 import dspy
+from dspy.adapters.json_adapter import _get_structured_outputs_response_format
 from tests.adapters.conftest import format_messages_and_lm_kwargs
 
 
@@ -1568,6 +1570,133 @@ def test_json_adapter_toolcalls_no_native_function_calling():
         mock_completion.assert_called_once()
         _, call_kwargs = mock_completion.call_args
         assert call_kwargs["response_format"] == {"type": "json_object"}
+
+
+class _CrossedCapabilityLM(dspy.BaseLM):
+    """A structured-output-capable LM that does NOT support native function calling.
+
+    Emulates a backend that strictly conforms to the supplied structured-output schema: when the adapter
+    passes a Pydantic ``response_format`` the LM emits only the schema's declared keys, and in
+    ``json_object`` mode (no schema) it follows the prompt and emits both ``answer`` and ``tool_calls``.
+    This is the crossed-capability profile (supports_response_schema=True, supports_function_calling=False)
+    that triggers the bug when ``use_native_function_calling=True``.
+    """
+
+    def __init__(self):
+        super().__init__("crossed-lm", "chat", 0.0, 1000, False)
+        self.calls = []
+
+    @property
+    def supports_function_calling(self):
+        return False
+
+    @property
+    def supports_response_schema(self):
+        return True
+
+    @property
+    def supported_params(self):
+        return {"response_format"}
+
+    def _emit(self, response_format):
+        if isinstance(response_format, type) and issubclass(response_format, pydantic.BaseModel):
+            allowed = set(response_format.model_json_schema().get("properties", {}).keys())
+        else:
+            allowed = None
+        payload = {}
+        if allowed is None or "answer" in allowed:
+            payload["answer"] = "I searched."
+        if allowed is None or "tool_calls" in allowed:
+            payload["tool_calls"] = {"tool_calls": [{"name": "search", "args": {"query": "cats"}}]}
+        return ModelResponse(
+            choices=[Choices(message=Message(role="assistant", content=json.dumps(payload)))],
+            model="crossed-lm",
+        )
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return self._emit(kwargs.get("response_format"))
+
+    async def aforward(self, prompt=None, messages=None, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return self._emit(kwargs.get("response_format"))
+
+
+def _tool_using_signature():
+    class MySignature(dspy.Signature):
+        question: str = dspy.InputField()
+        tools: list[dspy.Tool] = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    return MySignature
+
+
+def _search_tool():
+    def search(query: str) -> str:
+        return f"found {query}"
+
+    return dspy.Tool(search)
+
+
+def test_json_adapter_non_fc_lm_with_native_fc_flag_uses_json_mode():
+    """Regression: when use_native_function_calling=True but the LM does NOT support native function calling
+    (yet supports response_schema), base.py keeps `tool_calls` in the processed signature. JSONAdapter must not
+    build a structured-output schema that omits `tool_calls` (which would force a wasted retry or
+    AdapterParseError); it must fall back to json_object mode just like the flag-off case, completing in a
+    single LM call.
+    """
+    lm = _CrossedCapabilityLM()
+    adapter = dspy.JSONAdapter()
+    result = adapter(lm, {}, _tool_using_signature(), [], {"question": "Q?", "tools": [_search_tool()]})
+
+    # A single LM call, no wasted structured-output retry / fallback.
+    assert len(lm.calls) == 1
+    # json_object mode (not a structured schema that drops tool_calls).
+    assert lm.calls[0]["kwargs"]["response_format"] == {"type": "json_object"}
+    # Both fields parsed from the single response.
+    assert result[0]["answer"] == "I searched."
+    assert result[0]["tool_calls"] == dspy.ToolCalls(
+        tool_calls=[dspy.ToolCalls.ToolCall(name="search", args={"query": "cats"})]
+    )
+
+
+@pytest.mark.asyncio
+async def test_json_adapter_acall_non_fc_lm_with_native_fc_flag_uses_json_mode():
+    """Async mirror of the sync regression: the acall path must apply the same capability gate so the crossed
+    capability completes in a single LM call without a structured-output retry/fallback.
+    """
+    lm = _CrossedCapabilityLM()
+    adapter = dspy.JSONAdapter()
+    result = await adapter.acall(
+        lm, {}, _tool_using_signature(), [], {"question": "Q?", "tools": [_search_tool()]}
+    )
+
+    assert len(lm.calls) == 1
+    assert lm.calls[0]["kwargs"]["response_format"] == {"type": "json_object"}
+    assert result[0]["answer"] == "I searched."
+    assert result[0]["tool_calls"] == dspy.ToolCalls(
+        tool_calls=[dspy.ToolCalls.ToolCall(name="search", args={"query": "cats"})]
+    )
+
+
+def test_get_structured_outputs_response_format_skips_tool_calls_only_when_native_fc_active():
+    """The helper must skip ToolCalls from the structured schema only when native function calling is actually
+    active (mirroring base.py:_call_preprocess), so the schema and the processed signature always agree.
+    """
+
+    class ToolSignature(dspy.Signature):
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+        tool_calls: dspy.ToolCalls = dspy.OutputField()
+
+    # Native FC active: base.py deletes tool_calls from the processed signature, so the schema omits it too.
+    active_schema = _get_structured_outputs_response_format(ToolSignature, native_fc_active=True).model_json_schema()
+    assert set(active_schema["properties"]) == {"answer"}
+
+    # Native FC not active: base.py keeps tool_calls, so the schema must include it.
+    inactive_schema = _get_structured_outputs_response_format(ToolSignature, native_fc_active=False).model_json_schema()
+    assert set(inactive_schema["properties"]) == {"answer", "tool_calls"}
 
 
 def test_json_adapter_native_reasoning():

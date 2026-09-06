@@ -88,7 +88,7 @@ def bootstrap_trace_data(
                     failed_pred = FailedPrediction(
                         completion_text=completion_str,
                         format_reward=format_failure_score
-                        + (failure_score - format_failure_score) * (present / expected),
+                        + (failure_score - format_failure_score) * (len(present) / len(expected)),
                     )
                 else:
                     failed_pred = FailedPrediction(completion_text=completion_str, format_reward=format_failure_score)
@@ -113,8 +113,9 @@ def bootstrap_trace_data(
             except Exception as e:
                 if not capture_crashes:
                     raise
-                logger.warning("Program raised on an example; capturing it as a failed prediction: %s: %s",
-                               type(e).__name__, e)
+                logger.warning(
+                    "Program raised on an example; capturing it as a failed prediction: %s: %s", type(e).__name__, e
+                )
                 return FailedPrediction(completion_text=f"{type(e).__name__}: {e}"), dspy.settings.trace.copy()
 
     program.forward = MethodType(patched_forward, program)

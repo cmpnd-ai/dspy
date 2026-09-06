@@ -174,7 +174,117 @@ def test_capture_crashes_does_not_capture_lm_errors():
             raise LMRateLimitError("429 from the provider")
 
     # raise_on_error=False mirrors the flex GEPA call site (gepa_flex_utils).
-    data = bootstrap_trace_data(
-        Flaky(), dataset=[example], num_threads=1, capture_crashes=True, raise_on_error=False
-    )
+    data = bootstrap_trace_data(Flaky(), dataset=[example], num_threads=1, capture_crashes=True, raise_on_error=False)
     assert data == []  # handled by the evaluator as an error, never repainted as a FailedPrediction
+
+
+def _two_required_field_signature() -> type[dspy.Signature]:
+    class TwoFieldSignature(dspy.Signature):
+        """Answer a question with reasoning."""
+
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+        reasoning: str = dspy.OutputField()
+
+    return TwoFieldSignature
+
+
+def _partial_parse_response(missing_text: str = '{"answer": "4"}') -> ModelResponse:
+    return ModelResponse(
+        choices=[Choices(message=Message(content=missing_text))],
+        model="openai/gpt-4o-mini",
+    )
+
+
+def test_bootstrap_trace_data_partial_parse_retains_failed_prediction():
+    """A partial parse (a parseable dict missing a required output field) must be retained
+    as a ``FailedPrediction`` with an interpolated ``format_reward``, not silently dropped.
+
+    Regression test for the ``present / expected`` list-division ``TypeError`` in the
+    ``AdapterParseError`` handler: with ``raise_on_error=False`` (the production GRPO/GEPA
+    configuration) the ``TypeError`` used to be swallowed and the example vanished from
+    the returned ``data`` with no partial-credit signal.
+    """
+
+    program = dspy.Predict(_two_required_field_signature())
+    dataset = [Example(question="What is 2+2?").with_inputs("question")]
+
+    def exact_match_metric(example, prediction, trace=None):
+        return getattr(prediction, "answer", None) == "4"
+
+    dspy.configure(lm=dspy.LM(model="openai/gpt-4o-mini", cache=False), adapter=dspy.JSONAdapter())
+
+    # The LM returns valid JSON that parses to a non-empty dict, but it is missing the
+    # required `reasoning` output field. This drives the partial-parse branch where
+    # `present` is a non-empty list.
+    with mock.patch("litellm.completion", side_effect=lambda *a, **k: _partial_parse_response()):
+        results = bootstrap_trace_data(
+            program=program,
+            dataset=dataset,
+            metric=exact_match_metric,
+            num_threads=1,
+            raise_on_error=False,
+            capture_failed_parses=True,
+        )
+
+    # The example must be retained instead of being silently dropped by the
+    # list/list-division TypeError -> ValueError -> continue path.
+    assert len(results) == 1, f"Expected 1 retained result, got {len(results)}"
+
+    prediction = results[0]["prediction"]
+    assert isinstance(prediction, FailedPrediction), (
+        f"Expected a FailedPrediction to be retained, got {type(prediction).__name__}"
+    )
+
+    # 1 of 2 expected required fields present interpolates to -0.5 with the default
+    # format_failure_score=-1 / failure_score=0.
+    assert prediction.format_reward == -0.5
+    assert isinstance(prediction.format_reward, float)
+    # The reward must lie strictly between the two extremes, never at or beyond them.
+    assert -1 < prediction.format_reward < 0
+
+    # The malformed-but-parseable LM response must be captured for GRPO/GEPA training.
+    assert prediction.completion_text == '{"answer": "4"}'
+
+    # The interpolated reward must flow through `wrapped_metric` into the score that
+    # GRPO/GEPA consumes.
+    assert "score" in results[0]
+    assert results[0]["score"] == prediction.format_reward
+
+    # A trace entry must be recorded for the failed prediction.
+    assert len(results[0]["trace"]) > 0
+    for trace_entry in results[0]["trace"]:
+        assert len(trace_entry) == 3
+        # The trace's prediction slot carries the FailedPrediction, not a raw Prediction.
+        assert trace_entry[2] is prediction
+
+
+def test_bootstrap_trace_data_partial_parse_custom_scores_interpolate():
+    """The partial-parse reward must interpolate using the caller-supplied
+    ``failure_score`` / ``format_failure_score`` (GRPO overrides both), confirming the
+    formula threads the arguments through rather than hard-coding the defaults.
+    """
+
+    program = dspy.Predict(_two_required_field_signature())
+    dataset = [Example(question="What is 2+2?").with_inputs("question")]
+
+    dspy.configure(lm=dspy.LM(model="openai/gpt-4o-mini", cache=False), adapter=dspy.JSONAdapter())
+
+    with mock.patch("litellm.completion", side_effect=lambda *a, **k: _partial_parse_response()):
+        results = bootstrap_trace_data(
+            program=program,
+            dataset=dataset,
+            metric=None,
+            num_threads=1,
+            raise_on_error=False,
+            capture_failed_parses=True,
+            failure_score=1.0,
+            format_failure_score=-2.0,
+        )
+
+    assert len(results) == 1
+    prediction = results[0]["prediction"]
+    assert isinstance(prediction, FailedPrediction)
+    # 1 of 2 fields present: -2.0 + (1.0 - (-2.0)) * (1 / 2) == -0.5
+    assert prediction.format_reward == -0.5
+    assert -2.0 < prediction.format_reward < 1.0

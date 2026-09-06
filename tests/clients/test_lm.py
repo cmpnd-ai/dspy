@@ -887,6 +887,89 @@ def test_base_lm_copy_is_shallow_runtime_copy_with_isolated_dspy_state():
     assert lm.kwargs == {"temperature": 0.1, "max_tokens": None}
 
 
+def test_copy_max_tokens_reasoning_model_preserves_budget():
+    lm = dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000, api_key="sk-fake")
+    lm2 = lm.copy(max_tokens=32000)
+
+    # copy() should update the aliased key, not insert a second one
+    token_keys = [k for k in lm2.kwargs if "token" in k]
+    assert token_keys == ["max_completion_tokens"], f"unexpected token keys: {token_keys}"
+    assert lm2.kwargs["max_completion_tokens"] == 32000
+
+    # dump_state() must preserve the user's raised budget
+    assert lm2.dump_state()["max_tokens"] == 32000
+
+
+def test_copy_max_tokens_reasoning_model_chat_request_has_single_token_budget():
+    """On the chat path, copy(max_tokens=...) must send only max_completion_tokens to litellm — no stale dual key."""
+    lm = dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000, cache=False)
+    copied = lm.copy(max_tokens=32000)
+
+    with mock.patch("dspy.clients.lm.litellm_completion", return_value=_model_response("hi")) as completion:
+        copied("query")
+
+    request = completion.call_args.kwargs["request"]
+    assert request["max_completion_tokens"] == 32000
+    assert "max_tokens" not in request
+
+
+def test_copy_max_tokens_reasoning_model_responses_request_has_single_token_budget():
+    """On the responses path, copy(max_tokens=...) must not leak stale max_completion_tokens next to max_output_tokens."""
+    lm = dspy.LM("openai/gpt-5", model_type="responses", temperature=1.0, max_tokens=16000, cache=False)
+    copied = lm.copy(max_tokens=32000)
+
+    with mock.patch("litellm.responses", return_value=make_response([])) as responses:
+        copied("query")
+
+    call_kwargs = responses.call_args.kwargs
+    assert call_kwargs["max_output_tokens"] == 32000
+    assert "max_completion_tokens" not in call_kwargs
+    assert "max_tokens" not in call_kwargs
+
+
+def test_copy_max_tokens_reasoning_model_round_trips_via_dump_load_state():
+    lm = dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000, cache=False)
+    copied = lm.copy(max_tokens=32000)
+
+    state = copied.dump_state()
+    assert state["max_tokens"] == 32000
+    assert "max_completion_tokens" not in state
+
+    reloaded = dspy.LM.load_state(state)
+    assert reloaded.kwargs["max_completion_tokens"] == 32000
+    assert reloaded.dump_state()["max_tokens"] == 32000
+
+
+def test_copy_max_tokens_none_reasoning_model_drops_token_budget():
+    """copy(max_tokens=None) follows the standard copy() "None means remove" semantics for the aliased key."""
+    lm = dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000, cache=False)
+    copied = lm.copy(max_tokens=None)
+
+    assert "max_completion_tokens" not in copied.kwargs
+    assert "max_tokens" not in copied.kwargs
+
+
+def test_copy_max_tokens_non_reasoning_model_preserves_max_tokens_key():
+    """Non-reasoning models keep using max_tokens directly (no reasoning-model aliasing)."""
+    lm = dspy.LM("openai/gpt-4o", max_tokens=100, cache=False)
+    copied = lm.copy(max_tokens=200)
+
+    assert copied.kwargs["max_tokens"] == 200
+    assert "max_completion_tokens" not in copied.kwargs
+
+
+def test_dump_state_preserves_existing_max_tokens_when_dual_keys_present():
+    """Defense in depth: if a dual-key state ever exists, dump_state keeps the existing max_tokens and drops the stale alias."""
+    lm = dspy.LM("openai/gpt-5", temperature=1.0, max_tokens=16000, cache=False)
+    # Simulate a pre-existing dual-key state (e.g. produced by some other code path).
+    lm.kwargs["max_tokens"] = 32000
+
+    state = lm.dump_state()
+
+    assert state["max_tokens"] == 32000
+    assert "max_completion_tokens" not in state
+
+
 def test_dump_state():
     lm = dspy.LM(
         model="openai/gpt-4o-mini",

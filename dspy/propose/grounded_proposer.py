@@ -387,7 +387,7 @@ class GroundedProposer(Proposer):
             program_aware=self.program_aware,
             use_task_demos=self.use_task_demos and demo_candidates,
             use_instruct_history=self.use_instruct_history and instruction_history,
-            use_tip=self.use_tip,
+            use_tip=self.use_tip and bool(tip),
             verbose=self.verbose
         )
 

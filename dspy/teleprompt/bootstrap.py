@@ -152,6 +152,7 @@ class BootstrapFewShot(Teleprompter):
         bootstrapped = {}
         self.name2traces = {name: [] for name in self.name2predictor}
 
+        example_idx = -1
         for example_idx, example in enumerate(tqdm.tqdm(self.trainset)):
             if len(bootstrapped) >= max_bootstraps:
                 break
@@ -164,7 +165,7 @@ class BootstrapFewShot(Teleprompter):
                     break
 
         print(
-            f"Bootstrapped {len(bootstrapped)} full traces after {example_idx} examples "
+            f"Bootstrapped {len(bootstrapped)} full traces after {example_idx + 1} examples "
             f"for up to {self.max_rounds} rounds, amounting to {bootstrap_attempts} attempts."
         )
 

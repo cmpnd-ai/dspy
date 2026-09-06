@@ -1,4 +1,5 @@
 import sys
+import xml.etree.ElementTree as ET
 from unittest import mock
 
 import pydantic
@@ -264,6 +265,48 @@ def test_xml_adapter_escapes_closing_tags_and_rejects_malformed_xml():
 
     with pytest.raises(dspy.utils.exceptions.AdapterParseError, match="Failed to parse XML"):
         adapter.parse(TestSignature, "<code>print('</code>')</code>")
+
+
+def test_xml_adapter_escapes_non_str_output_fields():
+    # Regression: escaping was gated on `field.info.annotation is str`, so output fields
+    # with `str | None` or `dspy.Code` annotations (and any other non-`str` plain-text
+    # output) embedded raw `<`/`&` into demos, producing malformed XML.
+    class StrNoneOut(dspy.Signature):
+        note: str | None = dspy.OutputField()
+
+    class CodeOut(dspy.Signature):
+        code: dspy.Code = dspy.OutputField()
+
+    adapter = XMLAdapter()
+
+    # `str | None` output: rendered block escapes `<`/`&`, is well-formed XML, round-trips.
+    value = "1 < 2 & 3 > 0"
+    str_none_field = FieldInfoWithName(name="note", info=StrNoneOut.output_fields["note"])
+    formatted = adapter.format_field_with_value({str_none_field: value})
+    assert formatted == "<note>\n1 &lt; 2 &amp; 3 > 0\n</note>"
+    assert adapter.parse(StrNoneOut, formatted) == {"note": value}
+    ET.fromstring(f"<root>{formatted}</root>")
+
+    # `dspy.Code` output: rendered block escapes `<`/`&`, is well-formed XML, round-trips.
+    code_value = "if 1 < 2:\n    print('a & b')"
+    code_field = FieldInfoWithName(name="code", info=CodeOut.output_fields["code"])
+    formatted_code = adapter.format_field_with_value({code_field: dspy.Code(code=code_value)})
+    assert formatted_code == "<code>\nif 1 &lt; 2:\n    print('a &amp; b')\n</code>"
+    assert adapter.parse(CodeOut, formatted_code) == {"code": dspy.Code(code=code_value)}
+    ET.fromstring(f"<root>{formatted_code}</root>")
+
+
+def test_xml_adapter_does_not_escape_input_fields_with_special_chars():
+    # Escaping now covers every plain-text OUTPUT field; INPUT fields are intentionally
+    # left unescaped (out of scope for this fix), so existing input rendering is unchanged.
+    class Sig(dspy.Signature):
+        context: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    adapter = XMLAdapter()
+    context_field = FieldInfoWithName(name="context", info=Sig.input_fields["context"])
+    formatted = adapter.format_field_with_value({context_field: "a < b & c > d"})
+    assert formatted == "<context>\na < b & c > d\n</context>"
 
 
 def test_xml_adapter_format_and_parse_nested_model():

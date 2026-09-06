@@ -384,6 +384,8 @@ def test_reasoning_model_token_parameter():
         ("openai/gpt-5", True),
         ("openai/gpt-5-mini", True),
         ("openai/gpt-5-nano", True),
+        ("azure/o3", True),  # non-openai/ provider prefix must be classified as reasoning too
+        ("azure/gpt-5", True),
         ("azure/gpt-5-chat", False),  # gpt-5-chat is NOT a reasoning model
         ("openai/gpt-4", False),
         ("anthropic/claude-2", False),
@@ -410,7 +412,7 @@ def test_lm_supports_reasoning_with_litellm_capability_api():
     assert lm.supports_reasoning is True
 
 
-@pytest.mark.parametrize("model_name", ["openai/o1", "openai/gpt-5-nano", "openai/gpt-5-mini"])
+@pytest.mark.parametrize("model_name", ["openai/o1", "openai/gpt-5-nano", "openai/gpt-5-mini", "azure/o3"])
 def test_reasoning_model_requirements(model_name):
     # Should raise assertion error if temperature or max_tokens requirements not met
     with pytest.raises(
@@ -452,6 +454,78 @@ def test_gpt_5_chat_not_reasoning_model():
     assert "max_tokens" in lm.kwargs
     assert lm.kwargs["max_tokens"] == 1000
     assert lm.kwargs["temperature"] == 0.7
+
+
+def test_is_openai_reasoning_model_is_shared_single_source_of_truth():
+    """Guard against the two-module drift that caused the azure/o3 bug.
+
+    `dspy.clients.lm` and `dspy.clients.openai_format` must use the *same*
+    classifier object from the shared `_openai_model_family` module; a naive
+    re-copy would reintroduce the prefix-strip / grammar divergence.
+    """
+    from dspy.clients import lm as lm_mod
+    from dspy.clients import openai_format as openai_format_mod
+    from dspy.clients._openai_model_family import is_openai_reasoning_model
+
+    assert lm_mod.is_openai_reasoning_model is is_openai_reasoning_model
+    assert openai_format_mod.is_openai_reasoning_model is is_openai_reasoning_model
+
+
+@pytest.mark.parametrize(
+    "model, expected",
+    [
+        # Any LiteLLM provider prefix is stripped; the bare suffix decides the family.
+        ("openai/o3", True),
+        ("azure/o3", True),
+        ("o3", True),
+        ("azure/o1", True),
+        ("azure/o3-mini-2023-01-01", True),
+        ("azure/gpt-5", True),
+        ("azure/gpt-5-mini", True),
+        ("azure/gpt-5-nano", True),
+        # o5 is matched by the anchored regex (o[1345]); the old loose `startswith`
+        # in openai_format.py did NOT list o5, so this guards against a naive revert.
+        ("openai/o5", True),
+        ("azure/o5", True),
+        # gpt-5-chat is excluded by the grammar's (?!-chat) negative lookahead.
+        ("azure/gpt-5-chat", False),
+        ("openai/gpt-4", False),
+        ("anthropic/claude-2", False),
+        # Strict anchored grammar rejects loose `startswith` matches; a naive
+        # prefix-only fix would have accepted these and re-diverged from lm.py.
+        ("azure/o3-preview", False),
+        ("azure/o1-mini-pro", False),
+        # The adapter path may pass a missing model; non-strings are non-reasoning.
+        (None, False),
+    ],
+)
+def test_is_openai_reasoning_model_parses_provider_prefixes_and_grammar(model, expected):
+    from dspy.clients._openai_model_family import is_openai_reasoning_model
+
+    assert is_openai_reasoning_model(model) is expected
+
+
+@pytest.mark.parametrize("model", ["azure/o3", "openai/o3"])
+def test_adapter_path_reasoning_model_uses_max_completion_tokens(model):
+    """Regression: the adapter path (`dspy.Predict`) routes through
+    `dspy.clients.openai_format.common_config_kwargs`, whose classifier used to
+    only strip the literal `openai/` prefix and misclassified `azure/o3` as
+    non-reasoning. The token limit set as a Predictor generation kwarg must be
+    sent under `max_completion_tokens` (not `max_tokens`) for any provider prefix.
+    """
+    captured = {}
+
+    def fake_completion(request=None, num_retries=0, cache=None, **kw):
+        captured.update(request)
+        return _model_response('{"answer": "42"}')
+
+    lm = dspy.LM(model, temperature=None, cache=False)
+    pred = dspy.Predict("question -> answer", max_tokens=16_000, reasoning_effort="medium")
+    with mock.patch("dspy.clients.lm.litellm_completion", side_effect=fake_completion):
+        pred(question="hi", lm=lm)
+
+    assert captured["max_completion_tokens"] == 16_000
+    assert "max_tokens" not in captured
 
 
 def test_base_lm_init_uses_lm_defaults_and_isolates_callback_list():

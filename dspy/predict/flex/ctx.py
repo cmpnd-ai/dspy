@@ -30,6 +30,8 @@ class FlexContext:
                     f"Tool name {name!r} is reserved: 'dspy' and names starting with '_dspy' belong "
                     f"to the dspy.Flex sandbox. Rename it, e.g. `dspy.Tool(func, name='my_tool')`."
                 )
+            if name in out:
+                raise ValueError(f"Duplicate tool name '{name}'")
             out[name] = tool
         return out
 

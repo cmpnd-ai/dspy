@@ -73,6 +73,46 @@ def test_reserved_bridge_tool_names_are_rejected() -> None:
             Flex(Echo, tools=[dspy.Tool(shout, name=reserved)], interpreter_factory=lambda: MockInterpreter())
 
 
+def test_duplicate_tool_names_rejected() -> None:
+    # Two distinct dspy.Tool instances sharing an explicit name must be rejected at construction
+    # (mirroring dspy.RLM._normalize_tools), not silently kept last-wins. The raise fires during
+    # Flex.__init__ -> _baseline_src -> context_names, before any interpreter is created or any
+    # forward runs, so the bug (an earlier tool silently dropped from the sandbox namespace and
+    # the baseline emitted into module_src) surfaces immediately.
+    def first(text: str) -> str:
+        return text.upper()
+
+    def second(text: str) -> str:
+        return text[::-1]
+
+    with pytest.raises(ValueError, match="Duplicate tool name 'lookup'"):
+        Flex(
+            Echo,
+            tools=[dspy.Tool(first, name="lookup"), dspy.Tool(second, name="lookup")],
+            interpreter_factory=lambda: MockInterpreter(),
+        )
+
+
+def test_unique_tool_names_are_accepted() -> None:
+    # Regression guard: distinct tool names still construct, the baseline emits both names, and
+    # context_names returns both tools (the duplicate check must not over-reject valid input).
+    def first(text: str) -> str:
+        return text.upper()
+
+    def second(text: str) -> str:
+        return text[::-1]
+
+    program = Flex(
+        Echo,
+        tools=[dspy.Tool(first, name="upper"), dspy.Tool(second, name="reverse")],
+        interpreter_factory=lambda: MockInterpreter(),
+    )
+    names = program._flex_ctx.context_names()
+    assert set(names) == {"upper", "reverse"}
+    assert "dspy.RLM(" in program.module_src
+    assert "upper" in program.module_src and "reverse" in program.module_src
+
+
 def test_baseline_is_predict_without_tools() -> None:
     # Without tools, the baseline is a single dspy.Predict (no RLM, no tools arg).
     src = Flex(Echo, interpreter_factory=lambda: MockInterpreter()).module_src

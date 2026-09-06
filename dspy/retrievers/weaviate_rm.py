@@ -1,4 +1,3 @@
-
 import dspy
 from dspy.dsp.utils import dotdict
 from dspy.primitives.prediction import Prediction
@@ -88,17 +87,15 @@ class WeaviateRM(dspy.Retrieve):
         tenant = kwargs.pop("tenant_id", self._tenant_id)
         for query in queries:
             if self._client_type == "WeaviateClient":
-                if tenant:
-                    results = self._weaviate_collection.query.with_tenant(tenant).hybrid(query=query, limit=k, **kwargs)
-                else:
-                    results = self._weaviate_collection.query.hybrid(query=query, limit=k, **kwargs)
+                collection = self._weaviate_collection.with_tenant(tenant) if tenant else self._weaviate_collection
+                results = collection.query.hybrid(query=query, limit=k, **kwargs)
 
                 parsed_results = [result.properties[self._weaviate_collection_text_key] for result in results.objects]
 
             elif self._client_type == "Client":
                 q = self._weaviate_client.query.get(
-                        self._weaviate_collection_name, [self._weaviate_collection_text_key]
-                    )
+                    self._weaviate_collection_name, [self._weaviate_collection_text_key]
+                )
                 if tenant:
                     q = q.with_tenant(tenant)
                 results = q.with_hybrid(query=query).with_limit(k).do()
@@ -115,13 +112,13 @@ class WeaviateRM(dspy.Retrieve):
         if self._client_type == "WeaviateClient":
             objects = []
             counter = 0
-            for item in self._weaviate_collection.iterator(): # TODO: add tenancy scoping
+            for item in self._weaviate_collection.iterator():  # TODO: add tenancy scoping
                 if counter >= num_samples:
                     break
                 new_object = {}
                 for key in item.properties.keys():
                     if key in fields:
-                      new_object[key] = item.properties[key]
+                        new_object[key] = item.properties[key]
                 objects.append(new_object)
                 counter += 1
             return objects
@@ -131,8 +128,7 @@ class WeaviateRM(dspy.Retrieve):
     def insert(self, new_object_properties: dict):
         if self._client_type == "WeaviateClient":
             self._weaviate_collection.data.insert(
-                properties=new_object_properties,
-                uuid=get_valid_uuid(uuid4())
-            ) # TODO: add tenancy scoping
+                properties=new_object_properties, uuid=get_valid_uuid(uuid4())
+            )  # TODO: add tenancy scoping
         else:
             raise AttributeError("`insert` is not supported for the v3 Weaviate Python client, please upgrade to v4.")

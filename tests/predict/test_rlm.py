@@ -6,6 +6,7 @@ Test organization:
 - Integration tests (@pytest.mark.deno): PythonInterpreter with Deno
 """
 
+import asyncio
 import base64
 from contextlib import contextmanager
 from pathlib import Path
@@ -1488,6 +1489,46 @@ class TestRLMWithDummyLM:
         assert received[0][0].value == 3
         assert received[0][1] == 2
         assert callback_events == [("start", tool), ("end", 6, None)]
+
+    @pytest.mark.asyncio
+    async def test_aforward_async_tool_e2e(self, pooled_interpreter):
+        """aforward() + an async dspy.Tool invoked via a sandbox tool_call round-trip.
+
+        This is the combination that regressed: ``aforward`` runs
+        ``repl.execute()`` while the host event loop is running, so when the
+        sandbox requests the async tool the host reaches ``_await_in_sync``
+        on a live loop. The tool must resolve and the LM must receive its
+        result (previously crashed with ``RuntimeError: This event loop is
+        already running`` and leaked the coroutine).
+        """
+        from pydantic import BaseModel
+
+        class Payload(BaseModel):
+            value: int
+
+        received = []
+
+        async def score(payload: Payload, factor: int = 2):
+            received.append((payload, factor))
+            await asyncio.sleep(0)
+            return payload.value * factor
+
+        tool = Tool(score, name="score_payload")
+        rlm = RLM("query -> answer: int", max_iters=1, tools=[tool])
+
+        with dummy_lm_context([
+            {
+                "reasoning": "Call the tool",
+                "code": 'result = score_payload({"value": 3})\nSUBMIT(result)',
+            },
+        ]):
+            result = await rlm.aforward(pooled_interpreter, query="test")
+
+        assert result.answer == 6
+        assert len(received) == 1
+        assert isinstance(received[0][0], Payload)
+        assert received[0][0].value == 3
+        assert received[0][1] == 2
 
     @pytest.mark.asyncio
     async def test_aforward_simple_computation_e2e(self):

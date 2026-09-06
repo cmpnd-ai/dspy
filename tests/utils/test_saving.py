@@ -133,6 +133,54 @@ def test_load_with_version_mismatch(tmp_path):
         logger.removeHandler(handler)
 
 
+def test_load_with_unknown_dependency_key(tmp_path):
+    from dspy.utils.saving import logger
+
+    # Saved metadata tracks an extra dependency the loading environment does not know about.
+    save_versions = {"python": "3.10", "dspy": "2.5.0", "cloudpickle": "2.0", "numpy": "1.26.0"}
+
+    # Loading environment tracks the standard three keys only (numpy absent).
+    load_versions = {"python": "3.10", "dspy": "2.5.0", "cloudpickle": "2.0"}
+
+    predict = dspy.Predict("question->answer")
+
+    class ListHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    handler = ListHandler()
+    original_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+
+    try:
+        # Mock version during save (with the extra numpy key)
+        with patch("dspy.primitives.base_module.get_dependency_versions", return_value=save_versions):
+            predict.save(tmp_path, save_program=True)
+
+        # Mock version during load (without the numpy key) — previously raised KeyError
+        with patch("dspy.utils.saving.get_dependency_versions", return_value=load_versions):
+            loaded_predict = dspy.load(tmp_path, allow_pickle=True)
+
+        # Exactly one warning: the untracked numpy key. The known keys match, so no mismatch warnings.
+        assert len(handler.messages) == 1
+        assert "numpy" in handler.messages[0]
+        assert "not tracked" in handler.messages[0]
+
+        # Verify the model still loads correctly despite the unknown dependency key
+        assert isinstance(loaded_predict, dspy.Predict)
+        assert predict.signature == loaded_predict.signature
+
+    finally:
+        # Clean up: restore original level and remove handler
+        logger.setLevel(original_level)
+        logger.removeHandler(handler)
+
+
 def test_pickle_loading_requires_explicit_permission(tmp_path):
     """Test that loading pickle files requires explicit permission."""
     predict = dspy.Predict("question->answer")

@@ -49,12 +49,19 @@ def load(path: str, allow_pickle: bool = False) -> "Module":
     dependency_versions = get_dependency_versions()
     saved_dependency_versions = metadata["dependency_versions"]
     for key, saved_version in saved_dependency_versions.items():
-        if dependency_versions[key] != saved_version:
+        current_version = dependency_versions.get(key)
+        if current_version is None:
+            logger.warning(
+                f"Saved model references dependency '{key}' (saved version {saved_version}) that is not tracked in the "
+                "current environment. This might cause errors or performance downgrade on the loaded model."
+            )
+            continue
+        if current_version != saved_version:
             logger.warning(
                 f"There is a mismatch of {key} version between saved model and current environment. You saved with "
-                f"`{key}=={saved_version}`, but now you have `{key}=={dependency_versions[key]}`. This might cause "
-                "errors or performance downgrade on the loaded model, please consider loading the model in the same "
-                "environment as the saving environment."
+                f"`{key}=={saved_version}`, but now you have `{key}=={current_version}`. This might cause errors or "
+                "performance downgrade on the loaded model, please consider loading the model in the same environment "
+                "as the saving environment."
             )
 
     with open(path / "program.pkl", "rb") as f:

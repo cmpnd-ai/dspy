@@ -245,6 +245,59 @@ def test_load_with_version_mismatch(tmp_path):
         logger.removeHandler(handler)
 
 
+def test_json_load_with_unknown_dependency_key(tmp_path):
+    from dspy.primitives.base_module import logger
+
+    # Saved metadata tracks an extra dependency the loading environment does not know about.
+    save_versions = {"python": "3.10", "dspy": "2.5.0", "cloudpickle": "2.0", "numpy": "1.26.0"}
+
+    # Loading environment tracks the standard three keys only (numpy absent).
+    load_versions = {"python": "3.10", "dspy": "2.5.0", "cloudpickle": "2.0"}
+
+    predict = dspy.Predict("question->answer")
+
+    class ListHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    handler = ListHandler()
+    original_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+
+    try:
+        save_path = tmp_path / "program.json"
+        # Mock version during save (with the extra numpy key)
+        with patch("dspy.primitives.base_module.get_dependency_versions", return_value=save_versions):
+            predict.save(save_path)
+
+        # Mock version during load (without the numpy key) — previously raised KeyError.
+        # JSON path requires no `allow_pickle=True`.
+        with patch("dspy.primitives.base_module.get_dependency_versions", return_value=load_versions):
+            loaded_predict = dspy.Predict("question->answer")
+            loaded_predict.load(save_path)
+
+        # Exactly one warning: the untracked numpy key. The known keys match, so no mismatch warnings.
+        # The JSON path logs no pickle warning, unlike the .pkl path.
+        assert len(handler.messages) == 1
+        assert "numpy" in handler.messages[0]
+        assert "not tracked" in handler.messages[0]
+
+        # Verify the model still loads correctly despite the unknown dependency key
+        assert isinstance(loaded_predict, dspy.Predict)
+        assert str(predict.signature) == str(loaded_predict.signature)
+        assert loaded_predict.dump_state() == predict.dump_state()
+
+    finally:
+        # Clean up: restore original level and remove handler
+        logger.setLevel(original_level)
+        logger.removeHandler(handler)
+
+
 @pytest.mark.llm_call
 def test_single_module_call_with_usage_tracker(lm_for_test):
     dspy.configure(lm=dspy.LM(lm_for_test, cache=False, temperature=0.0), track_usage=True)

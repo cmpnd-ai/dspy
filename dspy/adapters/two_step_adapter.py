@@ -4,8 +4,8 @@ import json_repair
 
 from dspy.adapters.base import Adapter
 from dspy.adapters.chat_adapter import ChatAdapter
-from dspy.adapters.types import ToolCalls
-from dspy.adapters.utils import get_field_description_string
+from dspy.adapters.types import ToolCalls, Type
+from dspy.adapters.utils import apply_output_field_defaults, get_field_description_string
 from dspy.clients.base_lm import BaseLM
 from dspy.signatures.field import InputField
 from dspy.signatures.signature import Signature, make_signature
@@ -119,11 +119,12 @@ class TwoStepAdapter(Adapter):
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        inputs = self.format(signature, demos, inputs)
+        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
+        inputs = self.format(processed_signature, demos, inputs)
 
         outputs = await lm.acall(messages=inputs, **lm_kwargs)
-        # The signature is supposed to be "text -> {original output fields}"
-        extractor_signature = self._create_extractor_signature(signature)
+        # The signature is supposed to be "text -> {processed output fields}"
+        extractor_signature = self._create_extractor_signature(processed_signature)
 
         values = []
 
@@ -168,6 +169,20 @@ class TwoStepAdapter(Adapter):
                     for v in tool_calls
                 ]
                 value[tool_call_output_field_name] = ToolCalls.from_dict_list(tool_calls)
+
+            value = apply_output_field_defaults(signature, value)
+            for field_name in signature.output_fields:
+                value.setdefault(field_name, None)
+
+            for name, field in signature.output_fields.items():
+                if (
+                    isinstance(field.annotation, type)
+                    and field.annotation in self.native_response_types
+                    and issubclass(field.annotation, Type)
+                ):
+                    parsed_value = field.annotation.parse_lm_response(output)
+                    if parsed_value is not None:
+                        value[name] = parsed_value
 
             if output_logprobs is not None:
                 value["logprobs"] = output_logprobs

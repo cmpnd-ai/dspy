@@ -195,3 +195,57 @@ def test_none_returning_tasks_are_counted_as_complete(num_threads):
 
     assert results == [None] * len(data)
     assert update_progress.call_args == mock.call(mock.ANY, len(data), len(data))
+
+
+def test_straggler_resubmits_at_most_once_per_item():
+    """A slow-but-completing item is invoked at most twice (1 original + 1 resubmit)."""
+    counter = {}
+    lock = threading.Lock()
+
+    def f(i):
+        with lock:
+            counter[i] = counter.get(i, 0) + 1
+        time.sleep(5 if i == 0 else 0.05)
+        return i
+
+    ex = ParallelExecutor(num_threads=4, timeout=1, disable_progress_bar=True, max_errors=999)
+    ex.execute(f, [0, 1, 2, 3])
+
+    assert counter[0] == 2, f"expected original + 1 resubmit, got {counter[0]}"
+
+
+def test_straggler_resubmits_at_most_once_multiple_slow_items():
+    """Each slow item is resubmitted at most once, independently."""
+    counter = {}
+    lock = threading.Lock()
+
+    def f(i):
+        with lock:
+            counter[i] = counter.get(i, 0) + 1
+        time.sleep(5 if i in (0, 1) else 0.05)
+        return i
+
+    ex = ParallelExecutor(num_threads=4, timeout=1, disable_progress_bar=True, max_errors=999)
+    ex.execute(f, [0, 1, 2, 3])
+
+    assert counter.get(0) == 2, f"expected 2 for item 0, got {counter.get(0)}"
+    assert counter.get(1) == 2, f"expected 2 for item 1, got {counter.get(1)}"
+    assert counter.get(2) == 1
+    assert counter.get(3) == 1
+
+
+def test_high_straggler_limit_no_extra_resubmit():
+    """A high straggler_limit does not amplify resubmissions beyond one per item."""
+    counter = {}
+    lock = threading.Lock()
+
+    def f(i):
+        with lock:
+            counter[i] = counter.get(i, 0) + 1
+        time.sleep(5 if i == 0 else 0.05)
+        return i
+
+    ex = ParallelExecutor(num_threads=8, timeout=1, straggler_limit=10, disable_progress_bar=True, max_errors=999)
+    ex.execute(f, [0, 1, 2, 3])
+
+    assert counter.get(0) == 2, f"expected 2 for item 0, got {counter.get(0)}"

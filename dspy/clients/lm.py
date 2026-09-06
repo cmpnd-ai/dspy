@@ -409,7 +409,7 @@ class LM(BaseLM):
         the copied LM matches what ``LM.__init__`` would have produced for the
         same ``max_tokens`` value and the override survives ``dump_state()``.
         """
-        if "max_tokens" in kwargs and _is_openai_reasoning_model(self.model):
+        if "max_tokens" in kwargs and _is_openai_reasoning_model(kwargs.get("model", self.model)):
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         return super().copy(**kwargs)
 

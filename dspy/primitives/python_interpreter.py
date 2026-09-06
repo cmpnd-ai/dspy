@@ -164,14 +164,57 @@ def _jsonrpc_error(code: int, message: str, id: int | str, data: dict | None = N
     return json.dumps({"jsonrpc": "2.0", "error": err, "id": id})
 
 
+def _run_coroutine_in_thread(coroutine: Any) -> Any:
+    """Drive a coroutine on a fresh event loop in a worker thread, blocking until it finishes.
+
+    Used when the current thread's event loop is already running and therefore
+    cannot be re-entered with ``loop.run_until_complete`` (CPython raises
+    ``RuntimeError: This event loop is already running``). The coroutine runs
+    on an independent event loop in a worker thread so the host loop is never
+    re-entered; the calling thread blocks on ``join()`` until the coroutine
+    completes. ``run_until_complete`` consumes (and closes) the coroutine on
+    both success and failure, so it is never left un-awaited.
+    """
+    outcome: dict[str, Any] = {}
+
+    def runner() -> None:
+        new_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(new_loop)
+            outcome["value"] = new_loop.run_until_complete(coroutine)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            new_loop.close()
+
+    worker = threading.Thread(target=runner, name="dspy-await-in-sync", daemon=True)
+    worker.start()
+    worker.join()
+
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
 def _await_in_sync(coroutine: Any) -> Any:
-    """Run a coroutine to completion from a sync caller."""
+    """Run a coroutine to completion from a sync caller.
+
+    When no event loop is running, the coroutine is driven with ``asyncio.run``.
+    When the current thread's loop is already running (e.g. ``RLM.aforward`` runs
+    ``repl.execute()`` from inside a live loop), that loop cannot be re-entered
+    with ``run_until_complete``, so the coroutine is driven on a separate event
+    loop in a worker thread and the caller blocks until it finishes. This keeps
+    async ``dspy.Tool`` invocations from sandbox code working under both the
+    sync ``forward()`` and async ``aforward()`` entrypoints.
+    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop is None:
         return asyncio.run(coroutine)
+    if loop.is_running():
+        return _run_coroutine_in_thread(coroutine)
     return loop.run_until_complete(coroutine)
 
 

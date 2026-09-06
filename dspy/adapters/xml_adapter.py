@@ -30,7 +30,7 @@ class XMLAdapter(ChatAdapter):
                 output.append(self._value_to_xml(serialized, field.name))
                 continue
             formatted = format_field_value(field_info=field.info, value=value)
-            if is_output and field.info.annotation is str:
+            if is_output:
                 formatted = formatted.replace("&", "&amp;").replace("<", "&lt;")
             output.append(f"<{field.name}>\n{formatted}\n</{field.name}>")
         return "\n\n".join(output).strip()

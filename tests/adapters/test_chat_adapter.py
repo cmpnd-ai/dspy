@@ -2081,6 +2081,86 @@ def test_chat_adapter_exception_raised_on_failure():
         adapter.parse(signature, invalid_completion)
 
 
+@pytest.mark.parametrize(
+    "indent",
+    ["", "   ", "\t"],
+    ids=["0", "3spaces", "tab"],
+)
+@pytest.mark.parametrize(
+    "signature, value, expected",
+    [
+        (dspy.make_signature("question->answer"), "42", "42"),
+        (dspy.make_signature("question->answer:int"), "42", 42),
+        (dspy.make_signature("question->answer:list[str]"), '["a", "b"]', ["a", "b"]),
+        (dspy.make_signature("question->answer:float"), "3.5", 3.5),
+    ],
+    ids=["str", "int", "list_str", "float"],
+)
+def test_chat_adapter_parse_tolerates_indented_field_headers(indent, signature, value, expected):
+    """Indented `[[ ## field ## ]]` headers must parse identically to column-0 headers.
+
+    The regex match runs against ``line.strip()``, so the residual-content slice
+    must come from the stripped line too (not the original ``line``); otherwise the
+    closing tokens of an indented header leak into the field value.
+    """
+    adapter = dspy.ChatAdapter()
+    completion = f"{indent}[[ ## answer ## ]]\n{value}\n\n[[ ## completed ## ]]\n"
+    assert adapter.parse(signature, completion) == {"answer": expected}
+
+
+def test_chat_adapter_parse_indented_header_with_inline_content():
+    """The 'header + content on the same line' feature must work for indented headers too."""
+    adapter = dspy.ChatAdapter()
+    signature = dspy.make_signature("question->answer")
+
+    assert adapter.parse(signature, "[[ ## answer ## ]] hello world") == {"answer": "hello world"}
+    assert adapter.parse(signature, "  [[ ## answer ## ]] hello world") == {"answer": "hello world"}
+    assert adapter.parse(signature, "\t[[ ## answer ## ]] hello world") == {"answer": "hello world"}
+
+
+def test_chat_adapter_parse_indented_header_preserves_indented_body():
+    """A multi-line body's internal indentation must be preserved for both column-0
+    and indented headers, and both must yield exactly the same value (the section
+    join's outer ``.strip()`` is unchanged)."""
+    adapter = dspy.ChatAdapter()
+    signature = dspy.make_signature("question->code:str")
+
+    col0 = "[[ ## code ## ]]\n    def f():\n        return 1\n\n[[ ## completed ## ]]\n"
+    indented = "   [[ ## code ## ]]\n    def f():\n        return 1\n\n[[ ## completed ## ]]\n"
+
+    col0_result = adapter.parse(signature, col0)
+    indented_result = adapter.parse(signature, indented)
+
+    # Internal indentation on subsequent body lines is preserved; the outer
+    # leading whitespace of the section is stripped by the existing ``"".join().strip()``.
+    expected_body = "def f():\n        return 1"
+    assert col0_result == {"code": expected_body}
+    assert indented_result == {"code": expected_body}
+    assert col0_result == indented_result
+
+
+def test_chat_adapter_call_parses_indented_header_without_fallback():
+    """End-to-end: an LM returning an indented header must produce the correct value
+    without raising and without invoking the JSONAdapter fallback."""
+    adapter = dspy.ChatAdapter()
+    signature = dspy.make_signature("question->answer")
+
+    completion = "Question goes here\n\n   [[ ## answer ## ]]\n42\n\n[[ ## completed ## ]]\n"
+    with (
+        mock.patch("litellm.completion") as mock_completion,
+        mock.patch("dspy.adapters.json_adapter.JSONAdapter.__call__") as mock_json_adapter_call,
+    ):
+        mock_completion.return_value = ModelResponse(
+            choices=[Choices(message=Message(content=completion))],
+            model="openai/gpt-4o-mini",
+        )
+        lm = dspy.LM("openai/gpt-4o-mini", cache=False)
+        result = adapter(lm, {}, signature, [], {"question": "Question goes here"})
+
+    assert result == [{"answer": "42"}]
+    mock_json_adapter_call.assert_not_called()
+
+
 def test_chat_adapter_formats_image():
     # Test basic image formatting
     image = dspy.Image(url="https://example.com/image.jpg")

@@ -7,10 +7,7 @@ from typing import Any, Callable
 
 class Unbatchify:
     def __init__(
-        self,
-        batch_fn: Callable[[list[Any]], list[Any]],
-        max_batch_size: int = 32,
-        max_wait_time: float = 0.1
+        self, batch_fn: Callable[[list[Any]], list[Any]], max_batch_size: int = 32, max_wait_time: float = 0.1
     ):
         """
         Initializes the Unbatchify.
@@ -68,6 +65,8 @@ class Unbatchify:
             if batch:
                 try:
                     outputs = self.batch_fn(batch)
+                    if len(outputs) != len(futures):
+                        raise ValueError(f"batch_fn returned {len(outputs)} outputs for {len(futures)} inputs")
                     for output, future in zip(outputs, futures, strict=False):
                         future.set_result(output)
                 except Exception as e:

@@ -168,3 +168,34 @@ def test_validation_set_usage():
 
     # Check that validation examples are part of student's demos after compilation
     assert len(compiled_student.predictor.demos) >= len(valset), "Validation set not used in compiled student demos"
+
+
+def test_bootstrap_rejects_type_mismatched_signatures():
+    """Regression: BootstrapFewShot's student/teacher signature guard must
+    reject teacher/student pairs whose signatures differ only by field type.
+
+    The guard in `_prepare_predictor_mappings` asserts
+    `predictor1.signature.equals(predictor2.signature)`. Before the fix
+    `Signature.equals` did not compare annotations, so a teacher with
+    `answer: str` and a student with `answer: int` (identical DSPy metadata)
+    slipped past the guard.
+    """
+
+    class StudentSig(dspy.Signature):
+        question: str = dspy.InputField()
+        answer: int = dspy.OutputField()
+
+    class TeacherSig(dspy.Signature):
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    student = SimpleModule(StudentSig)
+    teacher = SimpleModule(TeacherSig)
+
+    lm = DummyLM(["Finish[blue]"])
+    dspy.configure(lm=lm)
+
+    bootstrap = BootstrapFewShot(metric=simple_metric, max_bootstrapped_demos=0, max_labeled_demos=0)
+
+    with pytest.raises(AssertionError, match="Student and teacher must have the same signatures"):
+        bootstrap.compile(student, teacher=teacher, trainset=trainset)

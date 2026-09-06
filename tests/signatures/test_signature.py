@@ -1,6 +1,6 @@
 import pickle
 from types import UnionType
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import cloudpickle
 import pydantic
@@ -158,6 +158,68 @@ def test_equality_format():
         output = OutputField()
 
     assert TestSignature.equals(TestSignature)
+
+
+def test_equality_ignoring_types_regression():
+    """Regression: equals must compare field annotations (the JSON schema's `type`).
+
+    Two signatures that differ only by a field's annotation must NOT be equal,
+    even when their `json_schema_extra` (DSPy metadata: prefix, desc,
+    `__dspy_field_type`) is byte-identical. Before the fix, `equals` only
+    compared `json_schema_extra` and silently reported these as equal.
+    """
+
+    class StudentSig(Signature):
+        question: str = InputField()
+        answer: int = OutputField()
+
+    class TeacherSig(Signature):
+        question: str = InputField()
+        answer: str = OutputField()
+
+    # The DSPy metadata is identical for both `answer` fields, so before the
+    # fix the only signal that could distinguish them was the annotation,
+    # which `equals` did not inspect.
+    assert StudentSig.fields["answer"].json_schema_extra == TeacherSig.fields["answer"].json_schema_extra
+    assert StudentSig.fields["answer"].annotation != TeacherSig.fields["answer"].annotation
+
+    assert not StudentSig.equals(TeacherSig)
+    # Symmetry must hold.
+    assert not TeacherSig.equals(StudentSig)
+    # Reflexivity must hold.
+    assert StudentSig.equals(StudentSig)
+    assert TeacherSig.equals(TeacherSig)
+
+
+@pytest.mark.parametrize(
+    ("type_a", "type_b", "expected_equal"),
+    [
+        (str, str, True),
+        (str, int, False),
+        (int, int, True),
+        (list[str], list[str], True),
+        (list[str], list[int], False),
+        (dict[str, int], dict[str, int], True),
+        (dict[str, int], dict[str, str], False),
+        (Optional[int], Optional[int], True),
+        (Optional[int], Optional[str], False),
+        (Union[str, int], Union[str, int], True),
+        (Union[str, int], Union[str, float], False),
+        (Literal["a", "b"], Literal["a", "b"], True),
+        (Literal["a", "b"], Literal["a", "c"], False),
+        (dspy.Image, dspy.Image, True),
+        (dspy.Image, str, False),
+    ],
+)
+def test_equality_annotation_matrix(type_a, type_b, expected_equal):
+    class SigA(Signature):
+        field: type_a = InputField()  # type: ignore[valid-type]
+
+    class SigB(Signature):
+        field: type_b = InputField()  # type: ignore[valid-type]
+
+    assert SigA.equals(SigB) is expected_equal
+    assert SigB.equals(SigA) is expected_equal
 
 
 def test_signature_reverse():

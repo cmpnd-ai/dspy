@@ -508,13 +508,20 @@ class Signature(BaseModel, metaclass=SignatureMeta):
 
     @classmethod
     def equals(cls, other) -> bool:
-        """Compare the JSON schema of two Signature classes."""
+        """Compare the JSON schema of two Signature classes.
+
+        Two signatures are equal when their instructions, field names, field
+        annotations (i.e. the JSON schema's ``type``), and per-field DSPy
+        metadata (``json_schema_extra``) all match.
+        """
         if not isinstance(other, type) or not issubclass(other, BaseModel):
             return False
         if cls.instructions != other.instructions:
             return False
         for name in cls.fields.keys() | other.fields.keys():
             if name not in other.fields or name not in cls.fields:
+                return False
+            if cls.fields[name].annotation != other.fields[name].annotation:
                 return False
             if cls.fields[name].json_schema_extra != other.fields[name].json_schema_extra:
                 return False

@@ -1,7 +1,6 @@
 import functools
 import logging
 import os
-import re
 import threading
 import warnings
 from typing import Any, Literal, cast
@@ -11,6 +10,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 import dspy
 from dspy.clients._litellm import get_litellm, is_litellm_context_window_error
+from dspy.clients._openai_model_family import is_openai_reasoning_model
 from dspy.clients.cache import request_cache
 from dspy.clients.openai import OpenAIProvider
 from dspy.clients.openai_format import to_openai_responses_request
@@ -43,14 +43,6 @@ logger = logging.getLogger(__name__)
 
 def _get_litellm():
     return get_litellm(feature="dspy.LM")
-
-
-def _is_openai_reasoning_model(model: str) -> bool:
-    model_family = model.split("/")[-1].lower() if "/" in model else model.lower()
-    return re.match(
-        r"^(?:o[1345](?:-(?:mini|nano|pro))?(?:-\d{4}-\d{2}-\d{2})?|gpt-5(?!-chat)(?:-.*)?)$",
-        model_family,
-    ) is not None
 
 
 class LM(BaseLM):
@@ -122,7 +114,7 @@ class LM(BaseLM):
 
     def _get_initial_kwargs(self, *, temperature, max_tokens, **kwargs) -> dict[str, Any]:
         # Override BaseLM's default kwargs shape for LiteLLM/model-family-specific token parameters.
-        if _is_openai_reasoning_model(self.model):
+        if is_openai_reasoning_model(self.model):
             if (temperature and temperature != 1.0) or (max_tokens and max_tokens < 16000):
                 raise LMConfigurationError(
                     "OpenAI's reasoning models require passing temperature=1.0 or None and max_tokens >= 16000 or None to "
@@ -418,7 +410,7 @@ class LM(BaseLM):
         )
         if self.use_developer_role:
             state["use_developer_role"] = self.use_developer_role
-        if _is_openai_reasoning_model(self.model) and "max_completion_tokens" in state:
+        if is_openai_reasoning_model(self.model) and "max_completion_tokens" in state:
             state["max_tokens"] = state.pop("max_completion_tokens")
         return state
 
@@ -427,7 +419,7 @@ class LM(BaseLM):
         state = dict(state)
 
         model = state.get("model")
-        if isinstance(model, str) and _is_openai_reasoning_model(model) and "max_completion_tokens" in state:
+        if isinstance(model, str) and is_openai_reasoning_model(model) and "max_completion_tokens" in state:
             if "max_tokens" not in state:
                 state["max_tokens"] = state["max_completion_tokens"]
             state.pop("max_completion_tokens")

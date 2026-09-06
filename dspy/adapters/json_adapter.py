@@ -59,9 +59,16 @@ class JSONAdapter(ChatAdapter):
 
         has_tool_calls = any(field.annotation == ToolCalls for field in signature.output_fields.values())
 
-        if _has_open_ended_mapping(signature) or (not self.use_native_function_calling and has_tool_calls) or not lm.supports_response_schema:
+        # Mirror `base.py:_call_preprocess`: native function calling is only actually active when both the
+        # user-facing flag is set and the LM supports it. When the LM cannot do native function calling,
+        # `base.py` keeps the `ToolCalls` output field in the processed signature so the LM must produce it
+        # as text/JSON; structured output mode does not handle `dspy.ToolCalls` well, so fall back to JSON
+        # mode in that case just as when the flag is disabled.
+        has_native_fc = self.use_native_function_calling and lm.supports_function_calling
+
+        if _has_open_ended_mapping(signature) or (not has_native_fc and has_tool_calls) or not lm.supports_response_schema:
             # We found that structured output mode doesn't work well with dspy.ToolCalls as output field.
-            # So we fall back to json mode if native function calling is disabled and ToolCalls is present.
+            # So we fall back to json mode when native function calling is not active and ToolCalls is present.
             lm_kwargs["response_format"] = {"type": "json_object"}
             return call_fn(lm, lm_kwargs, signature, demos, inputs)
 
@@ -77,10 +84,9 @@ class JSONAdapter(ChatAdapter):
         if result:
             return result
 
+        native_fc_active = self.use_native_function_calling and lm.supports_function_calling
         try:
-            structured_output_model = _get_structured_outputs_response_format(
-                signature, self.use_native_function_calling
-            )
+            structured_output_model = _get_structured_outputs_response_format(signature, native_fc_active)
             lm_kwargs["response_format"] = structured_output_model
             return super().__call__(lm, lm_kwargs, signature, demos, inputs)
         except LMError:
@@ -104,10 +110,9 @@ class JSONAdapter(ChatAdapter):
         if result:
             return await result
 
+        native_fc_active = self.use_native_function_calling and lm.supports_function_calling
         try:
-            structured_output_model = _get_structured_outputs_response_format(
-                signature, self.use_native_function_calling
-            )
+            structured_output_model = _get_structured_outputs_response_format(signature, native_fc_active)
             lm_kwargs["response_format"] = structured_output_model
             return await super().acall(lm, lm_kwargs, signature, demos, inputs)
         except LMError:
@@ -232,7 +237,7 @@ class JSONAdapter(ChatAdapter):
 
 def _get_structured_outputs_response_format(
     signature: SignatureMeta,
-    use_native_function_calling: bool = True,
+    native_fc_active: bool = True,
 ) -> type[pydantic.BaseModel]:
     """
     Builds a Pydantic model from a DSPy signature's output_fields and ensures the generated JSON schema
@@ -254,8 +259,12 @@ def _get_structured_outputs_response_format(
     fields = {}
     for name, field in signature.output_fields.items():
         annotation = field.annotation
-        if use_native_function_calling and annotation == ToolCalls:
-            # Skip ToolCalls field if native function calling is enabled.
+        if native_fc_active and annotation == ToolCalls:
+            # Skip ToolCalls field when native function calling is actually active, since the tool calls are
+            # returned via the LM's native tool-calling mechanism rather than the JSON body. This mirrors
+            # `base.py:_call_preprocess`, which deletes the field from the processed signature only when
+            # `lm.supports_function_calling` holds, so the structured schema and processed signature stay
+            # consistent.
             continue
         default = field.default if hasattr(field, "default") else ...
         fields[name] = (annotation, default)

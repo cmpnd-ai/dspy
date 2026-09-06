@@ -1860,6 +1860,89 @@ async def test_responses_api_with_none_usage_async():
         assert tracker.get_total_tokens() == {}
 
 
+def _truncated_chat_response(model: str, content: str = "Partial") -> ModelResponse:
+    """Build a litellm chat-completion ModelResponse truncated at the token limit (`finish_reason="length"`)."""
+    return ModelResponse(
+        id="chatcmpl-1",
+        model=model,
+        choices=[
+            Choices(
+                index=0,
+                message=Message(role="assistant", content=content),
+                finish_reason="length",
+            ),
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 16000, "total_tokens": 16010},
+    )
+
+
+def test_check_truncation_reasoning_model_chat_warns_and_returns_partial(caplog):
+    """A truncated chat completion for a reasoning model warns and returns the partial result (no KeyError)."""
+    with mock.patch(
+        "dspy.clients.lm.litellm_completion",
+        side_effect=lambda request, num_retries, cache=None: _truncated_chat_response("openai/o3"),
+    ) as mock_completion:
+        mock_completion.__qualname__ = "litellm_completion"
+        lm = dspy.LM("openai/o3", max_tokens=16000, temperature=1.0, cache=False)
+
+        assert lm.model_type == "chat"
+        assert "max_completion_tokens" in lm.kwargs
+        assert "max_tokens" not in lm.kwargs
+
+        caplog.set_level("WARNING", logger="dspy.clients.lm")
+        results = lm.forward(messages=[{"role": "user", "content": "hi"}])
+
+    assert results["choices"][0].finish_reason == "length"
+    assert results["choices"][0].message.content == "Partial"
+    truncation_warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(truncation_warnings) == 1
+    assert "max_tokens=16000" in truncation_warnings[0].message
+
+
+def test_check_truncation_non_reasoning_model_chat_warns_and_returns_partial(caplog):
+    """Regression: a truncated chat completion for a non-reasoning model still warns and returns the partial result."""
+    with mock.patch(
+        "dspy.clients.lm.litellm_completion",
+        side_effect=lambda request, num_retries, cache=None: _truncated_chat_response("openai/gpt-4o"),
+    ) as mock_completion:
+        mock_completion.__qualname__ = "litellm_completion"
+        lm = dspy.LM("openai/gpt-4o", max_tokens=16000, temperature=0.7, cache=False)
+
+        assert lm.model_type == "chat"
+        assert lm.kwargs["max_tokens"] == 16000
+
+        caplog.set_level("WARNING", logger="dspy.clients.lm")
+        results = lm.forward(messages=[{"role": "user", "content": "hi"}])
+
+    assert results["choices"][0].finish_reason == "length"
+    truncation_warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(truncation_warnings) == 1
+    assert "max_tokens=16000" in truncation_warnings[0].message
+
+
+def test_check_truncation_no_warning_when_not_truncated(caplog):
+    """No truncation warning is emitted when `finish_reason` is not `length`."""
+    response = ModelResponse(
+        id="chatcmpl-2",
+        model="openai/gpt-4o",
+        choices=[Choices(index=0, message=Message(role="assistant", content="done"), finish_reason="stop")],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+    with mock.patch(
+        "dspy.clients.lm.litellm_completion",
+        side_effect=lambda request, num_retries, cache=None: response,
+    ) as mock_completion:
+        mock_completion.__qualname__ = "litellm_completion"
+        lm = dspy.LM("openai/gpt-4o", max_tokens=16000, temperature=0.7, cache=False)
+
+        caplog.set_level("WARNING", logger="dspy.clients.lm")
+        results = lm.forward(messages=[{"role": "user", "content": "hi"}])
+
+    assert results["choices"][0].finish_reason == "stop"
+    truncation_warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert truncation_warnings == []
+
+
 @pytest.mark.asyncio
 async def test_streaming_passes_headers_correctly():
     from dspy.clients.lm import _get_stream_completion_fn

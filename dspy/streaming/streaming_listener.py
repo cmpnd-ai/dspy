@@ -80,6 +80,22 @@ class StreamListener:
             },
         }
 
+    def reset(self) -> None:
+        """Reset the run-time state of the listener so it can process a fresh stream.
+
+        This clears the per-stream buffers and flags (start/end/cache) while preserving the
+        listener's configuration (signature field, predictor, and ``allow_reuse``). It is invoked
+        at the start of each ``streamify`` call so that a streamer callable can be invoked
+        multiple times; without it, listeners retain ``stream_end=True`` from the previous call
+        and silently drop all incremental chunks on reuse.
+        """
+        self.stream_start = False
+        self.stream_end = False
+        self.cache_hit = False
+        self.field_start_queue = []
+        self.field_end_queue = Queue()
+        self.json_adapter_state["field_accumulated_messages"] = ""
+
     def _buffered_message_end_with_start_identifier(self, concat_message: str, start_identifier: str) -> str:
         for i in range(len(concat_message)):
             if start_identifier.startswith(concat_message[len(concat_message) - i - 1 :]):
@@ -128,13 +144,7 @@ class StreamListener:
 
         if self.stream_end:
             if self.allow_reuse:
-                # Clear up the state for the next stream.
-                self.stream_end = False
-                self.cache_hit = False
-                self.field_start_queue = []
-                self.field_end_queue = Queue()
-                self.json_adapter_state["field_accumulated_messages"] = ""
-                self.stream_start = False
+                self.reset()
             else:
                 return
 

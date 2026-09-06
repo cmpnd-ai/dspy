@@ -67,7 +67,7 @@ def test_init_rejects_invalid_optimize_for():
     # fell through the `else 999` sentinel and a never-matching apply guard,
     # returning the student unchanged.
     for bad in ["minn", "Min", "maximum", "MAX", "", None]:
-        with pytest.raises(AssertionError, match="optimize_for"):
+        with pytest.raises(ValueError, match="optimize_for"):
             AvatarOptimizer(metric=_zero_metric, optimize_for=bad)
 
 

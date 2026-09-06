@@ -11,7 +11,7 @@ from dspy.dsp.utils.settings import settings
 from dspy.predict.predict import Predict
 from dspy.primitives.example import Example
 from dspy.primitives.module import Module
-from dspy.teleprompt.bootstrap_trace import bootstrap_trace_data
+from dspy.teleprompt.bootstrap_trace import FailedPrediction, bootstrap_trace_data
 from dspy.teleprompt.teleprompt import Teleprompter
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,13 @@ class BootstrapFinetune(FinetuneTeleprompter):
         adapter = self.adapter[lm] or settings.adapter or ChatAdapter()
         data_format = infer_data_format(adapter)
         for item in trace_data:
-            for trace_pred_ind, _ in enumerate(item["trace"]):
+            for trace_pred_ind, trace_instance in enumerate(item["trace"]):
+                if isinstance(trace_instance[2], FailedPrediction):
+                    logger.debug(
+                        "Skipping a trace step with a FailedPrediction output "
+                        "(unparseable LM response) while preparing finetune data."
+                    )
+                    continue
                 if pred_ind is None or trace_pred_ind == pred_ind:
                     call_data = build_call_data_from_trace(
                         trace=item["trace"],

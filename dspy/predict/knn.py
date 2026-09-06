@@ -36,6 +36,13 @@ class KNN:
             # Find similar examples
             similar_examples = knn(input="hello")
             ```
+
+        Note: when caching is enabled (the default) and you switch the checkpoint while sharing the default on-disk
+        cache (``~/.dspy_cache``), pass a checkpoint-level ``model_id`` to the ``Embedder`` so each checkpoint keeps
+        its own cached vectors -- two ``Embedder`` instances backed by different checkpoints of the same class would
+        otherwise collide in the cache. For example::
+
+            vectorizer=dspy.Embedder(SentenceTransformer("paraphrase-MiniLM-L6-v2").encode, model_id="paraphrase-MiniLM-L6-v2")
         """
         self.k = k
         self.trainset = trainset

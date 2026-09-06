@@ -49,3 +49,20 @@ def test_knn_query_specificity(setup_knn):
     nearest_samples = knn(**query)
     assert len(nearest_samples) == 2, "Incorrect number of nearest samples returned"
     assert "Paris" in [sample.answer for sample in nearest_samples], "Expected Paris to be a nearest sample answer"
+
+
+def test_knn_init_raises_actionable_error_without_with_inputs():
+    """Constructing KNN with examples lacking with_inputs() raises a clear ValueError, not a cryptic TypeError."""
+    trainset = [dspy.Example(question="What is the capital of France?", answer="Paris")]
+    with pytest.raises(ValueError, match="with_inputs"):
+        KNN(k=1, trainset=trainset, vectorizer=dspy.Embedder(DummyVectorizer()))
+
+
+def test_knn_init_mixed_trainset_raises_for_unmarked_example():
+    """A single unmarked example in an otherwise valid trainset still raises the actionable ValueError."""
+    trainset = [
+        dspy.Example(question="What is the largest ocean?", answer="Pacific").with_inputs("question"),
+        dspy.Example(question="What is 2+2?", answer="4"),
+    ]
+    with pytest.raises(ValueError, match="with_inputs"):
+        KNN(k=1, trainset=trainset, vectorizer=dspy.Embedder(DummyVectorizer()))

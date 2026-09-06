@@ -388,6 +388,61 @@ def test_usage_tracker_no_side_effect():
     assert result == "Paris"
 
 
+def test_set_lm_usage_with_empty_prediction():
+    # Regression: an empty Prediction is falsy via Example.__len__, so the truthiness
+    # guard treated it as "no Prediction found": usage was not attached and a misleading
+    # "Please return" warning fired. A returned Prediction (even empty) must get usage set.
+    class ListHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    class EmptyModule(dspy.Module):
+        def forward(self, **kwargs):
+            return Prediction()
+
+    module_logger = logging.getLogger("dspy.primitives.module")
+    handler = ListHandler()
+    original_level = module_logger.level
+    module_logger.addHandler(handler)
+    module_logger.setLevel(logging.WARNING)
+    try:
+        with dspy.context(track_usage=True):
+            result = EmptyModule()(question="test")
+
+        assert isinstance(result, Prediction)
+        assert result.get_lm_usage() is not None
+        # The codebase contract treats get_lm_usage() as len()-able (see
+        # test_single_module_call_with_usage_tracker); len(None) would raise TypeError.
+        assert len(result.get_lm_usage()) == 0
+        assert not any("Please return" in m for m in handler.messages)
+    finally:
+        module_logger.setLevel(original_level)
+        module_logger.removeHandler(handler)
+
+
+def test_set_lm_usage_keeps_tokens_on_empty_choices():
+    # Regression: an LM response with empty choices but a populated usage block yields an
+    # empty (falsy) Prediction; the truthiness guard silently dropped the accumulated tokens.
+    with patch("litellm.completion") as mock_completion:
+        mock_completion.return_value = ModelResponse(
+            choices=[],
+            model="openai/gpt-4o-mini",
+            usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+        with dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), track_usage=True):
+            result = dspy.Predict("question -> answer")(question="test")
+
+        usage = result.get_lm_usage()
+        assert usage is not None
+        assert usage["openai/gpt-4o-mini"]["prompt_tokens"] == 10
+        assert usage["openai/gpt-4o-mini"]["completion_tokens"] == 5
+        assert usage["openai/gpt-4o-mini"]["total_tokens"] == 15
+
+
 def test_module_history():
     class MyProgram(dspy.Module):
         def __init__(self, **kwargs):

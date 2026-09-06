@@ -401,6 +401,18 @@ class LM(BaseLM):
             return OpenAIProvider()
         return Provider()
 
+    def copy(self, **kwargs):
+        """Return a copy of the language model with updated parameters.
+
+        Reconciles the user-facing ``max_tokens`` override with the
+        ``max_completion_tokens`` alias stored for OpenAI reasoning models, so
+        the copied LM matches what ``LM.__init__`` would have produced for the
+        same ``max_tokens`` value and the override survives ``dump_state()``.
+        """
+        if "max_tokens" in kwargs and _is_openai_reasoning_model(self.model):
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        return super().copy(**kwargs)
+
     def dump_state(self):
         """Return a sanitized reconstruction state for this LM.
 
@@ -419,7 +431,9 @@ class LM(BaseLM):
         if self.use_developer_role:
             state["use_developer_role"] = self.use_developer_role
         if _is_openai_reasoning_model(self.model) and "max_completion_tokens" in state:
-            state["max_tokens"] = state.pop("max_completion_tokens")
+            if "max_tokens" not in state:
+                state["max_tokens"] = state["max_completion_tokens"]
+            state.pop("max_completion_tokens")
         return state
 
     @classmethod

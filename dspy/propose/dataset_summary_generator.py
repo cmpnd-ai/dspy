@@ -70,7 +70,8 @@ def create_dataset_summary(trainset, view_data_batch_size, prompt_model, log_fil
             upper_lim = min(len(trainset), b+view_data_batch_size)
             with dspy.context(lm=prompt_model):
                 output = dspy.Predict(DatasetDescriptorWithPriorObservations, n=1, temperature=1.0)(prior_observations=observations, examples=order_input_keys_in_string(trainset[b:upper_lim].__repr__()))
-            if len(output["observations"]) >= 8 and output["observations"][:8].upper() == "COMPLETE":
+            obs = output["observations"].strip().strip("\"'").strip()
+            if obs.upper().startswith("COMPLETE") and (len(obs) == 8 or not obs[8].isalpha()):
                 skips += 1
                 if skips >= 5:
                     break

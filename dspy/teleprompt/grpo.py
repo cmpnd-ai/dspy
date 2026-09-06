@@ -201,7 +201,7 @@ class GRPO(FinetuneTeleprompter):
         for id in self.shuffled_trainset_ids:
             self.id_freqs[id] += 1
 
-        num_to_pad = self.num_dspy_examples_per_grpo_step - (len(original_trainset) % self.num_dspy_examples_per_grpo_step)
+        num_to_pad = (self.num_dspy_examples_per_grpo_step - (len(original_trainset) % self.num_dspy_examples_per_grpo_step)) % self.num_dspy_examples_per_grpo_step
         if num_to_pad > 0:
             # Select ids based on least frequent ids
             for _ in range(num_to_pad):

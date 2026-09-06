@@ -1,3 +1,4 @@
+import logging
 import re
 
 import pytest
@@ -7,7 +8,7 @@ import dspy
 import dspy.adapters.base as adapter_base
 import dspy.adapters.utils as adapter_utils
 from dspy.utils.dummies import DummyLM
-from dspy.utils.exceptions import ContextWindowExceededError
+from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError
 
 
 @pytest.mark.extra
@@ -24,7 +25,6 @@ def test_tool_observation_preserves_custom_type():
 
     def make_images():
         return dspy.Image("https://example.com/test.png"), dspy.Image(Image.new("RGB", (100, 100), "red"))
-
 
     adapter = SpyChatAdapter()
     lm = DummyLM(
@@ -534,3 +534,150 @@ async def test_async_error_retry():
     for i in range(2):
         obs = traj[f"observation_{i}"]
         assert re.search(r"\btool error\b", obs), f"unexpected observation_{i!r}: {obs}"
+
+
+def test_react_unknown_tool_name_falls_back_to_extract(caplog):
+    # ReAct must degrade gracefully when the adapter wraps a tool-selection parse
+    # failure as ``AdapterParseError``. Commit c2b3007b retyped those parse failures
+    # from ``ValueError`` to ``AdapterParseError`` (which is *not* a ``ValueError``
+    # subclass), so ``ReAct.forward``'s ``except ValueError`` handler stopped
+    # catching them and the agent crashed instead of breaking the loop and running
+    # a best-effort ``extract``.
+    #
+    # This is the cleanest single-trigger of the catch-type mismatch: with
+    # ``use_json_adapter_fallback=False`` a single hallucinated ``next_tool_name``
+    # makes ``ChatAdapter.parse`` wrap the ``Literal`` coercion failure as
+    # ``AdapterParseError`` with no JSON re-prompt retry, so it reaches the in-loop
+    # handler directly.
+    def echo(text: str) -> str:
+        return f"ECHO:{text}"
+
+    adapter = dspy.ChatAdapter(use_json_adapter_fallback=False)
+    lm = DummyLM(
+        [
+            # iteration 0: a successful tool call populates the trajectory
+            {"next_thought": "I'll echo hi.", "next_tool_name": "echo", "next_tool_args": {"text": "hi"}},
+            # iteration 1: hallucinated tool name -> ChatAdapter.parse wraps the
+            # Literal coercion failure as AdapterParseError; with the JSON fallback
+            # disabled it propagates straight to ReAct.forward's in-loop handler.
+            {
+                "next_thought": "I'll use a bogus tool.",
+                "next_tool_name": "nonexistent_tool",
+                "next_tool_args": {"text": "x"},
+            },
+            # extract: a well-formed fallback answer produced from the partial trajectory
+            {"reasoning": "recap from trajectory", "answer": "fallback answer from partial trajectory"},
+        ],
+        adapter=adapter,
+    )
+
+    react = dspy.ReAct("question -> answer", tools=[echo])
+    with dspy.context(lm=lm, adapter=adapter), caplog.at_level(logging.WARNING, logger="dspy.predict.react"):
+        result = react(question="What is the echo?")
+
+    # Graceful degradation: a Prediction is returned, not an AdapterParseError raised.
+    assert isinstance(result, dspy.Prediction)
+    assert result.answer == "fallback answer from partial trajectory"
+    # The partial trajectory from the successful iteration 0 is preserved into extract.
+    assert result.trajectory["observation_0"] == "ECHO:hi"
+    assert result.trajectory["tool_name_0"] == "echo"
+    # The handler logged its intended warning instead of propagating the parse error.
+    assert any("Agent failed to select a valid tool" in record.message for record in caplog.records)
+
+
+def test_react_default_adapter_parse_failure_falls_back_to_extract(caplog):
+    # On the default ``ChatAdapter`` config (``use_json_adapter_fallback=True``), a
+    # hallucinated ``next_tool_name`` triggers a fresh JSON re-prompt retry. When that
+    # retry *also* parse-fails with ``AdapterParseError`` (here the retry response is
+    # force-fed chat-format text that JSONAdapter rejects for missing the expected
+    # field keys), ``ReAct.forward`` must still break the loop and run ``extract``
+    # rather than propagate ``AdapterParseError``.
+    def echo(text: str) -> str:
+        return f"ECHO:{text}"
+
+    lm = DummyLM(
+        [
+            {"next_thought": "I'll echo hi.", "next_tool_name": "echo", "next_tool_args": {"text": "hi"}},
+            {
+                "next_thought": "I'll use a bogus tool.",
+                "next_tool_name": "nonexistent_tool",
+                "next_tool_args": {"text": "x"},
+            },
+            {"next_thought": "still bogus", "next_tool_name": "nonexistent_tool", "next_tool_args": {"text": "x"}},
+            {"reasoning": "recap from trajectory", "answer": "default-config fallback answer"},
+        ]
+    )
+
+    react = dspy.ReAct("question -> answer", tools=[echo])
+    with dspy.context(lm=lm), caplog.at_level(logging.WARNING, logger="dspy.predict.react"):
+        result = react(question="What is the echo?")
+
+    assert isinstance(result, dspy.Prediction)
+    assert result.answer == "default-config fallback answer"
+    assert result.trajectory["observation_0"] == "ECHO:hi"
+    assert result.trajectory["tool_name_0"] == "echo"
+    assert any("Agent failed to select a valid tool" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_react_unknown_tool_name_falls_back_to_extract(caplog):
+    # Async mirror of ``test_react_unknown_tool_name_falls_back_to_extract``: the
+    # identical catch-type bug exists in ``ReAct.aforward``, and the fix must apply to
+    # the async path too.
+    def echo(text: str) -> str:
+        return f"ECHO:{text}"
+
+    adapter = dspy.ChatAdapter(use_json_adapter_fallback=False)
+    lm = DummyLM(
+        [
+            {"next_thought": "I'll echo hi.", "next_tool_name": "echo", "next_tool_args": {"text": "hi"}},
+            {
+                "next_thought": "I'll use a bogus tool.",
+                "next_tool_name": "nonexistent_tool",
+                "next_tool_args": {"text": "x"},
+            },
+            {"reasoning": "recap from trajectory", "answer": "async fallback answer from partial trajectory"},
+        ],
+        adapter=adapter,
+    )
+
+    react = dspy.ReAct("question -> answer", tools=[echo])
+    with dspy.context(lm=lm, adapter=adapter), caplog.at_level(logging.WARNING, logger="dspy.predict.react"):
+        result = await react.acall(question="What is the echo?")
+
+    assert isinstance(result, dspy.Prediction)
+    assert result.answer == "async fallback answer from partial trajectory"
+    assert result.trajectory["observation_0"] == "ECHO:hi"
+    assert result.trajectory["tool_name_0"] == "echo"
+    assert any("Agent failed to select a valid tool" in record.message for record in caplog.records)
+
+
+def test_react_propagates_adapter_parse_error_when_extract_fails():
+    # The fix only restores the *in-loop* graceful degradation (break + extract
+    # opportunity). The ``extract`` step itself has no try/except (at ``react.py:120``
+    # / ``:148``), so a malformed final extraction response still surfaces as a hard
+    # ``AdapterParseError`` failure -- this is a pre-existing design decision, not a
+    # regression, and the fix must not change it. This test pins that boundary so a
+    # future over-broad ``except`` does not silently swallow extract-time failures.
+    def echo(text: str) -> str:
+        return f"ECHO:{text}"
+
+    adapter = dspy.ChatAdapter(use_json_adapter_fallback=False)
+    lm = DummyLM(
+        [
+            {"next_thought": "I'll echo hi.", "next_tool_name": "echo", "next_tool_args": {"text": "hi"}},
+            {
+                "next_thought": "I'll use a bogus tool.",
+                "next_tool_name": "nonexistent_tool",
+                "next_tool_args": {"text": "x"},
+            },
+            # extract: malformed response with the wrong field keys -> AdapterParseError
+            {"reasoning": "recap", "wrong_field": "not the answer"},
+        ],
+        adapter=adapter,
+    )
+
+    react = dspy.ReAct("question -> answer", tools=[echo])
+    with dspy.context(lm=lm, adapter=adapter):
+        with pytest.raises(AdapterParseError):
+            react(question="What is the echo?")

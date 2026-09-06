@@ -327,7 +327,7 @@ class Module(BaseModule, metaclass=ProgramMeta):
             prediction_in_output = output
         elif isinstance(output, tuple) and len(output) > 0 and isinstance(output[0], Prediction):
             prediction_in_output = output[0]
-        if prediction_in_output:
+        if prediction_in_output is not None:
             prediction_in_output.set_lm_usage(tokens)
         else:
             logger.warning("Failed to set LM usage. Please return `dspy.Prediction` object from dspy.Module to enable usage tracking.")

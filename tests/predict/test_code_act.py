@@ -1,3 +1,5 @@
+import logging
+import re
 import threading
 from unittest.mock import Mock
 
@@ -285,3 +287,97 @@ class CustomTool:
 def test_codeact_tool_validation():
     with pytest.raises(ValueError, match=r"CodeAct only accepts functions and not callable objects."):
         CodeAct(BasicQA, tools=[CustomTool()])
+
+
+def _extract_trajectory_section(messages):
+    """Return the content following the ``[[ ## trajectory ## ]]`` field header.
+
+    Looks across both plain-string and structured ``content`` payloads (DummyLM emits a
+    plain string under ``ChatAdapter``). Returns ``None`` when no trajectory header is
+    present (e.g. the very first iteration still receives an empty trajectory, which the
+    adapter renders as an empty section).
+    """
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        match = re.search(r"\[\[ ## trajectory ## \]\]\n(.*)", content, re.DOTALL)
+        if match:
+            return match.group(1)
+    return None
+
+
+def test_codeact_per_iteration_trajectory_is_formatted_string(pooled_interpreter, caplog):
+    """The per-iteration ``codeact`` call must pass the trajectory as the declared ``str``
+    type, formatted into the multi-section representation, not as a raw dict / JSON literal.
+
+    Guarantees:
+    * No ``Type mismatch for field 'trajectory'`` warning is logged on any iteration
+      (the ``codeact`` signature declares ``trajectory`` as ``type_=str``).
+    * The per-iteration ``codeact`` prompt renders the trajectory as the structured per-key
+      ``[[ ## generated_code_N ## ]]`` / ``[[ ## code_output_N ## ]]`` form used everywhere
+      else for trajectory fields -- not a single-line JSON dict literal.
+    * The per-iteration representation matches the representation the final extractor call
+      produces for the same trajectory keys (cross-call consistency).
+    * The end-to-end answer and returned trajectory dict are unchanged (no regression).
+    """
+    lm = DummyLM(
+        [
+            {
+                "reasoning": "Reason_A",
+                "generated_code": "```python\nresult = add(1,1)\nprint(result)\n```",
+                "finished": False,
+            },
+            {
+                "reasoning": "Reason_A",
+                "generated_code": "```python\nresult = add(1,1)\nprint(result)\n```",
+                "finished": True,
+            },
+            {"reasoning": "Reason_B", "answer": "2"},
+        ]
+    )
+    dspy.configure(lm=lm)
+    program = CodeAct(BasicQA, tools=[add])
+
+    with caplog.at_level(logging.WARNING, logger="dspy.predict.predict"):
+        res = program(pooled_interpreter, question="What is 1+1?")
+
+    # No behavioral regression: answer and returned trajectory dict are unchanged.
+    assert res.answer == "2"
+    assert res.trajectory == {
+        "generated_code_0": "result = add(1,1)\nprint(result)",
+        "code_output_0": '"2\\n"',
+        "generated_code_1": "result = add(1,1)\nprint(result)",
+        "code_output_1": '"2\\n"',
+    }
+
+    # The ``trajectory`` field is declared ``type_=str``; the per-iteration call must not
+    # trip Predict's input validator. With the bug, a warning is emitted on every iteration.
+    trajectory_mismatch_warnings = [
+        record for record in caplog.records if "Type mismatch for field 'trajectory'" in record.getMessage()
+    ]
+    assert trajectory_mismatch_warnings == [], (
+        f"Expected no type-mismatch warnings for 'trajectory', got: {trajectory_mismatch_warnings}"
+    )
+
+    # lm.history indices: 0 = first codeact call (empty trajectory), 1 = second codeact call
+    # (populated trajectory), 2 = extractor call (populated trajectory).
+    per_iteration_trajectory = _extract_trajectory_section(lm.history[1]["messages"])
+    assert per_iteration_trajectory is not None, "No trajectory section in the second codeact prompt"
+
+    # Structured multi-section form, not a JSON dict literal.
+    assert "[[ ## generated_code_0 ## ]]" in per_iteration_trajectory
+    assert "[[ ## code_output_0 ## ]]" in per_iteration_trajectory
+    assert not per_iteration_trajectory.lstrip().startswith("{")
+    assert '{"generated_code_0"' not in per_iteration_trajectory
+
+    # Cross-call consistency: the per-iteration call and the extractor call render the same
+    # trajectory using the same per-key section headers (the extractor path already routes
+    # through ``ReAct._format_trajectory``).
+    extractor_trajectory = _extract_trajectory_section(lm.history[2]["messages"])
+    assert extractor_trajectory is not None, "No trajectory section in the extractor prompt"
+    assert "[[ ## generated_code_0 ## ]]" in extractor_trajectory
+    assert "[[ ## code_output_0 ## ]]" in extractor_trajectory
+    assert not extractor_trajectory.lstrip().startswith("{")

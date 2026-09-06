@@ -190,16 +190,18 @@ def test_reactv2_constructs_and_runs_through_the_bridge() -> None:
     assert isinstance(agent, dspy.ReActV2)
     assert not hasattr(agent, "interpreter")  # not a code-executing predictor
 
-    lm = DummyLM([
-        {
-            "next_thought": "look it up",
-            "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "lookup", "args": {"query": "cats"}}]),
-        },
-        {
-            "next_thought": "answer now",
-            "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "submit", "args": {"answer": "found cats"}}]),
-        },
-    ])
+    lm = DummyLM(
+        [
+            {
+                "next_thought": "look it up",
+                "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "lookup", "args": {"query": "cats"}}]),
+            },
+            {
+                "next_thought": "answer now",
+                "tool_calls": dspy.ToolCalls.from_dict_list([{"name": "submit", "args": {"answer": "found cats"}}]),
+            },
+        ]
+    )
     with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
         fields = inv.call("agent", {"question": "cats"})
     assert fields["answer"] == "found cats"
@@ -452,6 +454,90 @@ def test_recovered_lm_failure_does_not_hijack_a_local_later_crash() -> None:
         flex(value=2)
 
 
+def test_recovered_lm_failure_wrapped_into_a_later_crash_is_not_repainted() -> None:
+    # The intersection the substring correlation mishandled: the generated code RECOVERS (no
+    # further bridge call, so _lm_error stays stale) AND embeds str() of the recovered boundary
+    # error into a LATER crash — a standard Python wrapping idiom
+    # (``raise RuntimeError(f"forward failed after recovery: {err}")``). The recovered boundary
+    # message contains the sentinel tag, so ``tag in str(e)`` would repaint the later crash as the
+    # stashed LMError. Correlation must be by the exact boundary-flattened message, not a substring
+    # tag match, so the later crash surfaces as a broken-candidate CodeExecutionError instead.
+    def drive(tools):
+        tools[bridge.CONSTRUCT_TOOL](
+            kind="Predict", signature="value: int -> result: int", attr_name="solve", kwargs={}
+        )
+        try:
+            tools[bridge.CALL_TOOL](handle="solve", inputs={"value": 2})
+        except Exception as e:
+            err = e  # recover, but keep the boundary error for a diagnostic re-raise
+        raise RuntimeError(f"forward failed after recovery: {err}")
+
+    flex = _boundary_flex(drive)
+    dspy.configure(lm=_RateLimitedLM([]))
+    with pytest.raises(CodeExecutionError) as exc_info:
+        flex(value=2)
+    # The later crash is its own bug, not the recovered infrastructure failure.
+    assert not isinstance(exc_info.value, LMError)
+    assert "forward failed after recovery" in str(exc_info.value)
+    # The tag still travels inside the wrapped message (the user embedded str(err)), proving the
+    # test exercises the stale-stash + tag-in-message path rather than the trivial no-tag path.
+    assert "[dspy bridge lm-error #1]" in str(exc_info.value)
+
+
+def test_lm_error_correlation_helper_matches_only_uncaught_boundary_forms() -> None:
+    # Direct unit test for the bridge's LM-error correlation: only the exact boundary-flattened
+    # message of an UNCAUGHT LM tool failure matches; user text injected by a wrapping recovery
+    # (prefix or suffix, in either boundary shape) must not. Guards against reintroducing the
+    # ``tag in str(e)`` substring correlation that repainted recovered-then-wrapped crashes.
+    tool_msg = "[dspy bridge lm-error #1] LMRateLimitError: [dummy] 429 from the provider"
+
+    # --- uncaught: the two boundary shapes the bridge recognizes -> match ---
+    # Mock boundary flattens the bridge's CodeInterpreterError directly.
+    mock_uncaught = CodeExecutionError(f"CodeInterpreterError: {tool_msg}")
+    assert bridge._looks_like_uncaught_lm_tool_failure(mock_uncaught, tool_msg)
+    # Real (Deno/Pyodide) boundary: the sandbox tool wrapper's RuntimeError is flattened by the
+    # host to f"RuntimeError: {args!r}" with the bridge descriptor as the SOLE arg.
+    real_uncaught = CodeExecutionError(f"RuntimeError: {[f'CodeInterpreterError: {tool_msg}']!r}")
+    assert bridge._looks_like_uncaught_lm_tool_failure(real_uncaught, tool_msg)
+    # The real boundary's outer type is whatever the sandbox raised; the matcher keys off the
+    # args-list tail, so a different outer type (e.g. a custom sandbox) still matches.
+    custom_outer = CodeExecutionError(f"CustomSandboxError: {[f'CodeInterpreterError: {tool_msg}']!r}")
+    assert bridge._looks_like_uncaught_lm_tool_failure(custom_outer, tool_msg)
+
+    # --- recovered + wrapped: user text injected -> no match (the bug) ---
+    # Mock shape: the user replaced the boundary descriptor with their own type/message; the tag
+    # is present (str(err) carried it) but "CodeInterpreterError: <tag>" is no longer the message.
+    mock_wrapped = CodeExecutionError(f"RuntimeError: forward failed after recovery: {tool_msg}")
+    assert not bridge._looks_like_uncaught_lm_tool_failure(mock_wrapped, tool_msg)
+    # Real shape: user text injected BEFORE the boundary descriptor inside the single arg.
+    real_wrapped_prefix = CodeExecutionError(
+        f"RuntimeError: {[f'forward failed after recovery: CodeInterpreterError: {tool_msg}']!r}"
+    )
+    assert not bridge._looks_like_uncaught_lm_tool_failure(real_wrapped_prefix, tool_msg)
+    # Real shape: user text injected AFTER the boundary descriptor inside the single arg.
+    real_wrapped_suffix = CodeExecutionError(
+        f"RuntimeError: {[f'CodeInterpreterError: {tool_msg} (while doubling)']!r}"
+    )
+    assert not bridge._looks_like_uncaught_lm_tool_failure(real_wrapped_suffix, tool_msg)
+
+    # --- a later crash whose message does NOT carry the tag -> no match (unchanged behavior) ---
+    assert not bridge._looks_like_uncaught_lm_tool_failure(CodeExecutionError("NameError: later sandbox bug"), tool_msg)
+    # A bare CodeInterpreterError with no tag at all (e.g. a budget or protocol error) -> no match.
+    assert not bridge._looks_like_uncaught_lm_tool_failure(
+        CodeExecutionError("Sandboxed dspy.Flex forward exceeded its predictor-call budget (7)."), tool_msg
+    )
+
+    # --- a provider message containing quotes must round-trip through repr([arg]) so an uncaught
+    # LM failure with quotes still matches (and a wrapped variant with quotes still does not) ---
+    quoted = "[dspy bridge lm-error #2] LMRateLimitError: quota 'exceeded' for key \"abc\""
+    assert bridge._looks_like_uncaught_lm_tool_failure(
+        CodeExecutionError(f"RuntimeError: {[f'CodeInterpreterError: {quoted}']!r}"), quoted
+    )
+    assert not bridge._looks_like_uncaught_lm_tool_failure(
+        CodeExecutionError(f"RuntimeError: {[f'boom: CodeInterpreterError: {quoted}']!r}"), quoted
+    )
+
+
 # =============================================================================
 # Code-executing sub-predictors inherit the Flex sandbox backend (no Deno)
 # =============================================================================
@@ -682,6 +768,26 @@ RECOVERED_LM_FAILURE_MODULE = textwrap.dedent(
     """
 ).strip()
 
+# The recovered-then-wrapped counterpart: the generated forward catches the flattened boundary error
+# (whose message carries the bridge's sentinel tag) and embeds str(err) of it into a LATER raise —
+# the Python wrapping idiom the stale-substring correlation repainted as the recovered LMError.
+WRAPPED_RECOVERY_LM_FAILURE_MODULE = textwrap.dedent(
+    """
+    class DoublerModule(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.solve = dspy.Predict("value: int -> result: int")
+
+        def forward(self, **inputs):
+            err = None
+            try:
+                r = self.solve(value=inputs["value"])
+            except Exception as e:
+                err = e  # recover, but keep the error for a diagnostic re-raise
+            raise RuntimeError(f"forward failed after recovery: {err}")
+    """
+).strip()
+
 
 @deno_required
 def test_lm_failure_type_survives_the_real_sandbox_boundary() -> None:
@@ -701,6 +807,25 @@ def test_recovered_lm_failure_does_not_hijack_through_the_real_sandbox() -> None
         flex(value=2)
     assert not isinstance(err.value, LMError)  # the local NameError is not repainted as infra
     assert "NameError" in str(err.value) or "oops" in str(err.value)
+
+
+@deno_required
+def test_recovered_lm_failure_wrapped_in_the_real_sandbox_is_not_repainted() -> None:
+    # The real-sandbox counterpart of the mock-boundary wrapping-recovery test: the tag the bridge
+    # stamps into the boundary message survives the Deno/Pyodide JSON-RPC round trip embedded in
+    # the later RuntimeError's message, so the stale-substring correlation would repaint it as
+    # the recovered LMRateLimitError. Correlation must surface it as a broken-candidate
+    # CodeExecutionError instead, preserving the per-example reflective feedback signal in GEPA.
+    flex = Flex(Doubler, interpreter_factory=lambda: dspy.PythonInterpreter())
+    flex._bind_code(WRAPPED_RECOVERY_LM_FAILURE_MODULE)
+    dspy.configure(lm=_RateLimitedLM([]))
+    with pytest.raises(CodeExecutionError) as err:
+        flex(value=2)
+    assert not isinstance(err.value, LMError)
+    assert "forward failed after recovery" in str(err.value)
+    # The tag is present in the wrapped message (str(err) carried it across the boundary),
+    # proving this exercises the stale-stash + tag-in-message intersection, not the trivial no-tag path.
+    assert "[dspy bridge lm-error #1]" in str(err.value)
 
 
 # A module that constructs and calls a dspy.CodeAct with a Flex-level tool. CodeAct runs its own

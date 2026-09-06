@@ -40,8 +40,11 @@ def majority(prediction_or_completions, normalize=default_normalize, field=None)
 
     # Count
     value_counts = {}
-    for value in normalized_values_ or normalized_values:
+    for value in normalized_values_:
         value_counts[value] = value_counts.get(value, 0) + 1
+
+    if not value_counts:
+        raise ValueError("majority: every completion was ignored by normalize()")
 
     majority_value = max(value_counts, key=value_counts.get)
 

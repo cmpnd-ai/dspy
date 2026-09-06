@@ -326,10 +326,15 @@ class StreamListener:
                 boundary_index = len(last_tokens)
             return last_tokens[:boundary_index]
         elif isinstance(settings.adapter, ChatAdapter) or settings.adapter is None:
-            boundary_index = last_tokens.find("[[")
-            if boundary_index == -1:
-                boundary_index = len(last_tokens)
-            return last_tokens[:boundary_index]
+            # Only trim at a position that actually begins a `[[ ## <word> ## ]]` field marker, consistent with
+            # `ChatAdapter.parse()` (which splits sections on `field_header_pattern = r"\[\[ ## (\w+) ## \]\]"`).
+            # Trimming at a bare `"[["` would drop field content that legitimately contains a literal `"[["` (e.g.
+            # nested lists like `[[1, 2], [3, 4]]`, C++ attributes like `[[nodiscard]]`, or wiki links). Such content
+            # does not match the marker regex and is preserved in the final `dspy.Prediction`.
+            end_identifier = self.adapter_identifiers["ChatAdapter"]["end_identifier"]
+            if match := re.search(end_identifier, last_tokens):
+                return last_tokens[: match.start()]
+            return last_tokens
         else:
             raise ValueError(
                 f"Unsupported adapter for streaming: {settings.adapter}, please use one of the following adapters: "

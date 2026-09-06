@@ -773,6 +773,127 @@ async def test_stream_listener_missing_completion_marker_chat_adapter():
 
 
 @pytest.mark.anyio
+async def test_stream_listener_chat_adapter_field_content_with_literal_double_brackets():
+    """Field content containing a literal ``[[`` (that is not a ``[[ ## word ## ]]`` marker) must be
+    preserved in the streamed chunks.
+
+    Regression test for a bug where ``StreamListener.flush()`` trimmed the buffer at the first
+    occurrence of ``[[``, dropping field content such as nested lists (``[[1, 2], [3, 4]]``),
+    C++ attributes (``[[nodiscard]]``), or wiki links (``[[ wikilink ]]``). The final
+    ``dspy.Prediction`` was always correct (``ChatAdapter.parse()`` only splits on full markers),
+    but the live ``StreamResponse`` chunks lost the buffered segment.
+    """
+
+    async def run_stream(field_chunks):
+        async def stream(*args, **kwargs):
+            yield ModelResponseStream(
+                model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[ ## matrix ## ]]\n\n"))]
+            )
+            for chunk_content in field_chunks:
+                yield ModelResponseStream(
+                    model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=chunk_content))]
+                )
+            yield ModelResponseStream(
+                model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="\n\n[[ ## completed ## ]]"))]
+            )
+
+        program = dspy.streamify(
+            dspy.Predict("description->matrix"),
+            stream_listeners=[dspy.streaming.StreamListener(signature_field_name="matrix")],
+        )
+        with mock.patch("litellm.acompletion", side_effect=stream):
+            with dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()):
+                output = program(description="give a matrix")
+                streamed_chunks = []
+                final_prediction = None
+                async for value in output:
+                    if isinstance(value, StreamResponse):
+                        streamed_chunks.append(value.chunk)
+                    elif isinstance(value, dspy.Prediction):
+                        final_prediction = value
+        return "".join(streamed_chunks), final_prediction
+
+    # Case 1: nested list delivered as a single chunk (content starts with a bare "[[").
+    streamed, prediction = await run_stream(["[[1, 2], [3, 4]]"])
+    assert streamed == "[[1, 2], [3, 4]]"
+    assert prediction.matrix == "[[1, 2], [3, 4]]"
+
+    # Case 2: nested list split across chunks, with "[[" as its own chunk. This triggers the
+    # per-chunk flush in StreamListener.receive() on the buffer "[[1, 2], " (which contains a
+    # bare "[[" but no real marker), the exact path that dropped content before the fix.
+    streamed, prediction = await run_stream(["[[", "1, 2], ", "[3, 4]]"])
+    assert streamed == "[[1, 2], [3, 4]]"
+    assert prediction.matrix == "[[1, 2], [3, 4]]"
+
+    # Case 3: C++ attribute in content.
+    streamed, prediction = await run_stream(["int foo() [[nodiscard]] { return 0; }"])
+    assert streamed == "int foo() [[nodiscard]] { return 0; }"
+    assert prediction.matrix == "int foo() [[nodiscard]] { return 0; }"
+
+    # Case 4: MediaWiki-style link in content.
+    streamed, prediction = await run_stream(["See [[ wikilink ]] for details."])
+    assert streamed == "See [[ wikilink ]] for details."
+    assert prediction.matrix == "See [[ wikilink ]] for details."
+
+
+@pytest.mark.anyio
+async def test_stream_listener_chat_adapter_literal_double_brackets_missing_completion_marker():
+    """Content containing a literal ``[[`` must be preserved in the stream even when the LM omits the
+    final ``[[ ## completed ## ]]`` marker (so the buffer is flushed via ``finalize()``).
+    """
+
+    async def stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[ ## matrix ## ]]\n\n"))]
+        )
+        yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[1, 2], "))])
+        yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[3, 4]]"))])
+        # No completion marker.
+
+    program = dspy.streamify(
+        dspy.Predict("description->matrix"),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="matrix")],
+    )
+    with mock.patch("litellm.acompletion", side_effect=stream):
+        with dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()):
+            output = program(description="give a matrix")
+            streamed_chunks = []
+            final_prediction = None
+            async for value in output:
+                if isinstance(value, StreamResponse):
+                    streamed_chunks.append(value.chunk)
+                elif isinstance(value, dspy.Prediction):
+                    final_prediction = value
+
+    assert "".join(streamed_chunks) == "[[1, 2], [3, 4]]"
+    assert final_prediction.matrix == "[[1, 2], [3, 4]]"
+
+
+def test_stream_listener_flush_chat_adapter_trims_only_at_real_markers():
+    """``StreamListener.flush()`` (ChatAdapter) must only trim the buffer at a position that actually
+    begins a ``[[ ## <word> ## ]]`` field marker, never at a bare ``[[`` that is field content.
+    """
+    listener = dspy.streaming.StreamListener(signature_field_name="answer")
+    with dspy.context(adapter=dspy.ChatAdapter()):
+        # Content containing a literal "[[" that is NOT a marker is preserved verbatim.
+        listener.field_end_queue.put("[[1, 2], [3, 4]]")
+        assert listener.flush() == "[[1, 2], [3, 4]]"
+
+        listener.field_end_queue.put("int foo() [[nodiscard]] { return 0; }")
+        assert listener.flush() == "int foo() [[nodiscard]] { return 0; }"
+
+        listener.field_end_queue.put("See [[ wikilink ]] for details.")
+        assert listener.flush() == "See [[ wikilink ]] for details."
+
+        # A real marker is still treated as boilerplate and trimmed (preceding content kept).
+        listener.field_end_queue.put("some content\n\n[[ ## completed ## ]]")
+        assert listener.flush() == "some content\n\n"
+
+        listener.field_end_queue.put("[[ ## completed ## ]]")
+        assert listener.flush() == ""
+
+
+@pytest.mark.anyio
 async def test_stream_listener_returns_correct_chunk_json_adapter_untokenized_stream():
     class MyProgram(dspy.Module):
         def __init__(self):
@@ -1305,9 +1426,7 @@ async def test_chat_adapter_with_generic_type_annotation():
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" response"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]\n\n"))])
-        yield ModelResponseStream(
-            model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))]
-        )
+        yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="\n\n[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" completed"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]"))])

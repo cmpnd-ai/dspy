@@ -49,7 +49,7 @@ class Avatar(dspy.Module):
 
         self.verbose = verbose
         self.max_iters = max_iters
-        self.actor = dspy.TypedPredictor(self.actor_signature)
+        self.actor = dspy.Predict(self.actor_signature)
 
         self.actor_clone = deepcopy(self.actor)
 

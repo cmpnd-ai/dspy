@@ -168,8 +168,11 @@ class ProgramOfThought(Module):
         code_block = code_match.group(1) if code_match else code
         if not code_block:
             return code, "Error: Empty code after parsing."
-        if "\n" not in code_block and code_block.count("=") > 1:
-            return code, "Error: Code format is not correct."
+        if "\n" not in code_block:
+            true_assigns = re.sub(r"//=\|\*\*=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|@=", "=", code_block)
+            true_assigns = re.sub(r"==|!=|<=|>=", "", true_assigns)
+            if true_assigns.count("=") > 1:
+                return code, "Error: Code format is not correct."
         lines = code_block.split("\n")
         last_line_match = re.match(r"^(\w+)\s*=", lines[-1].strip())
         if last_line_match:

@@ -295,3 +295,93 @@ def test_pot_parse_code_multiline_assignment_still_appends_echo():
 
     assert error is None
     assert code_block == "x = 1\nanswer = x + 41\nanswer"
+
+
+@pytest.mark.parametrize(
+    "generated_code,expected_block",
+    [
+        ("result = 5 == 3", "result = 5 == 3\nresult"),
+        ("ok = 1 <= 2", "ok = 1 <= 2\nok"),
+        ("flag = a != b", "flag = a != b\nflag"),
+        ("is_equal = (x == y)", "is_equal = (x == y)\nis_equal"),
+        ("result = (5 == 3)", "result = (5 == 3)\nresult"),
+        ("x = a == b == c", "x = a == b == c\nx"),
+        ("print(a == b)", "print(a == b)"),
+    ],
+)
+def test_pot_parse_code_accepts_single_line_comparison(generated_code, expected_block):
+    """Single-line code blocks whose extra `=` characters belong to comparison operators
+    (==, !=, <=, >=) are single assignments and must be accepted by _parse_code, not
+    rejected by the multi-assignment guard. The trailing-name echo must still be appended
+    when the line is a `name = ...` assignment."""
+    pot = ProgramOfThought(BasicQA)
+
+    code_block, error = pot._parse_code({"generated_code": f"```python\n{generated_code}\n```"})
+
+    assert error is None
+    assert code_block == expected_block
+
+
+@pytest.mark.parametrize(
+    "generated_code",
+    ["x += 1", "x <<= 1", "x //= 2", "x **= 2", "x += 1 if a == b else 0"],
+)
+def test_pot_parse_code_accepts_single_line_augmented_assignment(generated_code):
+    """Augmented assignments (+=, -=, <<=, //=, **=, ...) are single assignments and must
+    not be rejected; combining one with a comparison operator on the RHS must still pass.
+    No trailing echo is appended because the line does not match the `name =` prefix."""
+    pot = ProgramOfThought(BasicQA)
+
+    code_block, error = pot._parse_code({"generated_code": f"```python\n{generated_code}\n```"})
+
+    assert error is None
+    assert code_block == generated_code
+
+
+@pytest.mark.parametrize(
+    "generated_code",
+    ["a = b = 5", "a = 1; b = 2", "x += 1; y -= 2", "x <<= 1; y >>= 2", "invalid=python=code"],
+)
+def test_pot_parse_code_still_rejects_genuine_multi_assignment_single_line(generated_code):
+    """Guard value preserved: genuine multi-assignment single-liners (chained `a = b = c`,
+    semicolon-separated statements, multiple augmented assignments, or `k=v=w` shapes) are
+    still rejected, because the output-capturing echo only handles a single trailing
+    assignment."""
+    pot = ProgramOfThought(BasicQA)
+
+    _, error = pot._parse_code({"generated_code": f"```python\n{generated_code}\n```"})
+
+    assert error == "Error: Code format is not correct."
+
+
+def test_pot_executes_single_line_comparison_code_without_retry():
+    """End-to-end regression: a single-line code block containing a comparison operator
+    (==, !=, <=, >=) must be dispatched to the interpreter and succeed on the first hop,
+    not be rejected by _parse_code. Uses a MockInterpreter so no Deno runtime is required.
+    Before the fix, _parse_code returned 'Error: Code format is not correct.', wasting
+    retries and raising 'Max hops reached' if the LM held the same shape across hops."""
+    factory = MockInterpreterFactory(responses=[FinalOutput({"answer": "False"})])
+    pot = ProgramOfThought(BasicQA, max_iters=3, interpreter_factory=factory)
+    pot.code_generate = StaticPredictor(generated_code="```python\nresult = 5 == 3\n```")
+    pot.generate_output = StaticPredictor(answer="False")
+
+    result = pot(question="Is 5 equal to 3?")
+
+    assert result.answer == "False"
+    assert len(factory.instances) == 1
+    assert factory.instances[0].call_count == 1
+    assert factory.instances[0].call_history[0][0] == "result = 5 == 3\nresult"
+
+
+@pytest.mark.deno
+def test_old_style_pot_single_line_comparison(pooled_interpreter):
+    lm = DummyLM(
+        [
+            {"reasoning": "Reason_A", "generated_code": "```python\nresult = 5 == 3\n```"},
+            {"reasoning": "Reason_B", "answer": "False"},
+        ]
+    )
+    dspy.configure(lm=lm)
+    pot = ProgramOfThought(BasicQA)
+    res = pot(pooled_interpreter, question="Is 5 equal to 3?")
+    assert res.answer == "False"

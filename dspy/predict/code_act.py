@@ -131,7 +131,7 @@ class CodeAct(ReAct, ProgramOfThought):
             trajectory = {}
             max_iters = kwargs.pop("max_iters", self.max_iters)
             for idx in range(max_iters):
-                code_data = self.codeact(trajectory=trajectory, **kwargs)
+                code_data = self.codeact(trajectory=self._format_trajectory(trajectory), **kwargs)
                 output = None
                 code, error = self._parse_code(code_data)
 

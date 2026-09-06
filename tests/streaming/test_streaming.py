@@ -949,6 +949,202 @@ async def test_stream_listener_allow_reuse():
     assert concat_message == "To get to the other side!To get to the other side!"
 
 
+def _gpt_4o_mini_answer_stream():
+    # Recorded streaming from openai/gpt-4o-mini for a single `question->answer` predict.
+    toks = [
+        "[[",
+        " ##",
+        " answer",
+        " ##",
+        " ]]\n\n",
+        "To",
+        " get",
+        " to",
+        " the",
+        " other",
+        " side",
+        "!\n\n[[ ##",
+        " completed",
+        " ##",
+        " ]]",
+    ]
+
+    async def gen(*args, **kwargs):
+        for t in toks:
+            yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=t))])
+
+    return gen
+
+
+def _patched_acompletion(n_streams):
+    streams = [_gpt_4o_mini_answer_stream() for _ in range(n_streams)]
+
+    async def side_effect(*args, **kwargs):
+        return streams.pop(0)()
+
+    return mock.patch("litellm.acompletion", side_effect=side_effect)
+
+
+@pytest.mark.anyio
+async def test_streamer_reusable_default_config_streams_every_call():
+    # Regression test: invoking a streamify-returned callable more than once must keep emitting
+    # incremental StreamResponse chunks on every call. Before the fix, the captured listeners
+    # retained stream_end=True from finalize() of the first call, so receive() early-returned
+    # (allow_reuse defaults to False) and all incremental chunks were silently dropped on call 2+.
+    class MyProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predict = dspy.Predict("question->answer")
+
+        def forward(self, question, **kwargs):
+            return self.predict(question=question, **kwargs)
+
+    program = dspy.streamify(
+        MyProgram(),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+    )
+    with (
+        _patched_acompletion(3),
+        dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()),
+    ):
+        results = []
+        for _ in range(3):
+            n_chunks = 0
+            has_prediction = False
+            async for value in program(question="why did a chicken cross the kitchen?"):
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    n_chunks += 1
+                elif isinstance(value, dspy.Prediction):
+                    has_prediction = True
+            results.append((n_chunks, has_prediction))
+    assert results == [(7, True), (7, True), (7, True)]
+
+
+@pytest.mark.anyio
+async def test_streamer_reusable_with_final_prediction_suppressed():
+    # Regression test for the worst-case tier: when include_final_prediction_in_output_stream=False
+    # is set at streamify() construction, reusing the streamer used to yield an EMPTY stream on call
+    # 2+ (no chunks, no Prediction) because the final-prediction guard depended on stale listener
+    # state. After the fix, every call should stream the field chunks and the final Prediction.
+    class MyProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predict = dspy.Predict("question->answer")
+
+        def forward(self, question, **kwargs):
+            return self.predict(question=question, **kwargs)
+
+    program = dspy.streamify(
+        MyProgram(),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+        include_final_prediction_in_output_stream=False,
+    )
+    with (
+        _patched_acompletion(3),
+        dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()),
+    ):
+        counts = []
+        for _ in range(3):
+            n_values = 0
+            async for _ in program(question="why did a chicken cross the kitchen?"):
+                n_values += 1
+            counts.append(n_values)
+    assert counts == [7, 7, 7]
+
+
+@pytest.mark.anyio
+async def test_streamer_reusable_consecutive_calls_match_content():
+    # Regression test: not only the count of chunks but their concatenated content must be
+    # identical across reused calls, ensuring listener buffers/queues are fully reset (not just
+    # the flags) so no stale tokens leak between calls.
+    class MyProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predict = dspy.Predict("question->answer")
+
+        def forward(self, question, **kwargs):
+            return self.predict(question=question, **kwargs)
+
+    program = dspy.streamify(
+        MyProgram(),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+    )
+    with (
+        _patched_acompletion(2),
+        dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()),
+    ):
+        messages = []
+        for _ in range(2):
+            concat = []
+            async for value in program(question="why did a chicken cross the kitchen?"):
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    concat.append(value.chunk)
+            messages.append("".join(concat))
+    assert messages[0] == "To get to the other side!"
+    assert messages[1] == messages[0]
+
+
+@pytest.mark.anyio
+async def test_stream_listener_reset_clears_runtime_state():
+    # Unit test for StreamListener.reset(): after a listener has been driven to stream_end, reset()
+    # must restore the same run-time state as a freshly constructed listener (excluding config).
+    listener = dspy.streaming.StreamListener(signature_field_name="answer")
+    listener.stream_start = True
+    listener.stream_end = True
+    listener.cache_hit = True
+    listener.field_start_queue = ["stale"]
+    listener.field_end_queue.put("stale")
+    listener.json_adapter_state["field_accumulated_messages"] = "stale"
+
+    listener.reset()
+
+    assert listener.stream_start is False
+    assert listener.stream_end is False
+    assert listener.cache_hit is False
+    assert listener.field_start_queue == []
+    assert listener.field_end_queue.qsize() == 0
+    assert listener.json_adapter_state["field_accumulated_messages"] == ""
+    # Configuration must be preserved across reset.
+    assert listener.signature_field_name == "answer"
+    assert listener.allow_reuse is False
+
+
+@pytest.mark.anyio
+async def test_streamer_reusable_allow_reuse_true_streams_every_call():
+    # Regression test: allow_reuse=True (the documented intra-run reuse opt-in) must keep working
+    # for inter-call reuse too, and reset() at the start of each call must not regress intra-run
+    # reuse behavior.
+    class MyProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predict = dspy.Predict("question->answer")
+
+        def forward(self, question, **kwargs):
+            return self.predict(question=question, **kwargs)
+
+    program = dspy.streamify(
+        MyProgram(),
+        stream_listeners=[
+            dspy.streaming.StreamListener(signature_field_name="answer", allow_reuse=True),
+        ],
+    )
+    with (
+        _patched_acompletion(3),
+        dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()),
+    ):
+        results = []
+        for _ in range(3):
+            n_chunks = 0
+            has_prediction = False
+            async for value in program(question="why did a chicken cross the kitchen?"):
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    n_chunks += 1
+                elif isinstance(value, dspy.Prediction):
+                    has_prediction = True
+            results.append((n_chunks, has_prediction))
+    assert results == [(7, True), (7, True), (7, True)]
+
+
 @pytest.mark.anyio
 async def test_stream_listener_returns_correct_chunk_xml_adapter():
     class MyProgram(dspy.Module):
@@ -1305,9 +1501,7 @@ async def test_chat_adapter_with_generic_type_annotation():
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" response"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]\n\n"))])
-        yield ModelResponseStream(
-            model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))]
-        )
+        yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="\n\n[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" completed"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]"))])

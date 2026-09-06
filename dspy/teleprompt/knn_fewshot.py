@@ -9,7 +9,9 @@ from dspy.teleprompt.teleprompt import Teleprompter
 
 
 class KNNFewShot(Teleprompter):
-    def __init__(self, k: int, trainset: list[Example], vectorizer: Embedder, **few_shot_bootstrap_args: dict[str, Any]):
+    def __init__(
+        self, k: int, trainset: list[Example], vectorizer: Embedder, **few_shot_bootstrap_args: dict[str, Any]
+    ):
         """
         KNNFewShot is an optimizer that uses an in-memory KNN retriever to find the k nearest neighbors
         in a trainset at test time. For each input example in a forward call, it identifies the k most
@@ -48,6 +50,13 @@ class KNNFewShot(Teleprompter):
             # Use the compiled module
             result = compiled_qa("What is the capital of Belgium?")
             ```
+
+        Note: when caching is enabled (the default) and you switch the checkpoint while sharing the default on-disk
+        cache (``~/.dspy_cache``), pass a checkpoint-level ``model_id`` to the ``Embedder`` so each checkpoint keeps
+        its own cached vectors -- two ``Embedder`` instances backed by different checkpoints of the same class would
+        otherwise collide in the cache. For example::
+
+            vectorizer=dspy.Embedder(SentenceTransformer("paraphrase-MiniLM-L6-v2").encode, model_id="paraphrase-MiniLM-L6-v2")
         """
         self.KNN = KNN(k, trainset, vectorizer=vectorizer)
         self.few_shot_bootstrap_args = few_shot_bootstrap_args

@@ -168,3 +168,46 @@ def test_validation_set_usage():
 
     # Check that validation examples are part of student's demos after compilation
     assert len(compiled_student.predictor.demos) >= len(valset), "Validation set not used in compiled student demos"
+
+
+def test_compile_with_empty_trainset(capsys):
+    # An empty (or fully-filtered) trainset is a legitimate input: upstream callers
+    # such as BootstrapFewShotWithRandomSearch, KNNFewShot, and teleprompt_optuna forward
+    # user-supplied datasets without guarding against empties, and LabeledFewShot.compile
+    # (run during _prepare_student_and_teacher) tolerates an empty trainset, so execution
+    # reaches _bootstrap's summary print. Previously this raised UnboundLocalError because
+    # the loop variable `example_idx` was never bound when the trainset was empty.
+    student = SimpleModule("input -> output")
+    dspy.configure(lm=DummyLM([]))
+
+    bootstrap = BootstrapFewShot(metric=simple_metric, max_bootstrapped_demos=4, max_labeled_demos=16)
+
+    compiled_student = bootstrap.compile(student, trainset=[])
+
+    # Compilation must complete and return a compiled student.
+    assert compiled_student is not None
+    assert getattr(compiled_student, "_compiled", False) is True
+
+    # No bootstrapped demos AND no labeled demos: both trainset and validation are empty.
+    assert compiled_student.predictor.demos == []
+
+    # The summary line must execute and report zero work rather than crash.
+    out = capsys.readouterr().out
+    assert "Bootstrapped 0 full traces after 0 examples" in out
+    assert "amounting to 0 attempts" in out
+
+
+def test_compile_summary_print_nonempty_trainset(capsys):
+    # Guards the non-empty path: the summary print must still execute after the loop
+    # and report the number of examples visited (1 for a single-example trainset).
+    student = SimpleModule("input -> output")
+    teacher = SimpleModule("input -> output")
+    lm = DummyLM([{"output": "blue"}, {"output": "Ring-ding-ding-ding-dingeringeding!"}], follow_examples=True)
+    dspy.configure(lm=lm, trace=[])
+
+    bootstrap = BootstrapFewShot(metric=simple_metric, max_bootstrapped_demos=1, max_labeled_demos=1)
+    bootstrap.compile(student, teacher=teacher, trainset=trainset)
+
+    out = capsys.readouterr().out
+    assert "Bootstrapped" in out
+    assert "after 1 examples" in out

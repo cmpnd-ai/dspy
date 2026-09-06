@@ -150,7 +150,7 @@ class DatabricksRM(dspy.Retrieve):
                 " databricks_client_secret parameters, or set the DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET"
             )
         self.databricks_index_name = databricks_index_name
-        self.columns = list({docs_id_column_name, text_column_name, *(columns or [])})
+        self.columns = list({docs_id_column_name, text_column_name, docs_uri_column_name, *(columns or [])} - {None})
         self.filters_json = filters_json
         self.k = k
         self.docs_id_column_name = docs_id_column_name
@@ -287,6 +287,11 @@ class DatabricksRM(dspy.Retrieve):
 
         if self.text_column_name not in col_names:
             raise Exception(f"text_column_name: '{self.text_column_name}' is not in the index columns: \n {col_names}")
+
+        if self.docs_uri_column_name and self.docs_uri_column_name not in col_names:
+            raise Exception(
+                f"docs_uri_column_name: '{self.docs_uri_column_name}' is not in the index columns: \n {col_names}"
+            )
 
         # Extracting the results
         items = []

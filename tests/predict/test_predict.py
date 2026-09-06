@@ -1780,3 +1780,85 @@ def test_custom_signature_types(caplog, enable_type_warnings):
         assert "Type mismatch for field 'query': expected Query" in caplog.text
     else:
         assert "Type mismatch" not in caplog.text
+
+
+def _capture_provider_request(lm_kwargs: dict, call_config: dict, *, predict_config: dict | None = None) -> dict:
+    """Run ``Predict("question -> answer")`` through the real call path and return
+    the request dict that reaches the provider's completion function.
+
+    ``lm_kwargs`` are forwarded to ``dspy.LM(...)`` (e.g. ``temperature``, ``n``).
+    ``call_config`` is the per-call ``config={...}`` dict passed to the predictor.
+    ``predict_config`` is the ``**config`` passed to ``Predict(...)`` (``self.config``).
+    """
+    lm = dspy.LM(model="openai/gpt-4o-mini", model_type="chat", cache=False, **lm_kwargs)
+    predict = dspy.Predict("question -> answer", **(predict_config or {}))
+    predict.lm = lm
+
+    captured = {}
+
+    def fake_completion(*args, **kwargs):
+        captured["request"] = dict(kwargs["request"])
+        n = captured["request"].get("n") or 1
+        return ModelResponse(
+            choices=[{"message": {"content": "[[ ## answer ## ]]\nok"}} for _ in range(n)],
+            usage={"total_tokens": 1},
+        )
+
+    with patch("dspy.clients.lm.litellm_completion", side_effect=fake_completion):
+        predict(question="hi", config=call_config)
+
+    return captured["request"]
+
+
+def test_temperature_zero_with_n_greater_than_one_is_bumped():
+    """Explicit ``temperature=0`` with ``n > 1`` must be bumped to ``0.7``.
+
+    Regression: the ``or`` chain previously treated ``0`` as "unset" and fell
+    back to the LM's stored temperature, so a shared LM holding a higher
+    temperature shadowed the explicit ``0`` and the bump never fired -- the
+    provider then sampled greedily at ``temperature=0`` and ``n`` completions
+    collapsed to near-duplicates.
+    """
+    request = _capture_provider_request(
+        lm_kwargs={"temperature": 1.0},
+        call_config={"temperature": 0, "n": 5},
+    )
+    assert request["temperature"] == 0.7
+    assert request["n"] == 5
+
+
+def test_temperature_zero_bump_independent_of_lm_temperature():
+    """The same per-call config must yield the same provider temperature
+    regardless of the shared LM's stored temperature (a value the caller never set).
+    """
+    request_with_lm_temp = _capture_provider_request(
+        lm_kwargs={"temperature": 1.0},
+        call_config={"temperature": 0, "n": 5},
+    )
+    request_without_lm_temp = _capture_provider_request(
+        lm_kwargs={},
+        call_config={"temperature": 0, "n": 5},
+    )
+    assert request_with_lm_temp["temperature"] == request_without_lm_temp["temperature"] == 0.7
+
+
+def test_temperature_zero_n_one_not_bumped():
+    """``temperature=0`` with ``n == 1`` is not bumped (the bump only fires for ``n > 1``)."""
+    request = _capture_provider_request(
+        lm_kwargs={"temperature": 1.0},
+        call_config={"temperature": 0, "n": 1},
+    )
+    assert request["temperature"] == 0
+
+
+def test_temperature_unset_uses_lm_temperature_above_threshold():
+    """When unset in the call config, a stored LM temperature above ``0.15`` is forwarded as-is.
+
+    Guards that the ``None``-check fallback to ``lm.kwargs`` still works and is not
+    broken by the fix (which only changed the ``temperature=0`` shadowing path).
+    """
+    request = _capture_provider_request(
+        lm_kwargs={"temperature": 0.7},
+        call_config={"n": 5},
+    )
+    assert request["temperature"] == 0.7

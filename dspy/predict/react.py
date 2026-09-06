@@ -5,7 +5,7 @@ import dspy
 from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
-from dspy.utils.exceptions import ContextWindowExceededError, format_error_for_lm
+from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError, format_error_for_lm
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class ReAct(Module):
             except ContextWindowExceededError as err:
                 logger.warning(f"Ending the trajectory: {format_error_for_lm(err, traceback_frames=5)}")
                 break
-            except ValueError as err:
+            except (ValueError, AdapterParseError) as err:
                 logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {format_error_for_lm(err, traceback_frames=5)}")
                 break
 
@@ -129,7 +129,7 @@ class ReAct(Module):
             except ContextWindowExceededError as err:
                 logger.warning(f"Ending the trajectory: {format_error_for_lm(err, traceback_frames=5)}")
                 break
-            except ValueError as err:
+            except (ValueError, AdapterParseError) as err:
                 logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {format_error_for_lm(err, traceback_frames=5)}")
                 break
 

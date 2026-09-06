@@ -391,10 +391,12 @@ class LM(BaseLM):
                 train_kwargs=job.train_kwargs,
             )
             lm = self.copy(model=model)
-            job.set_result(lm)
+            if not job.cancelled():
+                job.set_result(lm)
         except Exception as err:
             logger.error(err)
-            job.set_result(err)
+            if not job.cancelled():
+                job.set_result(err)
 
     def infer_provider(self) -> Provider:
         if OpenAIProvider.is_provider_model(self.model):

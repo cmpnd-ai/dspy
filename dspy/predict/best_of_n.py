@@ -52,6 +52,7 @@ class BestOfN(Module):
         start = lm.kwargs.get("rollout_id", 0)
         rollout_ids = [start + i for i in range(self.N)]
         best_pred, best_trace, best_reward = None, None, -float("inf")
+        fail_count = self.fail_count
 
         for idx, rid in enumerate(rollout_ids):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
@@ -74,9 +75,9 @@ class BestOfN(Module):
 
             except Exception as e:
                 print(f"BestOfN: Attempt {idx + 1} failed with rollout id {rid}: {e}")
-                if idx > self.fail_count:
+                fail_count -= 1
+                if fail_count < 0:
                     raise e
-                self.fail_count -= 1
 
         if best_trace:
             dspy.settings.trace.extend(best_trace)

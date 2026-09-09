@@ -1,9 +1,6 @@
 import functools
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-import anyio
-from anyio import CapacityLimiter
-
 if TYPE_CHECKING:
     from dspy.primitives.module import Module
 
@@ -17,6 +14,10 @@ def get_async_max_workers():
 
 
 def get_limiter():
+    # anyio is imported here, not at module scope: it pulls ssl, which CPython builds
+    # with a reduced stdlib omit, and asyncify is optional.
+    from anyio import CapacityLimiter
+
     async_max_workers = get_async_max_workers()
 
     global _limiter
@@ -44,6 +45,8 @@ def asyncify(program: "Module") -> Callable[[Any, Any], Awaitable[Any]]:
     """
 
     async def async_program(*args, **kwargs) -> Any:
+        import anyio.to_thread
+
         # Capture the current overrides at call-time.
         from dspy.dsp.utils.settings import thread_local_overrides
 

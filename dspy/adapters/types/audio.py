@@ -7,9 +7,11 @@ from typing import Any, Union
 from urllib.parse import urlparse
 
 import pydantic
-import requests
 
 from dspy.adapters.types.base_type import Type
+from dspy.utils.lazy_import import require
+
+requests = require("requests")
 
 try:
     import soundfile as sf

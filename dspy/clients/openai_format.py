@@ -3,7 +3,7 @@
 This module does not call any provider. It only maps data shapes:
 
 ```text
-LMRequest -> OpenAI Chat / Responses / text-completion kwargs
+LMRequest -> OpenAI Chat / Responses kwargs
 provider response -> LMResponse
 ```
 
@@ -13,9 +13,8 @@ this order when learning it:
 
 1. `to_openai_chat_request()` maps chat-completion requests.
 2. `to_openai_responses_request()` maps Responses API requests.
-3. `to_openai_text_request()` maps legacy text-completion requests.
-4. `completion_to_lm_response()` and `responses_to_lm_response()` map outputs.
-5. The final utility section handles media sources, data URIs, and object/dict
+3. `completion_to_lm_response()` and `responses_to_lm_response()` map outputs.
+4. The final utility section handles media sources, data URIs, and object/dict
    access.
 """
 
@@ -54,7 +53,6 @@ from dspy.core.types import (
 __all__ = [
     "to_openai_chat_request",
     "to_openai_responses_request",
-    "to_openai_text_request",
     "tool_to_openai_responses",
     "completion_to_lm_response",
     "responses_to_lm_response",
@@ -208,34 +206,6 @@ def content_block_to_responses(block: dict[str, Any], role: str = "user") -> dic
             "file_id": file.get("file_id"),
         }
     return block
-
-
-# ---------------------------------------------------------------------------
-# DSPy request -> OpenAI text completions
-#
-# Text completions have no native message roles. We concatenate text-only
-# messages with blank lines and append DSPy's historical response marker.
-# ---------------------------------------------------------------------------
-
-
-def to_openai_text_request(request: LMRequest) -> dict[str, Any]:
-    """Convert a normalized DSPy request into text-completion kwargs."""
-    data = {"model": request.model, "prompt": messages_to_text_prompt(request.messages)}
-    data.update(text_config_kwargs(request.config))
-    return data
-
-
-def messages_to_text_prompt(messages: list[LMMessage]) -> str:
-    """Flatten text-only messages into the prompt used by text completions."""
-    chunks = []
-    for message in messages:
-        texts = []
-        for part in message.parts:
-            if not isinstance(part, LMTextPart):
-                raise ValueError(f"OpenAI text completions only support text parts, but received {type(part).__name__}.")
-            texts.append(part.text)
-        chunks.append("".join(texts))
-    return "\n\n".join(chunks + ["BEGIN RESPONSE:"])
 
 
 # ---------------------------------------------------------------------------
@@ -485,22 +455,6 @@ def responses_config_kwargs(
     if config.response_format is not None:
         text = data.pop("text", {})
         data["text"] = {**text, "format": response_format_to_responses(config.response_format)}
-    return data
-
-
-def text_config_kwargs(config: LMConfig) -> dict[str, Any]:
-    """Convert shared DSPy config fields into text-completion kwargs."""
-    data = dict(config.extensions)
-    for key in ("temperature", "max_tokens", "top_p"):
-        value = getattr(config, key)
-        if value is not None:
-            data[key] = value
-    if config.stop:
-        data["stop"] = config.stop
-    if config.logprobs is not None:
-        data["logprobs"] = config.logprobs
-    if config.n is not None:
-        data["n"] = config.n
     return data
 
 

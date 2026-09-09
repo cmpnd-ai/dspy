@@ -12,18 +12,12 @@ from dspy.core.types import (
     LMImagePart,
     LMMessage,
     LMOutput,
-    LMOutputBuilder,
     LMPromptCacheConfig,
     LMReasoningConfig,
     LMRequest,
-    LMRequestPatch,
     LMResponse,
-    LMStreamDeltaEvent,
-    LMTextDelta,
     LMTextPart,
-    LMThinkingDelta,
     LMThinkingPart,
-    LMToolCallDelta,
     LMToolCallPart,
     LMToolChoice,
     LMToolResultPart,
@@ -334,8 +328,6 @@ def test_document_source_url_stays_url_and_round_trips_through_history_messages(
 
 
 def test_config_extensions_flatten_when_converted_to_legacy_kwargs():
-    config = LMConfig.from_kwargs(temperature=0.2, provider_flag=True)
-    patch = LMRequestPatch(config=config)
     request = LMRequest.from_call(model="model", prompt="hi", temperature=0.2, provider_flag=True)
     entry = LMHistoryEntry(
         request=request,
@@ -344,7 +336,6 @@ def test_config_extensions_flatten_when_converted_to_legacy_kwargs():
         uuid="uuid",
     )
 
-    assert patch.as_lm_kwargs() == {"provider_flag": True, "temperature": 0.2}
     assert entry.kwargs == {"provider_flag": True, "temperature": 0.2}
 
 
@@ -448,49 +439,3 @@ def test_output_to_value_preserves_redacted_thinking_part():
     output = LMOutput(parts=[thinking])
 
     assert output.to_value() == [thinking]
-
-
-def test_stream_event_indices_must_be_non_negative():
-    with pytest.raises(pydantic.ValidationError):
-        LMStreamDeltaEvent(output_index=-1, part_index=0, delta=LMTextDelta(text="x"))
-
-    with pytest.raises(pydantic.ValidationError):
-        LMStreamDeltaEvent(output_index=0, part_index=-1, delta=LMTextDelta(text="x"))
-
-
-def test_stream_builder_rejects_sparse_output_indices():
-    builder = LMOutputBuilder()
-    builder.apply(LMStreamDeltaEvent(output_index=2, part_index=0, delta=LMTextDelta(text="third")))
-
-    with pytest.raises(ValueError, match="output indices"):
-        builder.to_response()
-
-
-def test_stream_builder_rejects_sparse_part_indices():
-    builder = LMOutputBuilder()
-    builder.apply(LMStreamDeltaEvent(output_index=0, part_index=1, delta=LMTextDelta(text="second")))
-
-    with pytest.raises(ValueError, match="part indices"):
-        builder.to_response()
-
-
-def test_stream_builder_rejects_delta_type_changes():
-    builder = LMOutputBuilder()
-    builder.apply(LMStreamDeltaEvent(output_index=0, part_index=0, delta=LMTextDelta(text="text")))
-
-    with pytest.raises(ValueError, match="thinking delta"):
-        builder.apply(LMStreamDeltaEvent(output_index=0, part_index=0, delta=LMThinkingDelta(text="thought")))
-
-
-def test_stream_builder_rejects_incomplete_tool_call_arguments():
-    builder = LMOutputBuilder()
-    builder.apply(
-        LMStreamDeltaEvent(
-            output_index=0,
-            part_index=0,
-            delta=LMToolCallDelta(id="call_1", name="search", args_delta='{"query": '),
-        )
-    )
-
-    with pytest.raises(ValueError, match="tool-call arguments"):
-        builder.to_response()

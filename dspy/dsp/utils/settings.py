@@ -35,6 +35,9 @@ DEFAULT_CONFIG = dotdict(
     max_history_size=10000,
     max_trace_size=10000,
     warn_on_type_mismatch=True,  # Whether to log warnings when a module's input type doesn't match the signature type.
+    # Creates the interpreter for code-executing modules that were not given their own
+    # `interpreter_factory`. None means `dspy.PythonInterpreter`.
+    interpreter_factory=None,
 )
 
 # Global base configuration and owner tracking

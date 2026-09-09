@@ -32,7 +32,7 @@ The model steering the loop and the model answering snippets need not be the sam
 
 ### 7. Generated code runs in a pluggable sandboxed interpreter
 
-The model’s code is untrusted, so it runs in a sandbox. The default `PythonInterpreter` executes Python in a Deno and Pyodide WASM runtime with no filesystem or network access. Each `forward()` creates one interpreter, uses it for the whole REPL loop, and shuts it down afterward. Supply `interpreter_factory=` to configure another `CodeInterpreter`, such as an adapter for a remote sandbox.
+The model’s code is untrusted, so it runs in a sandbox. The default `PythonInterpreter` executes Python in a Deno and Pyodide WASM runtime with no filesystem or network access. Each `forward()` creates one interpreter, uses it for the whole REPL loop, and shuts it down afterward. Supply `interpreter_factory=` to use another `CodeInterpreter`, such as an adapter for a remote sandbox, or `dspy.configure(interpreter_factory=...)` to choose one for every code-executing module in the program at once — which is how a deployment that cannot run Deno replaces the default everywhere.
 
 ### 8. `SandboxSerializable` loads large inputs into the sandbox once
 
@@ -90,7 +90,7 @@ The model for `llm_query` and `llm_query_batched`. Left unset it falls back to `
 A list of plain functions or `dspy.Tool` objects. RLM normalizes each to a `Tool`, rejects names that aren’t valid identifiers or that collide with the built-ins, and documents their signatures in the action prompt. The model calls them as ordinary Python inside its code.
 
 **`interpreter_factory=...`**
-A zero-argument callable that returns a fresh `CodeInterpreter` for one invocation. RLM may call the factory concurrently, and it always shuts down the returned interpreter. A class such as `PythonInterpreter` is already a factory; use `functools.partial` or a callable provider object when construction needs configuration. RLM adds invocation-scoped tools to the returned interpreter's mutable `tools` dictionary, so remote sandboxes need a `CodeInterpreter` adapter that supports that protocol.
+A zero-argument callable that returns a fresh `CodeInterpreter` for one invocation. RLM may call the factory concurrently, and it always shuts down the returned interpreter. A class such as `PythonInterpreter` is already a factory; use `functools.partial` or a callable provider object when construction needs configuration. RLM adds invocation-scoped tools to the returned interpreter's mutable `tools` dictionary, so remote sandboxes need a `CodeInterpreter` adapter that supports that protocol. `PythonInterpreter` is the default. When you call `dspy.configure(interpreter_factory=...)`, that setting overrides the default on each `forward()`, so `dspy.context(interpreter_factory=...)` scopes the choice. If the active factory exposes an `execution_instructions` string, RLM refreshes it for each action call so the prompt matches the runtime executing the generated code.
 
 **`__call__(interpreter, **inputs)` / `acall(interpreter, **inputs)`**
 An escape hatch for a caller-owned interpreter, supplied as the first positional argument. RLM mutates its `tools` dictionary and, when supported, its output-field metadata, but does not shut down or restore the instance. Reuse is supported only for sequential calls to the same RLM instance, so retained variables and tool registrations stay within one program and trust boundary. Use `interpreter_factory` for concurrent invocations. A `PythonInterpreter` override must also stay on the thread where it was first used.

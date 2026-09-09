@@ -5,10 +5,15 @@ This module defines the CodeInterpreter protocol that allows RLM and other
 code-executing modules to work with different interpreter implementations:
 - PythonInterpreter: Local Deno/Pyodide WASM interpreter
 - MockInterpreter: Scriptable responses for testing
+
+It also resolves which implementation a module gets: a module's own
+``interpreter_factory`` argument, else ``dspy.settings.interpreter_factory``, else
+``PythonInterpreter``. See :func:`resolve_interpreter_factory`.
 """
 
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from dspy.dsp.utils.settings import settings
 from dspy.utils.exceptions import DSPyError
 
 # Types that can be used directly in Python function signatures for SUBMIT()
@@ -147,24 +152,64 @@ class CodeInterpreter(Protocol):
         ...
 
 
-def _validate_interpreter_factory(factory: Any) -> None:
+def _validate_interpreter_factory(factory: Any, name: str = "interpreter_factory") -> None:
     """Validate the configured provider without invoking it."""
     if not isinstance(factory, type) and isinstance(factory, CodeInterpreter):
         raise TypeError(
-            "interpreter_factory received an object that already implements CodeInterpreter, so its ownership "
+            f"{name} received an object that already implements CodeInterpreter, so its ownership "
             "is ambiguous. Pass an existing interpreter as the first positional argument when calling the module. "
             "If this object also creates interpreters, pass a dedicated zero-argument creation callable instead."
         )
     if not callable(factory):
         raise TypeError(
-            "interpreter_factory must be a zero-argument callable that creates a CodeInterpreter, "
+            f"{name} must be a zero-argument callable that creates a CodeInterpreter, "
             f"not {type(factory).__name__}."
         )
 
 
-def _create_interpreter(factory: Callable[[], CodeInterpreter]) -> CodeInterpreter:
-    """Create an interpreter and validate the factory's return value."""
-    interpreter = factory()
+def resolve_interpreter_factory(
+    factory: Callable[[], CodeInterpreter] | None = None,
+) -> Callable[[], CodeInterpreter]:
+    """Return the factory that should create the next interpreter.
+
+    ``PythonInterpreter`` is the default. When callers set
+    ``dspy.configure(interpreter_factory=...)``, that setting overrides the default. A
+    different factory passed to a module takes priority.
+
+    Deployments that cannot run the default interpreter — a sandbox with no subprocesses,
+    say — configure their own once and every DSPy module picks it up:
+
+    ```python
+    dspy.configure(interpreter_factory=MyInterpreter)
+    ```
+
+    Custom code-executing modules should call this at the point where they create an
+    interpreter, so that ``dspy.context(interpreter_factory=...)`` scopes as callers expect.
+
+    Args:
+        factory: A module's zero-argument factory. ``None`` and ``PythonInterpreter`` use
+            the configured default.
+
+    Raises:
+        TypeError: If ``dspy.settings.interpreter_factory`` is not a zero-argument callable.
+    """
+    # Imported here because python_interpreter imports this module.
+    from dspy.primitives.python_interpreter import PythonInterpreter
+
+    if factory is not None and factory is not PythonInterpreter:
+        return factory
+
+    configured = settings.get("interpreter_factory")
+    if configured is None:
+        return PythonInterpreter
+
+    _validate_interpreter_factory(configured, name="dspy.settings.interpreter_factory")
+    return configured
+
+
+def _create_interpreter(factory: Callable[[], CodeInterpreter] | None) -> CodeInterpreter:
+    """Create an interpreter from ``factory``, or from the configured one, and validate it."""
+    interpreter = resolve_interpreter_factory(factory)()
     if not isinstance(interpreter, CodeInterpreter):
         raise TypeError(
             "interpreter_factory must return a CodeInterpreter, "

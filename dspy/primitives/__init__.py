@@ -1,5 +1,11 @@
 from dspy.primitives.base_module import BaseModule
-from dspy.primitives.code_interpreter import CodeExecutionError, CodeInterpreter, CodeInterpreterError, FinalOutput
+from dspy.primitives.code_interpreter import (
+    CodeExecutionError,
+    CodeInterpreter,
+    CodeInterpreterError,
+    FinalOutput,
+    resolve_interpreter_factory,
+)
 from dspy.primitives.example import Example
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Completions, Prediction
@@ -18,4 +24,5 @@ __all__ = [
     "Prediction",
     "PythonInterpreter",
     "SandboxSerializable",
+    "resolve_interpreter_factory",
 ]

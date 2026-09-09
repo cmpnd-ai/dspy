@@ -554,3 +554,46 @@ def test_prepare_cached_response_marks_strict_models_as_cache_hit(cache):
     # The original response is not mutated.
     assert getattr(response, "cache_hit", False) is False
     assert response.usage == {"total_tokens": 3}
+
+
+# -- import-time cache configuration --
+
+
+def test_env_flag_accepts_common_truthy_spellings(monkeypatch):
+    from dspy.clients import _env_flag
+
+    for value in ("1", "true", "TRUE", "Yes", " on "):
+        monkeypatch.setenv("DSPY_TEST_FLAG", value)
+        assert _env_flag("DSPY_TEST_FLAG") is True
+
+    for value in ("", "0", "false", "no", "off", "maybe"):
+        monkeypatch.setenv("DSPY_TEST_FLAG", value)
+        assert _env_flag("DSPY_TEST_FLAG") is False
+
+    monkeypatch.delenv("DSPY_TEST_FLAG")
+    assert _env_flag("DSPY_TEST_FLAG") is False
+
+
+def test_disable_cache_env_var_turns_off_both_tiers(monkeypatch):
+    from dspy.clients import _get_dspy_cache
+
+    monkeypatch.setenv("DSPY_DISABLE_CACHE", "1")
+    cache = _get_dspy_cache()
+
+    assert cache.enable_memory_cache is False
+    assert cache.enable_disk_cache is False
+    cache.put({"model": "test", "prompt": "hello"}, "result")
+    assert cache.get({"model": "test", "prompt": "hello"}) is None
+
+
+def test_disable_disk_cache_env_var_keeps_the_memory_tier(monkeypatch):
+    from dspy.clients import _get_dspy_cache
+
+    monkeypatch.setenv("DSPY_DISABLE_DISK_CACHE", "1")
+    cache = _get_dspy_cache()
+
+    assert cache.enable_memory_cache is True
+    assert cache.enable_disk_cache is False
+    assert cache.disk_cache_dir is None
+    cache.put({"model": "test", "prompt": "hello"}, "result")
+    assert cache.get({"model": "test", "prompt": "hello"}) == "result"

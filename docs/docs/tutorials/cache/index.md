@@ -156,6 +156,24 @@ dspy.configure_cache(
 
 Please note that `disk_size_limit_bytes` defines the maximum size in bytes for the on-disk cache, while `memory_max_entries` specifies the maximum number of entries for the in-memory cache.
 
+### Disabling the cache before `import dspy`
+
+`dspy.configure_cache()` runs too late for some environments: DSPy builds the default cache
+during `import dspy`, and the on-disk tier imports `diskcache`, which imports `sqlite3`.
+CPython builds that ship a reduced standard library — WebAssembly guests, for instance — have
+no `sqlite3`, so `import dspy` fails before you get a chance to call `configure_cache()`.
+
+Two environment variables let you choose the default cache up front:
+
+```bash
+export DSPY_DISABLE_CACHE=1       # no in-memory cache, no on-disk cache
+export DSPY_DISABLE_DISK_CACHE=1  # in-memory cache only
+```
+
+`DSPY_DISABLE_CACHE=1` keeps `cachetools`, `diskcache`, and `sqlite3` out of the process
+entirely. Either variable accepts `1`, `true`, `yes`, or `on`. A later `dspy.configure_cache()`
+call still wins — these only pick the cache DSPy starts with.
+
 ## Understanding and Customizing the Cache
 
 In specific situations, you might want to implement a custom cache, for example, to gain finer control over how cache keys are generated. By default, the cache key is derived from a hash of all request arguments sent to `litellm`, excluding credentials like `api_key`.

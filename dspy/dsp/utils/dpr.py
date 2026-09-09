@@ -206,25 +206,6 @@ def has_answer(tokenized_answers, text):
     return False
 
 
-def locate_answers(tokenized_answers, text):
-    """
-    Returns each occurrence of an answer as (offset, endpos) in terms of *characters*.
-    """
-    tokenized_text = DPR_tokenize(text)
-    occurrences = []
-
-    text_words, text_word_positions = tokenized_text.words(uncased=True), tokenized_text.offsets()
-    answers_words = [ans.words(uncased=True) for ans in tokenized_answers]
-
-    for single_answer in answers_words:
-        for i in range(0, len(text_words) - len(single_answer) + 1):
-            if single_answer == text_words[i : i + len(single_answer)]:
-                (offset, _), (_, endpos) = text_word_positions[i], text_word_positions[i + len(single_answer) - 1]
-                occurrences.append((offset, endpos))
-
-    return occurrences
-
-
 STokenizer = SimpleTokenizer()
 
 
@@ -234,16 +215,3 @@ def DPR_tokenize(text):  # noqa: N802
 
 def DPR_normalize(text):  # noqa: N802
     return DPR_tokenize(text).words(uncased=True)
-
-
-# Source: https://github.com/shmsw25/qa-hard-em/blob/master/prepro_util.py
-def strip_accents(text):
-    """Strips accents from a piece of text."""
-    text = unicodedata.normalize("NFD", text)
-    output = []
-    for char in text:
-        cat = unicodedata.category(char)
-        if cat == "Mn":
-            continue
-        output.append(char)
-    return "".join(output)

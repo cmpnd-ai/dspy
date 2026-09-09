@@ -60,30 +60,6 @@ def F1(prediction, answers_list):  # noqa: N802
     return max(f1_score(prediction, ans) for ans in answers_list)
 
 
-def HotPotF1(prediction, answers_list):  # noqa: N802
-    """Compute the maximum HotPotQA-style F1 score against reference answers.
-
-    Like `F1`, but if either normalized side is one of {"yes", "no", "noanswer"}
-    and they differ, the score is 0. Otherwise, standard token-level F1 is used.
-
-    Args:
-        prediction (str): Predicted answer.
-        answers_list (list[str]): List of reference answers.
-
-    Returns:
-        float: Highest HotPotQA-style F1 in [0.0, 1.0].
-
-    Examples:
-        ```python
-        HotPotF1("yes", ["no"])  # 0.0
-        ```
-    """
-    if not isinstance(answers_list, list):
-        raise ValueError(f"`answers_list` must be a list, got {type(answers_list)}")
-
-    return max(hotpot_f1_score(prediction, ans) for ans in answers_list)
-
-
 def normalize_text(s):
     """Normalize text for string and token comparisons.
 
@@ -178,82 +154,6 @@ def f1_score(prediction, ground_truth):
     f1 = (2 * precision * recall) / (precision + recall)
 
     return f1
-
-
-def hotpot_f1_score(prediction, ground_truth):
-    """Compute HotPotQA-style token F1 with special labels.
-
-    If either normalized string is in {"yes", "no", "noanswer"} and they differ,
-    the score is 0. Otherwise compute standard token F1 after normalization.
-
-    Args:
-        prediction (str): Predicted answer.
-        ground_truth (str): Reference answer.
-
-    Returns:
-        float: HotPotQA-style F1 score in [0.0, 1.0].
-
-    Examples:
-        ```python
-        hotpot_f1_score("no", "yes")  # 0.0
-        ```
-    """
-    normalized_prediction = normalize_text(prediction)
-    normalized_ground_truth = normalize_text(ground_truth)
-
-    if normalized_prediction in ["yes", "no", "noanswer"] and normalized_prediction != normalized_ground_truth:
-        return 0
-    if normalized_ground_truth in ["yes", "no", "noanswer"] and normalized_prediction != normalized_ground_truth:
-        return 0
-
-    prediction_tokens = normalized_prediction.split()
-    ground_truth_tokens = normalized_ground_truth.split()
-    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
-    num_same = sum(common.values())
-    if num_same == 0:
-        return 0
-    precision = 1.0 * num_same / len(prediction_tokens)
-    recall = 1.0 * num_same / len(ground_truth_tokens)
-    f1 = (2 * precision * recall) / (precision + recall)
-    return f1
-
-
-def precision_score(prediction, ground_truth):
-    """Compute token-level precision of prediction against reference (after normalization).
-
-    Precision is (# overlapping tokens) / (# tokens in prediction). If there is no
-    token overlap, returns 0. If both sides are empty, a diagnostic message is printed;
-    precision remains 0.
-
-    Args:
-        prediction (str): Predicted answer.
-        ground_truth (str): Reference answer.
-
-    Returns:
-        float: Precision in [0.0, 1.0].
-
-    Examples:
-        ```python
-        precision_score("eiffel tower in paris", "eiffel tower")  # 0.67
-        ```
-    """
-    prediction_tokens = normalize_text(prediction).split()
-    ground_truth_tokens = normalize_text(ground_truth).split()
-
-    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
-    num_same = sum(common.values())
-
-    if len(prediction_tokens) == len(ground_truth_tokens) == 0:
-        # Unlike most tasks, QReCC and SQuAD-2.0 assign 1.0 in this edge case. We don't for uniformity.
-        print_message(
-            "\n#> Precision Metric: Rare edge case of len(prediction_tokens) == len(ground_truth_tokens) == 0.\n"
-        )
-
-    if num_same == 0:
-        return 0
-
-    precision = 1.0 * num_same / len(prediction_tokens)
-    return precision
 
 
 def _passage_match(passages: list[str], answers: list[str]) -> bool:

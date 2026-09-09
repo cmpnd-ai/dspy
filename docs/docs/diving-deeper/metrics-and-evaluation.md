@@ -30,7 +30,7 @@ The `SemanticF1` and `CompleteAndGrounded` judges return the raw F1 when `trace 
 
 ### 6. Built-in string metrics centralize on `normalize_text`
 
-`EM`, `F1`, `HotPotF1`, and the metric-shaped wrappers all call `normalize_text` on both prediction and reference: NFD-unicode, lowercase, drop English articles (`a` / `an` / `the`), strip punctuation, collapse whitespace. A single canonical normalization keeps token-level F1 and exact match operating on identical inputs — which matters because `answer_exact_match` switches between them based on its `frac` argument.
+`EM`, `F1`, and the metric-shaped wrappers all call `normalize_text` on both prediction and reference: NFD-unicode, lowercase, drop English articles (`a` / `an` / `the`), strip punctuation, collapse whitespace. A single canonical normalization keeps token-level F1 and exact match operating on identical inputs — which matters because `answer_exact_match` switches between them based on its `frac` argument.
 
 ### 7. LLM judges are `dspy.Module` subclasses, not plain functions
 
@@ -78,8 +78,8 @@ The metric-shaped wrapper. Reads `pred.answer` and `example.answer`, normalizes 
 **`dspy.evaluate.answer_passage_match(example, pred, trace=None)` → `bool`**
 Retrieval evaluation. Returns `True` if any passage in `pred.context` contains any reference from `example.answer`. Uses a DPR-style normalizer for passages (which preserves more text) while still using `normalize_text` for answers.
 
-**`F1` / `HotPotF1`** — token-level scorers (internal)
-`F1` does token-level F1 over normalized strings, picking the max across references. `HotPotF1` adds one HotPotQA-specific rule: if either normalized side is `yes` / `no` / `noanswer` and the two disagree, return `0`. Both feed into `answer_exact_match` and are rarely called directly.
+**`F1`** — token-level scorer (internal)
+`F1` does token-level F1 over normalized strings, picking the max across references. It feeds into `answer_exact_match` (via the `frac < 1.0` path) and is rarely called directly.
 
 ### LLM-as-judge metrics
 

@@ -276,21 +276,3 @@ def _encode_pil_image(image: "PILImage") -> str:
 
     encoded_data = base64.b64encode(buffered.getvalue()).decode("utf-8")
     return f"data:{mime_type};base64,{encoded_data}"
-
-
-def _get_file_extension(path_or_url: str) -> str:
-    """Extract the file extension from a file path or URL."""
-    extension = os.path.splitext(urlparse(path_or_url).path)[1].lstrip(".").lower()
-    return extension or "png"  # Default to 'png' if no extension found
-
-
-def is_image(obj) -> bool:
-    """Check if the object is an image or a valid media file reference."""
-    if PIL_AVAILABLE and isinstance(obj, PILImage.Image):
-        return True
-    if isinstance(obj, str):
-        if obj.startswith("data:"):
-            return True
-        elif is_url(obj):
-            return True
-    return False

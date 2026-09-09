@@ -240,23 +240,3 @@ class NullContextManager:
 
     def __exit__(self, *args):
         pass
-
-
-def load_batch_backgrounds(args, qids):
-    if args.qid2backgrounds is None:
-        return None
-
-    qbackgrounds = []
-
-    for qid in qids:
-        back = args.qid2backgrounds[qid]
-
-        if len(back) and isinstance(back[0], int):
-            x = [args.collection[pid] for pid in back]
-        else:
-            x = [args.collectionX.get(pid, "") for pid in back]
-
-        x = " [SEP] ".join(x)
-        qbackgrounds.append(x)
-
-    return qbackgrounds

@@ -36,10 +36,33 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from .errors import LockTimeoutError
+from .errors import LockTimeoutError, UnsupportedFeatureError
 
 _DEFAULT_LOCK_TIMEOUT_S = 60.0
 _LOCK_POLL_INTERVAL_S = 0.05
+
+
+def expand_user(path: str | os.PathLike[str]) -> Path:
+    """Expand a leading ``~``, leaving it in place where there is no home to expand to.
+
+    ``Path.expanduser()`` raises RuntimeError there -- a WASI guest, some container
+    setups -- and lm15 resolves credential paths at import. A reader of an unexpanded
+    path finds no credential; a writer is refused by :func:`reject_unexpanded_home`.
+    """
+    try:
+        return Path(path).expanduser()
+    except RuntimeError:
+        return Path(path)
+
+
+def reject_unexpanded_home(path: Path, action: str) -> None:
+    """Refuse a path whose ``~`` never expanded, instead of writing to a literal ``~``."""
+    if path.parts and path.parts[0] == "~":
+        raise UnsupportedFeatureError(
+            f"Cannot {action} {path}: this platform reports no home directory, so `~` names a "
+            "relative path rather than your own. Pass an explicit path, or set "
+            "LM15_CREDENTIALS_PATH and LM15_LOCK_DIR."
+        )
 
 
 class CredentialLockTimeout(LockTimeoutError, TimeoutError):
@@ -55,9 +78,9 @@ class CredentialLockTimeout(LockTimeoutError, TimeoutError):
 def _lock_dir() -> Path:
     override = os.environ.get("LM15_LOCK_DIR")
     if override:
-        return Path(override).expanduser()
+        return expand_user(override)
     cache_home = os.environ.get("XDG_CACHE_HOME")
-    base = Path(cache_home).expanduser() if cache_home else Path("~/.cache").expanduser()
+    base = expand_user(cache_home) if cache_home else expand_user("~/.cache")
     return base / "lm15" / "locks"
 
 
@@ -73,8 +96,20 @@ def lock_path_for(path: Path) -> Path:
     return _lock_dir() / f"{digest}.lock"
 
 
-if os.name == "posix":
+# Chosen by which primitive the platform actually has, not by `os.name`: WASI reports
+# "posix" and ships no fcntl, so a name test picks an implementation that cannot import.
+try:
     import fcntl
+except ImportError:  # pragma: no cover - Windows, and POSIX-ish builds without fcntl
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - every non-Windows platform
+    msvcrt = None
+
+
+if fcntl is not None:
 
     def _try_lock(fd: int) -> bool:
         try:
@@ -86,8 +121,7 @@ if os.name == "posix":
     def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
-else:  # pragma: no cover - exercised only on Windows
-    import msvcrt
+elif msvcrt is not None:  # pragma: no cover - exercised only on Windows
 
     def _try_lock(fd: int) -> bool:
         try:
@@ -101,6 +135,18 @@ else:  # pragma: no cover - exercised only on Windows
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
+
+else:  # pragma: no cover - platforms with neither primitive, such as WASI
+
+    def _try_lock(fd: int) -> bool:
+        raise UnsupportedFeatureError(
+            "This platform provides no advisory file locking (neither fcntl nor msvcrt), "
+            "so lm15 cannot serialize credential refreshes against other processes. "
+            "Reading credentials still works; refreshing them from here does not."
+        )
+
+    def _unlock(fd: int) -> None:
+        return None
 
 
 @contextmanager
@@ -117,6 +163,7 @@ def hold_file_lock(
     ``*_unlocked`` write variants for that reason.
     """
     lock_file = lock_path_for(Path(path))
+    reject_unexpanded_home(lock_file, "lock")
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -148,6 +195,7 @@ def write_private_json_atomic(path: Path, data: dict[str, Any]) -> None:
     observes either the complete old file or the complete new file, never a
     partial write.
     """
+    reject_unexpanded_home(path, "write")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

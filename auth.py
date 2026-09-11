@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ._authlock import CredentialLockTimeout, hold_file_lock, write_private_json_atomic
+from ._authlock import CredentialLockTimeout, expand_user, hold_file_lock, write_private_json_atomic
 from .errors import AuthError, NotConfiguredError, UnsupportedFeatureError
 
 __all__ = [
@@ -84,12 +84,17 @@ __all__ = [
     "write_xai_credential",
 ]
 
-CLAUDE_CODE_CREDENTIALS_PATH = Path("~/.claude/.credentials.json").expanduser()
+def _user_path(*parts: str) -> Path:
+    """A credential path under the user's home, resolved at import and so never raising."""
+    return expand_user(Path("~", *parts))
+
+
+CLAUDE_CODE_CREDENTIALS_PATH = _user_path(".claude", ".credentials.json")
 CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d5-88ed-5944d1962f5e"
 CLAUDE_CODE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CODE_LOGIN_HINT = "Log in again: run `claude` and use /login (Claude subscription auth)"
 
-CODEX_CLI_AUTH_PATH = Path("~/.codex/auth.json").expanduser()
+CODEX_CLI_AUTH_PATH = _user_path(".codex", "auth.json")
 OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OPENAI_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OPENAI_CODEX_JWT_CLAIM_PATH = "https://api.openai.com/auth"
@@ -209,7 +214,7 @@ def _post_form(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _coerce_path(path: str | os.PathLike[str] | None, default: Path) -> Path:
-    return Path(path).expanduser() if path is not None else default
+    return expand_user(path) if path is not None else default
 
 
 # ─── Claude Code (~/.claude/.credentials.json) ───────────────────────
@@ -506,7 +511,7 @@ XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code"
 XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
 XAI_LOGIN_HINT = "Log in again: run lm15.auth.login_xai() (SuperGrok / X Premium subscription auth)"
-PI_AGENT_AUTH_PATH = Path("~/.pi/agent/auth.json").expanduser()
+PI_AGENT_AUTH_PATH = _user_path(".pi", "agent", "auth.json")
 
 _XAI_PROVIDER_KEY = "xai"
 _XAI_DEFAULT_TOKEN_LIFETIME_S = 3600
@@ -547,7 +552,7 @@ def _xai_credential_to_entry(credential: LocalOAuthCredential, current: dict[str
 def _load_xai_with_source(
     auth_path: str | os.PathLike[str] | None = None,
 ) -> tuple[LocalOAuthCredential, Path]:
-    paths = (Path(auth_path).expanduser(),) if auth_path is not None else _xai_store_paths()
+    paths = (expand_user(auth_path),) if auth_path is not None else _xai_store_paths()
     for path in paths:
         data = _read_json_file_or_none(path)
         credential = _xai_entry_to_credential(data.get(_XAI_PROVIDER_KEY)) if data else None

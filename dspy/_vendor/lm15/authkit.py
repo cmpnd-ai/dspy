@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Union
 from urllib.parse import parse_qs, urlsplit
 
-from ._authlock import hold_file_lock, write_private_json_atomic
+from ._authlock import expand_user, hold_file_lock, write_private_json_atomic
 from .errors import AuthError
 
 __all__ = [
@@ -281,9 +281,9 @@ def default_credentials_path() -> Path:
     """``$LM15_CREDENTIALS_PATH``, else ``$XDG_CONFIG_HOME/lm15/credentials.json``."""
     override = os.environ.get("LM15_CREDENTIALS_PATH")
     if override:
-        return Path(override).expanduser()
+        return expand_user(override)
     config_home = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(config_home).expanduser() if config_home else Path("~/.config").expanduser()
+    base = expand_user(config_home) if config_home else expand_user("~/.config")
     return base / "lm15" / "credentials.json"
 
 
@@ -300,7 +300,7 @@ class CredentialFileStore:
     """
 
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
-        self.path = Path(path).expanduser() if path is not None else default_credentials_path()
+        self.path = expand_user(path) if path is not None else default_credentials_path()
 
     def __repr__(self) -> str:  # never show file contents
         return f"CredentialFileStore(path={str(self.path)!r})"

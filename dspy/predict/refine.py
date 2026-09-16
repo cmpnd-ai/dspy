@@ -1,13 +1,12 @@
 import inspect
-import textwrap
 from typing import Callable
 
 import orjson
 
 import dspy
-from dspy.adapters.utils import get_field_description_string
 from dspy.predict.predict import Prediction
 from dspy.signatures import InputField, OutputField, Signature
+from dspy.utils._module_utils import inspect_modules, recursive_mask
 
 from .predict import Module
 
@@ -175,45 +174,3 @@ class Refine(Module):
         if best_trace:
             dspy.settings.trace.extend(best_trace)
         return best_pred
-
-
-def inspect_modules(program):
-    separator = "-" * 80
-    output = [separator]
-
-    for _, (name, predictor) in enumerate(program.named_predictors()):
-        signature = predictor.signature
-        instructions = textwrap.dedent(signature.instructions)
-        instructions = ("\n" + "\t" * 2).join([""] + instructions.splitlines())
-
-        output.append(f"Module {name}")
-        output.append("\n\tInput Fields:")
-        output.append(("\n" + "\t" * 2).join([""] + get_field_description_string(signature.input_fields).splitlines()))
-        output.append("\tOutput Fields:")
-        output.append(("\n" + "\t" * 2).join([""] + get_field_description_string(signature.output_fields).splitlines()))
-        output.append(f"\tOriginal Instructions: {instructions}")
-        output.append(separator)
-
-    return "\n".join([o.strip("\n") for o in output])
-
-
-def recursive_mask(o):
-    # If the object is already serializable, return it.
-    try:
-        orjson.dumps(o)
-        return o
-    except TypeError:
-        pass
-
-    # If it's a dictionary, apply recursively to its values.
-    if isinstance(o, dict):
-        return {k: recursive_mask(v) for k, v in o.items()}
-    # If it's a list, apply recursively.
-    elif isinstance(o, list):
-        return [recursive_mask(v) for v in o]
-    # If it's a tuple, apply recursively.
-    elif isinstance(o, tuple):
-        return tuple(recursive_mask(v) for v in o)
-    # Otherwise, replace it with a placeholder string (or use repr(o)).
-    else:
-        return f"<non-serializable: {type(o).__name__}>"

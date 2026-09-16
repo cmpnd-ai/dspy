@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import dspy
 from dspy.teleprompt.utils import create_n_fewshot_demo_sets, eval_candidate_program
@@ -65,10 +65,10 @@ def test_create_n_fewshot_demo_sets_passes_metric_threshold_for_unshuffled():
     lm = DummyLM([{"output": "test"}])
     dspy.configure(lm=lm)
 
-    with patch("dspy.teleprompt.utils.BootstrapFewShot") as MockBootstrap:
+    with patch("dspy.teleprompt.utils.BootstrapFewShot") as mock_bootstrap:
         mock_instance = Mock()
         mock_instance.compile.return_value = student
-        MockBootstrap.return_value = mock_instance
+        mock_bootstrap.return_value = mock_instance
 
         create_n_fewshot_demo_sets(
             student=student,
@@ -83,7 +83,7 @@ def test_create_n_fewshot_demo_sets_passes_metric_threshold_for_unshuffled():
 
         # Find the call where seed == -1 (unshuffled few-shot)
         # BootstrapFewShot should be called at least twice: once for seed=-1, once for seed>=0
-        calls = MockBootstrap.call_args_list
+        calls = mock_bootstrap.call_args_list
         assert len(calls) >= 1, "BootstrapFewShot was never called"
 
         # Every BootstrapFewShot call should include metric_threshold
@@ -95,3 +95,51 @@ def test_create_n_fewshot_demo_sets_passes_metric_threshold_for_unshuffled():
             assert kwargs["metric_threshold"] == 0.9, (
                 f"metric_threshold={kwargs['metric_threshold']}, expected 0.9"
             )
+
+
+def test_create_demo_sets_uses_shared_rng_for_negative_seed_fallbacks():
+    student = DummyModule()
+    student.predictor = dspy.Predict("input -> output")
+    trainset = list(range(5))
+    teacher = Mock()
+    rng = Mock()
+    sizes = iter([2, 3, 1])
+
+    def shuffle(items):
+        items.reverse()
+
+    rng.shuffle.side_effect = shuffle
+    rng.randint.side_effect = lambda *_: next(sizes)
+
+    with patch("dspy.teleprompt.utils.BootstrapFewShot") as bootstrap:
+        bootstrap.return_value.compile.return_value = student
+        result = create_n_fewshot_demo_sets(
+            student=student,
+            num_candidate_sets=4,
+            trainset=trainset,
+            max_labeled_demos=2,
+            max_bootstrapped_demos=4,
+            metric=Mock(),
+            teacher_settings={"x": 1},
+            teacher=teacher,
+            include_non_bootstrapped=False,
+            rng=rng,
+        )
+
+    assert rng.method_calls == [
+        call.shuffle(list(reversed(trainset))),
+        call.randint(1, 4),
+        call.shuffle(list(reversed(trainset))),
+        call.randint(1, 4),
+        call.shuffle(list(reversed(trainset))),
+        call.randint(1, 4),
+    ]
+    assert [call.kwargs["max_bootstrapped_demos"] for call in bootstrap.call_args_list] == [2, 3, 4, 1]
+    assert [call.kwargs["trainset"] for call in bootstrap.return_value.compile.call_args_list] == [
+        list(reversed(trainset)),
+        list(reversed(trainset)),
+        trainset,
+        list(reversed(trainset)),
+    ]
+    assert all(call.kwargs["teacher"] is teacher for call in bootstrap.return_value.compile.call_args_list)
+    assert len(result[0]) == 4

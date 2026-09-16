@@ -110,90 +110,54 @@ class GRPO(FinetuneTeleprompter):
                         assert hash(t[0].signature) in pred_signature_hash_to_ind
 
     def report_validation_metrics(self, student, trainset, valset, logger, step_idx=-1):
-        if step_idx == -1 or step_idx == self.num_train_steps - 1 or (step_idx + 1) % self.num_steps_for_val == 0:
-            pass
-        else:
+        if not (
+            step_idx == -1
+            or step_idx == self.num_train_steps - 1
+            or (step_idx + 1) % self.num_steps_for_val == 0
+        ):
             return
 
         if valset is not None:
-            # Validation set provided by user
             assert not self.use_train_as_val, "If valset is provided, use_train_as_val must be False."
             assert isinstance(self.num_steps_for_val, int) and self.num_steps_for_val > 0, "num_steps_for_val must be a positive integer."
-            if self.report_train_scores:
-                if step_idx == -1:
-                    logger.info("Using user provided validation set and reporting train scores for every validation step in addition.")
-                valset_evaluator = Evaluate(
-                    devset=valset + trainset,
-                    num_threads=self.num_threads,
-                    display_progress=True,
-                    provide_traceback=False,  # TODO(check with team)
-                    max_errors=len(valset)*10,  # TODO(check with team)
-                    failure_score=self.failure_score
-                )
-                if step_idx == -1:
-                    logger.info("Evaluating the student program on the train+validation set before training loop...")
-                else:
-                    logger.info(f"Evaluating the student program on the validation set after training step {step_idx + 1}/{self.num_train_steps}")
-                valset_evaluation = valset_evaluator(student, metric=self.metric)
-                trainset_scores = [r[-1] for r in valset_evaluation.results[len(valset):]]
-                valset_scores = [r[-1] for r in valset_evaluation.results[:len(valset)]]
-                trainset_agg = sum(trainset_scores) / len(trainset_scores)
-                valset_agg = sum(valset_scores) / len(valset_scores)
-                if step_idx == -1:
-                    logger.info(f"Student program training set score before training loop: {trainset_agg}")
-                    logger.info(f"Student program validation set score before training loop: {valset_agg}")
-                else:
-                    logger.info(f"Student program training set score after training step {step_idx + 1}/{self.num_train_steps}: {trainset_agg}")
-                    logger.info(f"Student program validation set score after training step {step_idx + 1}/{self.num_train_steps}: {valset_agg}")
-            else:
-                if step_idx == -1:
-                    logger.info("Using user provided validation set and not reporting train scores.")
-                valset_evaluator = Evaluate(
-                    devset=valset,
-                    num_threads=self.num_threads,
-                    display_progress=True,
-                    provide_traceback=False,  # TODO(check with team)
-                    max_errors=len(valset)*10,  # TODO(check with team)
-                    failure_score=self.failure_score
-                )
-                if step_idx == -1:
-                    logger.info("Evaluating the student program on the validation set before training loop...")
-                else:
-                    logger.info(f"Evaluating the student program on the validation set after training step {step_idx + 1}/{self.num_train_steps}")
-                valset_evaluation = valset_evaluator(student, metric=self.metric)
-                if step_idx == -1:
-                    logger.info(f"Student program validation set score before training loop: {valset_evaluation.score}")
-                else:
-                    logger.info(f"Student program validation set score after training step {step_idx + 1}/{self.num_train_steps}: {valset_evaluation.score}")
+            evaluation_set = valset + trainset if self.report_train_scores else valset
+            if step_idx == -1:
+                reporting = "reporting train scores for every validation step in addition" if self.report_train_scores else "not reporting train scores"
+                logger.info(f"Using user provided validation set and {reporting}.")
         else:
-            # No validation set provided by user
-            if self.report_train_scores:
-                assert self.use_train_as_val, "If report_train_scores is True, use_train_as_val must be True when valset is not provided explicitly."
-                assert isinstance(self.num_steps_for_val, int) and self.num_steps_for_val > 0, "num_steps_for_val must be a positive integer."
-                if step_idx == -1:
-                    logger.info("Using trainset as validation set.")
-                valset_evaluator = Evaluate(
-                    devset=trainset,
-                    num_threads=self.num_threads,
-                    display_progress=True,
-                    provide_traceback=False,  # TODO(check with team)
-                    max_errors=len(trainset)*10,  # TODO(check with team)
-                    failure_score=self.failure_score
-                )
-                if step_idx == -1:
-                    logger.info("Evaluating the student program on the validation set before training loop...")
-                else:
-                    logger.info(f"Evaluating the student program on the validation set after training step {step_idx + 1}/{self.num_train_steps}")
-                valset_evaluation = valset_evaluator(student, metric=self.metric)
-                if step_idx == -1:
-                    logger.info(f"Student program training set score before training loop: {valset_evaluation.score}")
-                else:
-                    logger.info(f"Student program training set score after training step {step_idx + 1}/{self.num_train_steps}: {valset_evaluation.score}")
-            else:
-                # No valset provided, and not using train as val
+            if not self.report_train_scores:
                 assert not self.use_train_as_val, "If report_train_scores is False, use_train_as_val must be False."
                 if step_idx == -1:
                     logger.info("Not using any validation set and not reporting train scores.")
+                return
+            assert self.use_train_as_val, "If report_train_scores is True, use_train_as_val must be True when valset is not provided explicitly."
+            assert isinstance(self.num_steps_for_val, int) and self.num_steps_for_val > 0, "num_steps_for_val must be a positive integer."
+            evaluation_set = trainset
+            if step_idx == -1:
+                logger.info("Using trainset as validation set.")
+
+        when = "before training loop" if step_idx == -1 else f"after training step {step_idx + 1}/{self.num_train_steps}"
+        target = "train+validation" if valset is not None and self.report_train_scores and step_idx == -1 else "validation"
+        logger.info(f"Evaluating the student program on the {target} set {when}...")
+        evaluation = Evaluate(
+            devset=evaluation_set,
+            num_threads=self.num_threads,
+            display_progress=True,
+            provide_traceback=False,
+            max_errors=len(valset if valset is not None else trainset) * 10,
+            failure_score=self.failure_score,
+        )(student, metric=self.metric)
+
+        if valset is not None and self.report_train_scores:
+            result_scores = [result[-1] for result in evaluation.results]
+            scores = {
+                "training": sum(result_scores[len(valset):]) / len(trainset),
+                "validation": sum(result_scores[:len(valset)]) / len(valset),
+            }
+        else:
+            scores = {"validation" if valset is not None else "training": evaluation.score}
+        for dataset, score in scores.items():
+            logger.info(f"Student program {dataset} set score {when}: {score}")
 
     def update_shuffled_trainset(self, original_trainset):
         self.shuffled_trainset_ids = list(range(len(original_trainset)))

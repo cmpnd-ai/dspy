@@ -38,6 +38,8 @@ def make_mock_predictor(responses: list[dict], async_mode: bool = False):
     class MockPredictor:
         def __init__(self):
             self.idx = 0
+            self.sync_calls = []
+            self.async_calls = []
 
         def _next_response(self):
             result = responses[self.idx % len(responses)]
@@ -45,9 +47,11 @@ def make_mock_predictor(responses: list[dict], async_mode: bool = False):
             return Prediction(**result)
 
         def __call__(self, **kwargs):
+            self.sync_calls.append(kwargs)
             return self._next_response()
 
         async def acall(self, **kwargs):
+            self.async_calls.append(kwargs)
             return self._next_response()
 
     return MockPredictor()
@@ -817,6 +821,76 @@ class TestRLMMaxIterationsFallback:
         result = rlm.forward(mock, query="test")
         assert result.answer == "extracted_answer"
         assert result.final_reasoning == "Extract forced final output"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["sync", "async"])
+    async def test_sync_and_async_share_post_action_behavior(self, mode):
+        """Both LM paths handle fence, execution, output, and final results identically."""
+        mock = MockInterpreter(responses=[
+            CodeExecutionError("execution failed"),
+            ["first", "second"],
+            FinalOutput({"answer": "done"}),
+        ])
+        rlm = RLM("query -> answer", max_iters=4)
+        predictor = make_mock_predictor([
+            {"reasoning": "wrong fence", "code": "```bash\necho no\n```"},
+            {"reasoning": "bad execution", "code": "```python\nraise RuntimeError\n```"},
+            {"reasoning": "inspect", "code": "```python\nprint('values')\n```"},
+            {"reasoning": "finish", "code": "```python\nSUBMIT('done')\n```"},
+        ])
+        rlm.generate_action = predictor
+
+        if mode == "sync":
+            result = rlm.forward(mock, query="test")
+        else:
+            result = await rlm.aforward(mock, query="test")
+
+        assert result.answer == "done"
+        assert mock.call_count == 3  # Invalid language fences never reach the interpreter.
+        assert [entry["code"] for entry in result.trajectory] == [
+            "```bash\necho no\n```",
+            "raise RuntimeError",
+            "print('values')",
+            "SUBMIT('done')",
+        ]
+        assert result.trajectory[0]["output"].startswith("[Error] Expected Python code")
+        assert result.trajectory[1]["output"] == "[Error] execution failed"
+        assert result.trajectory[2]["output"] == "first\nsecond"
+        assert result.trajectory[3]["output"] == "FINAL: {'answer': 'done'}"
+        assert result.final_reasoning == "finish"
+        assert len(predictor.sync_calls) == (4 if mode == "sync" else 0)
+        assert len(predictor.async_calls) == (4 if mode == "async" else 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["sync", "async"])
+    async def test_sync_and_async_fallback_preserve_history_and_inputs(self, mode):
+        """Max-iteration fallback receives the same prepared variables and trajectory."""
+        mock = MockInterpreter(responses=["one", "two"])
+        rlm = RLM("query -> answer", max_iters=2)
+        rlm.generate_action = make_mock_predictor([
+            {"reasoning": "first", "code": "print(1)"},
+            {"reasoning": "second", "code": "print(2)"},
+        ])
+        extract = make_mock_predictor([{"answer": "fallback"}])
+        rlm.extract = extract
+
+        if mode == "sync":
+            result = rlm.forward(mock, query="test")
+        else:
+            result = await rlm.aforward(mock, query="test")
+
+        assert result.answer == "fallback"
+        assert result.final_reasoning == "Extract forced final output"
+        assert [entry["output"] for entry in result.trajectory] == ["one", "two"]
+        assert extract.idx == 1
+        calls = extract.sync_calls if mode == "sync" else extract.async_calls
+        assert len(calls) == 1
+        assert calls[0]["variables_info"] == [rlm._build_variables(query="test")[0].format()]
+        assert [entry.model_dump() for entry in calls[0]["repl_history"]] == [
+            {"reasoning": "first", "code": "print(1)", "output": "one"},
+            {"reasoning": "second", "code": "print(2)", "output": "two"},
+        ]
+        assert calls[0]["repl_history"].max_output_chars == 10000
 
 
 class TestRLMToolExceptions:

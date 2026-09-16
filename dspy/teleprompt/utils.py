@@ -1,9 +1,7 @@
 import inspect
 import logging
-import math
 import os
 import random
-import shutil
 import sys
 
 try:
@@ -62,57 +60,6 @@ def eval_candidate_program(batch_size, trainset, candidate_program, evaluate, rn
         return dspy.Prediction(score=0.0, results=[])
 
 
-def eval_candidate_program_with_pruning(
-    trial,
-    trial_logs,
-    trainset,
-    candidate_program,
-    evaluate,
-    trial_num,
-    batch_size=100,
-):
-    """Evaluation of candidate_program with pruning implemented"""
-
-    # Evaluate with the new prompts
-    total_score = 0
-    num_batches = math.ceil(len(trainset) / batch_size)
-    total_eval_size = 0
-
-    for i in range(num_batches):
-        start_index = i * batch_size
-        end_index = min((i + 1) * batch_size, len(trainset))
-        split_trainset = trainset[start_index:end_index]
-        split_score = evaluate(
-            candidate_program,
-            devset=split_trainset,
-            display_table=0,
-        )
-        print(f"{i}st split score: {split_score}")
-        total_eval_size += len(split_trainset)
-
-        total_score += split_score * len(split_trainset)
-        curr_weighted_avg_score = total_score / min((i + 1) * batch_size, len(trainset))
-        print(f"curr average score: {curr_weighted_avg_score}")
-
-        trial.report(curr_weighted_avg_score, i)
-
-        # Handle pruning based on the intermediate value.
-        if trial.should_prune():
-            print("Trial pruned.")
-            trial_logs[trial_num]["score"] = curr_weighted_avg_score
-            trial_logs[trial_num]["num_eval_calls"] = total_eval_size
-            trial_logs[trial_num]["pruned"] = True
-            return curr_weighted_avg_score, trial_logs, total_eval_size, True
-
-    print(f"Fully evaled score: {curr_weighted_avg_score}")
-    score = curr_weighted_avg_score
-
-    trial_logs[trial_num]["full_eval"] = False
-    trial_logs[trial_num]["score"] = score
-    trial_logs[trial_num]["pruned"] = False
-    return score, trial_logs, total_eval_size, False
-
-
 def get_program_with_highest_avg_score(param_score_dict, fully_evaled_param_combos):
     """Used as a helper function for bayesian + minibatching optimizers. Returns the program with the highest average score from the batches evaluated so far."""
 
@@ -140,61 +87,7 @@ def get_program_with_highest_avg_score(param_score_dict, fully_evaled_param_comb
     raise ValueError("No valid program found in param_score_dict")
 
 
-def calculate_last_n_proposed_quality(
-    base_program,
-    trial_logs,
-    evaluate,
-    trainset,
-    devset,
-    n,
-):
-    """
-    Calculate the average and best quality of the last n programs proposed. This is useful for seeing if our proposals
-    are actually 'improving' overtime or not.
-    """
-    # Get the trials from the last n keys in trial logs
-    last_n_trial_nums = list(trial_logs.keys())[-n:]
-
-    # Calculate the average and best score of these trials
-    # if num_eval_calls in the trial is less than the trainset, throw a not-implemented error for now
-    total_train_score = 0
-    best_train_score = 0
-    total_dev_score = 0
-    best_dev_score = 0
-    for trial_num in last_n_trial_nums:
-        full_eval = trial_logs[trial_num]["full_eval"]
-        if not full_eval:
-            raise NotImplementedError(
-                "Still need to implement non full eval handling in calculate_last_n_proposed_quality",
-            )
-        train_score = trial_logs[trial_num]["score"]
-        program = base_program.deepcopy()
-        program.load(trial_logs[trial_num]["program_path"])
-
-        dev_score = evaluate(program, devset=devset)
-
-        total_train_score += train_score
-        total_dev_score += dev_score
-        if train_score > best_train_score:
-            best_train_score = train_score
-            best_dev_score = dev_score
-
-    return best_train_score, total_train_score / n, best_dev_score, total_dev_score / n
-
-
 ### LOGGING UTILS ###
-
-
-def get_task_model_history_for_full_example(
-    candidate_program,
-    task_model,
-    devset,
-    evaluate,
-):
-    """Get a full trace of the task model's history for a given candidate program."""
-    _ = evaluate(candidate_program, devset=devset[:1])
-    _ = task_model.inspect_history(n=len(candidate_program.predictors()))
-    return task_model.inspect_history(n=len(candidate_program.predictors()))
 
 
 def print_full_program(program):
@@ -227,78 +120,6 @@ def save_candidate_program(program, log_dir, trial_num, note=None):
     program.save(save_path)
 
     return save_path
-
-
-def save_file_to_log_dir(source_file_path, log_dir):
-    if log_dir is None:
-        return
-    """Save a file to our log directory"""
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    destination_file_path = os.path.join(log_dir, os.path.basename(source_file_path))
-
-    # Copy the file
-    shutil.copy(source_file_path, destination_file_path)
-
-
-def setup_logging(log_dir):
-    """Setup logger, which will log our print statements to a txt file at our log_dir for later viewing"""
-    if log_dir is None:
-        return
-    # Create a logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.WARNING)
-
-    # Create a file handler that logs debug and higher level messages
-    file_handler = logging.FileHandler(f"{log_dir}/logs.txt")
-    file_handler.setLevel(logging.WARNING)
-    file_formatter = logging.Formatter("%(asctime)s - %(message)s")
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-
-    # Create a console handler with a higher log level
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-    console_formatter = logging.Formatter("%(message)s")
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-
-
-def get_token_usage(model) -> tuple[int, int]:
-    """
-    Extract total input tokens and output tokens from a model's interaction history.
-    Returns (total_input_tokens, total_output_tokens).
-    """
-    if not hasattr(model, "history"):
-        return 0, 0
-
-    input_tokens = []
-    output_tokens = []
-    for interaction in model.history:
-        usage = interaction.get("usage", {})
-        _input_tokens = usage.get("prompt_tokens", 0)
-        _output_tokens = usage.get("completion_tokens", 0)
-        input_tokens.append(_input_tokens)
-        output_tokens.append(_output_tokens)
-
-    total_input_tokens = sum(input_tokens)
-    total_output_tokens = sum(output_tokens)
-    return total_input_tokens, total_output_tokens
-
-
-def log_token_usage(trial_logs, trial_num, model_dict):
-    """
-    Extract total input and output tokens used by each model and log to trial_logs[trial_num]["token_usage"].
-    """
-
-    token_usage_dict = {}
-
-    for model_name, model in model_dict.items():
-        in_tokens, out_tokens = get_token_usage(model)
-        token_usage_dict[model_name] = {"total_input_tokens": in_tokens, "total_output_tokens": out_tokens}
-
-    # Store token usage info in trial logs
-    trial_logs[trial_num]["token_usage"] = token_usage_dict
 
 
 ### OTHER UTILS ###

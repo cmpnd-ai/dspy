@@ -125,11 +125,7 @@ class Adapter:
         # renderers. Keep this compatibility hook for this boundary-only PR.
         # Handle custom types that use native LM features, e.g., reasoning, citations, etc.
         for name, field in signature.output_fields.items():
-            if (
-                isinstance(field.annotation, type)
-                and field.annotation in self.native_response_types
-                and issubclass(field.annotation, Type)
-            ):
+            if self._is_native_response_field(field):
                 signature = field.annotation.adapt_to_native_lm_feature(signature, name, lm, lm_kwargs)
 
         return signature
@@ -190,11 +186,7 @@ class Adapter:
             # provider-shaped `parse_lm_response()` directly.
             # Parse custom types that does not rely on the `Adapter.parse()` method
             for name, field in original_signature.output_fields.items():
-                if (
-                    isinstance(field.annotation, type)
-                    and field.annotation in self.native_response_types
-                    and issubclass(field.annotation, Type)
-                ):
+                if self._is_native_response_field(field):
                     parsed_value = field.annotation.parse_lm_response(output)
                     if parsed_value is not None:
                         value[name] = parsed_value
@@ -205,6 +197,12 @@ class Adapter:
             values.append(value)
 
         return values
+
+    def _is_native_response_field(self, field: Any) -> bool:
+        annotation = field.annotation
+        return (
+            isinstance(annotation, type) and annotation in self.native_response_types and issubclass(annotation, Type)
+        )
 
     def _render_request(
         self,
@@ -312,6 +310,30 @@ class Adapter:
         """
         return lm_response_from_legacy_outputs(outputs, request)
 
+    def _prepare_call(
+        self,
+        lm: BaseLM,
+        lm_kwargs: dict[str, Any],
+        signature: type[Signature],
+        demos: list[dict[str, Any]],
+        inputs: dict[str, Any],
+    ) -> tuple[type[Signature], LMRequest]:
+        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
+        messages = self.format(processed_signature, demos, inputs)
+        return processed_signature, self._render_request(lm, lm_kwargs, messages)
+
+    def _finalize_call(
+        self,
+        response: LMResponse,
+        processed_signature: type[Signature],
+        signature: type[Signature],
+        lm: BaseLM,
+        lm_kwargs: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        # Keep parsing legacy-shaped outputs until adapters consume LMResponse directly.
+        outputs = legacy_outputs_from_lm_response(response)
+        return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
+
     def __call__(
         self,
         lm: BaseLM,
@@ -336,16 +358,9 @@ class Adapter:
             List of dictionaries representing parsed LM responses. Each dictionary contains keys matching the
             signature's output field names. For multiple generations (n > 1), returns multiple dictionaries.
         """
-        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        messages = self.format(processed_signature, demos, inputs)
-        request = self._render_request(lm, lm_kwargs, messages)
+        processed_signature, request = self._prepare_call(lm, lm_kwargs, signature, demos, inputs)
         response = self._call_lm(lm, request)
-        # TODO(adapters-response): We normalize at the LM boundary, but still
-        # convert back to legacy postprocess dictionaries here to keep this PR
-        # behavior-preserving. Replace with direct `LMResponse` parsing once the
-        # explicit adapter plan exists.
-        outputs = legacy_outputs_from_lm_response(response)
-        return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
+        return self._finalize_call(response, processed_signature, signature, lm, lm_kwargs)
 
     async def acall(
         self,
@@ -355,14 +370,9 @@ class Adapter:
         demos: list[dict[str, Any]],
         inputs: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        processed_signature = self._call_preprocess(lm, lm_kwargs, signature, inputs)
-        messages = self.format(processed_signature, demos, inputs)
-        request = self._render_request(lm, lm_kwargs, messages)
+        processed_signature, request = self._prepare_call(lm, lm_kwargs, signature, demos, inputs)
         response = await self._acall_lm(lm, request)
-        # TODO(adapters-response): Keep in sync with `__call__()` until both use
-        # direct `LMResponse` parsing.
-        outputs = legacy_outputs_from_lm_response(response)
-        return self._call_postprocess(processed_signature, signature, outputs, lm, lm_kwargs)
+        return self._finalize_call(response, processed_signature, signature, lm, lm_kwargs)
 
     def format(
         self,
@@ -411,33 +421,23 @@ class Adapter:
         """
         inputs_copy = dict(inputs)
 
-        # If the signature and inputs have conversation history, we need to format the conversation history and
-        # remove the history field from the signature.
         history_field_name = self._get_history_field_name(signature)
+        content_signature = signature
+        conversation_history = []
         if history_field_name:
-            # In order to format the conversation history, we need to remove the history field from the signature.
-            signature_without_history = signature.delete(history_field_name)
+            content_signature = signature.delete(history_field_name)
             conversation_history = self.format_conversation_history(
-                signature_without_history,
+                content_signature,
                 history_field_name,
                 inputs_copy,
             )
 
-        messages = []
-        system_message = self.format_system_message(signature)
-        messages.append({"role": "system", "content": system_message})
+        messages = [{"role": "system", "content": self.format_system_message(signature)}]
         messages.extend(self.format_demos(signature, demos))
-        if history_field_name:
-            # Conversation history and current input
-            content = self.format_user_message_content(signature_without_history, inputs_copy, main_request=True)
-            messages.extend(conversation_history)
-            if content:
-                messages.append({"role": "user", "content": content})
-        else:
-            # Only current input
-            content = self.format_user_message_content(signature, inputs_copy, main_request=True)
-            if content:
-                messages.append({"role": "user", "content": content})
+        messages.extend(conversation_history)
+        content = self.format_user_message_content(content_signature, inputs_copy, main_request=True)
+        if content:
+            messages.append({"role": "user", "content": content})
 
         return [_expand_legacy_custom_type_markers_in_chat_message(message) for message in messages]
 
@@ -552,52 +552,38 @@ class Adapter:
         Returns:
             A list of multiturn messages.
         """
-        complete_demos = []
-        incomplete_demos = []
-
+        complete_demos, incomplete_demos = [], []
         for demo in demos:
-            # Check if all fields are present and not None
             is_complete = all(k in demo and demo[k] is not None for k in signature.fields)
-
-            # Check if demo has at least one input and one output field
             has_input = any(k in demo for k in signature.input_fields)
             has_output = any(k in demo for k in signature.output_fields)
-
             if is_complete:
                 complete_demos.append(demo)
             elif has_input and has_output:
-                # We only keep incomplete demos that have at least one input and one output field
                 incomplete_demos.append(demo)
 
         messages = []
-
         incomplete_demo_prefix = "This is an example of the task, though some input or output fields are not supplied."
-        for demo in incomplete_demos:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": self.format_user_message_content(signature, demo, prefix=incomplete_demo_prefix),
-                }
-            )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.format_assistant_message_content(
-                        signature, demo, missing_field_message="Not supplied for this particular example. "
-                    ),
-                }
-            )
-
-        for demo in complete_demos:
-            messages.append({"role": "user", "content": self.format_user_message_content(signature, demo)})
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self.format_assistant_message_content(
-                        signature, demo, missing_field_message="Not supplied for this conversation history message. "
-                    ),
-                }
-            )
+        groups = (
+            (incomplete_demos, {"prefix": incomplete_demo_prefix}, "Not supplied for this particular example. "),
+            (complete_demos, {}, "Not supplied for this conversation history message. "),
+        )
+        for group, user_kwargs, missing_field_message in groups:
+            for demo in group:
+                messages.extend(
+                    [
+                        {
+                            "role": "user",
+                            "content": self.format_user_message_content(signature, demo, **user_kwargs),
+                        },
+                        {
+                            "role": "assistant",
+                            "content": self.format_assistant_message_content(
+                                signature, demo, missing_field_message=missing_field_message
+                            ),
+                        },
+                    ]
+                )
 
         return messages
 

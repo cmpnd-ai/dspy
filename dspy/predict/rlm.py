@@ -549,12 +549,16 @@ class RLM(Module):
         """Use extract module to get final output when max iterations reached."""
         logger.warning("RLM reached max iterations, using extract to get final output")
 
-        variables_info = [variable.format() for variable in variables]
-        extract_pred = self.extract(
-            variables_info=variables_info,
-            repl_history=history,
-        )
+        extract_pred = self.extract(variables_info=[variable.format() for variable in variables], repl_history=history)
+        return self._fallback_prediction(extract_pred, history, output_field_names)
 
+    def _fallback_prediction(
+        self,
+        extract_pred: Prediction,
+        history: REPLHistory,
+        output_field_names: list[str],
+    ) -> Prediction:
+        """Build the final prediction from a fallback extraction."""
         return Prediction(
             trajectory=[e.model_dump() for e in history],
             final_reasoning="Extract forced final output",
@@ -663,6 +667,31 @@ class RLM(Module):
         except (CodeExecutionError, SyntaxError) as e:
             return f"[Error] {format_error_for_lm(e)}"
 
+    def _process_action(
+        self,
+        action: Prediction,
+        repl: CodeInterpreter,
+        history: REPLHistory,
+        iteration: int,
+        input_args: dict[str, Any],
+        output_field_names: list[str],
+    ) -> Prediction | REPLHistory:
+        """Log and synchronously execute an action produced by either LM path."""
+        if self.verbose:
+            logger.info(
+                f"RLM iteration {iteration + 1}/{self.max_iters}\n"
+                f"Reasoning: {action.reasoning}\nCode:\n{action.code}"
+            )
+
+        try:
+            code = _strip_code_fences(action.code)
+        except SyntaxError as e:
+            code = action.code
+            result = f"[Error] {format_error_for_lm(e)}"
+        else:
+            result = self._execute_code(repl, code, input_args)
+        return self._process_execution_result(action, code, result, history, output_field_names)
+
     def _execute_iteration(
         self,
         repl: CodeInterpreter,
@@ -679,20 +708,7 @@ class RLM(Module):
             repl_history=history,
             iteration=f"{iteration + 1}/{self.max_iters}",
         )
-        if self.verbose:
-            logger.info(
-                f"RLM iteration {iteration + 1}/{self.max_iters}\n"
-                f"Reasoning: {action.reasoning}\nCode:\n{action.code}"
-            )
-
-        try:
-            code = _strip_code_fences(action.code)
-        except SyntaxError as e:
-            code = action.code
-            result = f"[Error] {format_error_for_lm(e)}"
-            return self._process_execution_result(action, code, result, history, output_field_names)
-        result = self._execute_code(repl, code, input_args)
-        return self._process_execution_result(action, code, result, history, output_field_names)
+        return self._process_action(action, repl, history, iteration, input_args, output_field_names)
 
     # =========================================================================
     # Public Interface
@@ -744,17 +760,10 @@ class RLM(Module):
         """Async version: Use extract module when max iterations reached."""
         logger.warning("RLM reached max iterations, using extract to get final output")
 
-        variables_info = [variable.format() for variable in variables]
         extract_pred = await self.extract.acall(
-            variables_info=variables_info,
-            repl_history=history,
+            variables_info=[variable.format() for variable in variables], repl_history=history
         )
-
-        return Prediction(
-            trajectory=[e.model_dump() for e in history],
-            final_reasoning="Extract forced final output",
-            **{name: getattr(extract_pred, name) for name in output_field_names},
-        )
+        return self._fallback_prediction(extract_pred, history, output_field_names)
 
     async def _aexecute_iteration(
         self,
@@ -772,20 +781,7 @@ class RLM(Module):
             repl_history=history,
             iteration=f"{iteration + 1}/{self.max_iters}",
         )
-        if self.verbose:
-            logger.info(
-                f"RLM iteration {iteration + 1}/{self.max_iters}\n"
-                f"Reasoning: {pred.reasoning}\nCode:\n{pred.code}"
-            )
-
-        try:
-            code = _strip_code_fences(pred.code)
-        except SyntaxError as e:
-            code = pred.code
-            result = f"[Error] {format_error_for_lm(e)}"
-            return self._process_execution_result(pred, code, result, history, output_field_names)
-        result = self._execute_code(repl, code, input_args)
-        return self._process_execution_result(pred, code, result, history, output_field_names)
+        return self._process_action(pred, repl, history, iteration, input_args, output_field_names)
 
     async def aforward(self, interpreter: CodeInterpreter | None = None, /, **input_args) -> Prediction:
         """Async version of forward(). Execute RLM to produce outputs.

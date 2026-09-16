@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import warnings
+from contextlib import contextmanager
 from typing import Any, Literal, cast
 
 import anyio.from_thread
@@ -206,6 +207,39 @@ class LM(BaseLM):
         exc_cls = _lm_error_class_from_litellm_exception(exc) or _lm_error_class_from_status(status)
         return exc_cls(message, **metadata)
 
+    @contextmanager
+    def _translate_litellm_errors(self):
+        try:
+            yield
+        except Exception as exc:
+            if isinstance(exc, LMError):
+                raise
+            raise self._wrap_litellm_exception(exc) from exc
+
+    def _prepare_forward(self, prompt, messages, kwargs, *, asynchronous=False):
+        kwargs = dict(kwargs)
+        cache = kwargs.pop("cache", self.cache)
+        messages = messages or [{"role": "user", "content": prompt}]
+        if self.use_developer_role and self.model_type == "responses":
+            messages = [
+                {**message, "role": "developer"} if message.get("role") == "system" else message
+                for message in messages
+            ]
+
+        kwargs = {**self.kwargs, **kwargs}
+        self._warn_zero_temp_rollout(kwargs.get("temperature"), kwargs.get("rollout_id"))
+        if kwargs.get("rollout_id") is None:
+            kwargs.pop("rollout_id", None)
+
+        completions = {
+            "chat": (litellm_completion, alitellm_completion),
+            "text": (litellm_text_completion, alitellm_text_completion),
+            "responses": (litellm_responses_completion, alitellm_responses_completion),
+        }
+        completion = completions[self.model_type][asynchronous]
+        completion, cache_args = self._get_cached_completion_fn(completion, cache)
+        return completion, messages, kwargs, cache_args
+
     def forward(
         self,
         prompt: str | None = None,
@@ -229,39 +263,14 @@ class LM(BaseLM):
                 failures, which adapters use to avoid inappropriate fallback
                 retries when the prompt is too long.
         """
-        # Build the request.
-        kwargs = dict(kwargs)
-        cache = kwargs.pop("cache", self.cache)
-
-        messages = messages or [{"role": "user", "content": prompt}]
-        if self.use_developer_role and self.model_type == "responses":
-            messages = [{**m, "role": "developer"} if m.get("role") == "system" else m for m in messages]
-        kwargs = {**self.kwargs, **kwargs}
-        self._warn_zero_temp_rollout(kwargs.get("temperature"), kwargs.get("rollout_id"))
-        if kwargs.get("rollout_id") is None:
-            kwargs.pop("rollout_id", None)
-
-        if self.model_type == "chat":
-            completion = litellm_completion
-        elif self.model_type == "text":
-            completion = litellm_text_completion
-        elif self.model_type == "responses":
-            completion = litellm_responses_completion
-        completion, litellm_cache_args = self._get_cached_completion_fn(completion, cache)
-
-        try:
+        completion, messages, kwargs, cache_args = self._prepare_forward(prompt, messages, kwargs)
+        with self._translate_litellm_errors():
             results = completion(
                 request=dict(model=self.model, messages=messages, **kwargs),
                 num_retries=self.num_retries,
-                cache=litellm_cache_args,
+                cache=cache_args,
             )
-        except Exception as e:
-            if isinstance(e, LMError):
-                raise
-            raise self._wrap_litellm_exception(e) from e
-
         self._check_truncation(results)
-
         return results
 
     async def aforward(
@@ -287,39 +296,14 @@ class LM(BaseLM):
                 failures, which adapters use to avoid inappropriate fallback
                 retries when the prompt is too long.
         """
-        # Build the request.
-        kwargs = dict(kwargs)
-        cache = kwargs.pop("cache", self.cache)
-
-        messages = messages or [{"role": "user", "content": prompt}]
-        if self.use_developer_role and self.model_type == "responses":
-            messages = [{**m, "role": "developer"} if m.get("role") == "system" else m for m in messages]
-        kwargs = {**self.kwargs, **kwargs}
-        self._warn_zero_temp_rollout(kwargs.get("temperature"), kwargs.get("rollout_id"))
-        if kwargs.get("rollout_id") is None:
-            kwargs.pop("rollout_id", None)
-
-        if self.model_type == "chat":
-            completion = alitellm_completion
-        elif self.model_type == "text":
-            completion = alitellm_text_completion
-        elif self.model_type == "responses":
-            completion = alitellm_responses_completion
-        completion, litellm_cache_args = self._get_cached_completion_fn(completion, cache)
-
-        try:
+        completion, messages, kwargs, cache_args = self._prepare_forward(prompt, messages, kwargs, asynchronous=True)
+        with self._translate_litellm_errors():
             results = await completion(
                 request=dict(model=self.model, messages=messages, **kwargs),
                 num_retries=self.num_retries,
-                cache=litellm_cache_args,
+                cache=cache_args,
             )
-        except Exception as e:
-            if isinstance(e, LMError):
-                raise
-            raise self._wrap_litellm_exception(e) from e
-
         self._check_truncation(results)
-
         return results
 
     def launch(self, launch_kwargs: dict[str, Any] | None = None):

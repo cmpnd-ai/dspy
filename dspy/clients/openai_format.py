@@ -129,7 +129,9 @@ def to_openai_responses_request(request: LMRequest, *, enforce_reasoning_tempera
         "input": [item for message in request.messages for item in message_to_responses_input_items(message)],
     }
     data.update(
-        responses_config_kwargs(config, model=request.model, enforce_reasoning_temperature=enforce_reasoning_temperature)
+        responses_config_kwargs(
+            config, model=request.model, enforce_reasoning_temperature=enforce_reasoning_temperature
+        )
     )
     if config.tool_choice is not None:
         data.update(tool_choice_to_openai_responses(config.tool_choice))
@@ -142,7 +144,10 @@ def message_to_responses_input_items(message: LMMessage) -> list[dict[str, Any]]
     """Convert one DSPy message into one or more Responses input items."""
     if message.role == "tool" and len(message.parts) == 1 and isinstance(message.parts[0], LMToolResultPart):
         result = message.parts[0]
-        item = {"type": "function_call_output", "output": responses_tool_output_text(tool_result_to_openai(result)["content"])}
+        item = {
+            "type": "function_call_output",
+            "output": responses_tool_output_text(tool_result_to_openai(result)["content"]),
+        }
         if result.call_id is not None:
             item["call_id"] = result.call_id
         return [item]
@@ -232,7 +237,9 @@ def messages_to_text_prompt(messages: list[LMMessage]) -> str:
         texts = []
         for part in message.parts:
             if not isinstance(part, LMTextPart):
-                raise ValueError(f"OpenAI text completions only support text parts, but received {type(part).__name__}.")
+                raise ValueError(
+                    f"OpenAI text completions only support text parts, but received {type(part).__name__}."
+                )
             texts.append(part.text)
         chunks.append("".join(texts))
     return "\n\n".join(chunks + ["BEGIN RESPONSE:"])
@@ -360,28 +367,26 @@ def _tool_provider_extras(tool: LMToolSpec) -> dict[str, Any]:
     return {key: value for key, value in tool.provider_data.items() if key not in _TOOL_SPEC_WIRE_KEYS}
 
 
-def tool_to_openai(tool: LMToolSpec) -> dict[str, Any]:
+def _tool_function(tool: LMToolSpec) -> dict[str, Any]:
     # provider_data holds function-scoped extras; each dialect emits them where
     # it puts function fields — nested under "function" here, flattened to the
     # top level in the Responses shape.
-    data = {"type": "function", "function": {"name": tool.name, "parameters": tool.parameters}}
+    function = {"name": tool.name, "parameters": tool.parameters}
     if tool.description is not None:
-        data["function"]["description"] = tool.description
+        function["description"] = tool.description
     if tool.strict is not None:
-        data["function"]["strict"] = tool.strict
-    data["function"].update(_tool_provider_extras(tool))
-    return data
+        function["strict"] = tool.strict
+    function.update(_tool_provider_extras(tool))
+    return function
+
+
+def tool_to_openai(tool: LMToolSpec) -> dict[str, Any]:
+    return {"type": "function", "function": _tool_function(tool)}
 
 
 def tool_to_openai_responses(tool: LMToolSpec) -> dict[str, Any]:
     """Convert a normalized tool spec into Responses API function-tool shape."""
-    data = {"type": "function", "name": tool.name, "parameters": tool.parameters}
-    if tool.description is not None:
-        data["description"] = tool.description
-    if tool.strict is not None:
-        data["strict"] = tool.strict
-    data.update(_tool_provider_extras(tool))
-    return data
+    return {"type": "function", **_tool_function(tool)}
 
 
 def tool_choice_to_openai(choice: LMToolChoice) -> dict[str, Any]:
@@ -435,21 +440,9 @@ def tool_result_to_openai(result: LMToolResultPart) -> dict[str, Any]:
 
 def common_config_kwargs(config: LMConfig, *, model: str | None = None, endpoint: str = "chat") -> dict[str, Any]:
     """Convert shared DSPy config fields into Chat Completions kwargs."""
-    data = dict(config.extensions)
     _validate_openai_reasoning_temperature(config, model=model, endpoint=endpoint)
-    for key in ("temperature", "top_p"):
-        value = getattr(config, key)
-        if value is not None:
-            data[key] = value
-    if config.max_tokens is not None:
-        token_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-        data[token_key] = config.max_tokens
-    if config.stop:
-        data["stop"] = config.stop
-    if config.logprobs is not None:
-        data["logprobs"] = config.logprobs
-    if config.n is not None:
-        data["n"] = config.n
+    token_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
+    data = _shared_config_kwargs(config, token_key=token_key)
     if config.response_format is not None:
         data["response_format"] = config.response_format
     if config.reasoning is not None:
@@ -463,21 +456,9 @@ def responses_config_kwargs(
     config: LMConfig, *, model: str | None = None, enforce_reasoning_temperature: bool = True
 ) -> dict[str, Any]:
     """Convert shared DSPy config fields into Responses API kwargs."""
-    data = dict(config.extensions) if config.extensions else {}
     if enforce_reasoning_temperature:
         _validate_openai_reasoning_temperature(config, model=model, endpoint="responses")
-    for key in ("temperature", "top_p"):
-        value = getattr(config, key)
-        if value is not None:
-            data[key] = value
-    if config.max_tokens is not None:
-        data["max_output_tokens"] = config.max_tokens
-    if config.n is not None:
-        data["n"] = config.n
-    if config.logprobs is not None:
-        data["logprobs"] = config.logprobs
-    if config.stop:
-        data["stop"] = config.stop
+    data = _shared_config_kwargs(config, token_key="max_output_tokens")
     if config.reasoning is not None:
         data.update(reasoning_to_responses_kwargs(config.reasoning))
     if config.prompt_cache is not None:
@@ -490,17 +471,19 @@ def responses_config_kwargs(
 
 def text_config_kwargs(config: LMConfig) -> dict[str, Any]:
     """Convert shared DSPy config fields into text-completion kwargs."""
+    return _shared_config_kwargs(config, token_key="max_tokens")
+
+
+def _shared_config_kwargs(config: LMConfig, *, token_key: str) -> dict[str, Any]:
     data = dict(config.extensions)
-    for key in ("temperature", "max_tokens", "top_p"):
+    for key in ("temperature", "top_p", "n", "logprobs"):
         value = getattr(config, key)
         if value is not None:
             data[key] = value
+    if config.max_tokens is not None:
+        data[token_key] = config.max_tokens
     if config.stop:
         data["stop"] = config.stop
-    if config.logprobs is not None:
-        data["logprobs"] = config.logprobs
-    if config.n is not None:
-        data["n"] = config.n
     return data
 
 
@@ -607,7 +590,9 @@ def responses_tool_output_text(content: Any) -> str:
         return content
     if isinstance(content, list):
         return "".join(
-            block.get("text", "") if isinstance(block, dict) and block.get("type") in {"text", "input_text"} else str(block)
+            block.get("text", "")
+            if isinstance(block, dict) and block.get("type") in {"text", "input_text"}
+            else str(block)
             for block in content
         )
     return str(content)
@@ -758,7 +743,12 @@ def responses_function_call_to_part(output_item: Any) -> LMToolCallPart:
             provider_data["raw_arguments"] = args
             provider_data["arguments_parse_error"] = str(error)
             args = {}
-    return LMToolCallPart(id=get_value(output_item, "call_id"), name=get_value(output_item, "name", ""), args=args, provider_data=provider_data)
+    return LMToolCallPart(
+        id=get_value(output_item, "call_id"),
+        name=get_value(output_item, "name", ""),
+        args=args,
+        provider_data=provider_data,
+    )
 
 
 def citation_to_part(citation: Any) -> LMCitationPart:
@@ -799,57 +789,53 @@ def output_image_to_part(value: Any) -> LMImagePart:
     image_url = data.get("image_url")
     if isinstance(image_url, dict):
         image_url = image_url.get("url")
-    source = image_url or data.get("url")
-    b64_data = data.get("b64_json") or data.get("data")
-    file_id = data.get("file_id")
-    media_type = data.get("media_type") or data.get("mime_type") or "image/png"
     detail = data.get("detail")
-    if b64_data is not None:
-        if isinstance(b64_data, str) and b64_data.startswith("data:"):
-            media_type, b64_data = split_data_uri(b64_data)
-        return LMImagePart(data=b64_data, media_type=media_type, detail=detail)
-    if source is not None:
-        return LMImagePart(url=source, media_type=media_type, detail=detail)
-    if file_id is not None:
-        return LMImagePart(file_id=file_id, media_type=media_type, detail=detail)
-    raise ValueError("Provider image output did not include data, url, or file_id.")
+    data["url"] = image_url or data.get("url")
+    return LMImagePart(
+        **_output_media_source(
+            data, data.get("b64_json") or data.get("data"), data.get("file_id"), "image/png", "image"
+        ),
+        detail=detail,
+    )
 
 
 def output_audio_to_part(value: Any) -> LMAudioPart:
     data = model_dump(value)
     audio = data.get("audio") if isinstance(data.get("audio"), dict) else data
-    source = audio.get("url")
-    b64_data = audio.get("data") or audio.get("b64_json")
-    file_id = audio.get("file_id")
-    media_type = audio.get("media_type") or audio.get("mime_type") or "audio/wav"
-    if b64_data is not None:
-        if isinstance(b64_data, str) and b64_data.startswith("data:"):
-            media_type, b64_data = split_data_uri(b64_data)
-        return LMAudioPart(data=b64_data, media_type=media_type)
-    if source is not None:
-        return LMAudioPart(url=source, media_type=media_type)
-    if file_id is not None:
-        return LMAudioPart(file_id=file_id, media_type=media_type)
-    raise ValueError("Provider audio output did not include data, url, or file_id.")
+    return LMAudioPart(
+        **_output_media_source(
+            audio, audio.get("data") or audio.get("b64_json"), audio.get("file_id"), "audio/wav", "audio"
+        )
+    )
 
 
 def output_file_to_part(value: Any) -> LMBinaryPart:
     data = model_dump(value)
     file = data.get("file") if isinstance(data.get("file"), dict) else data
-    source = file.get("url")
-    b64_data = file.get("file_data") or file.get("data")
-    file_id = file.get("file_id") or file.get("id")
     filename = file.get("filename")
-    media_type = file.get("media_type") or file.get("mime_type") or "application/octet-stream"
+    return LMBinaryPart(
+        **_output_media_source(
+            file,
+            file.get("file_data") or file.get("data"),
+            file.get("file_id") or file.get("id"),
+            "application/octet-stream",
+            "file",
+        ),
+        filename=filename,
+    )
+
+
+def _output_media_source(data, b64_data, file_id, default_media_type, kind) -> dict[str, Any]:
+    media_type = data.get("media_type") or data.get("mime_type") or default_media_type
     if b64_data is not None:
         if isinstance(b64_data, str) and b64_data.startswith("data:"):
             media_type, b64_data = split_data_uri(b64_data)
-        return LMBinaryPart(data=b64_data, media_type=media_type, filename=filename)
-    if source is not None:
-        return LMBinaryPart(url=source, media_type=media_type, filename=filename)
+        return {"data": b64_data, "media_type": media_type}
+    if data.get("url") is not None:
+        return {"url": data["url"], "media_type": media_type}
     if file_id is not None:
-        return LMBinaryPart(file_id=file_id, media_type=media_type, filename=filename)
-    raise ValueError("Provider file output did not include data, url, or file_id.")
+        return {"file_id": file_id, "media_type": media_type}
+    raise ValueError(f"Provider {kind} output did not include data, url, or file_id.")
 
 
 def refusal_to_part(value: Any) -> LMRefusalPart:
@@ -967,7 +953,22 @@ def model_dump(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     data = {}
-    for key in ("id", "call_id", "type", "name", "arguments", "status", "text", "refusal", "url", "data", "file_id", "filename", "media_type", "mime_type"):
+    for key in (
+        "id",
+        "call_id",
+        "type",
+        "name",
+        "arguments",
+        "status",
+        "text",
+        "refusal",
+        "url",
+        "data",
+        "file_id",
+        "filename",
+        "media_type",
+        "mime_type",
+    ):
         item = getattr(value, key, None)
         if item is not None:
             data[key] = item
@@ -1004,7 +1005,13 @@ def legacy_outputs_from_lm_response(response: LMResponse) -> list[dict[str, Any]
             continue
         if output.provider_output is not None:
             outputs.append(output.provider_output)
-        elif output.text is not None and not output.reasoning_content and not output.tool_calls and not output.citations and output.logprobs is None:
+        elif (
+            output.text is not None
+            and not output.reasoning_content
+            and not output.tool_calls
+            and not output.citations
+            and output.logprobs is None
+        ):
             outputs.append(output.text)
         else:
             outputs.append(output.to_output_dict())

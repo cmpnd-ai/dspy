@@ -368,9 +368,7 @@ class BaseLM:
             response = self._finalize_lm_response(normalized_request, self._validate_typed_lm_response(response))
         else:
             response = self._legacy_forward_as_lm_response(normalized_request)
-        if return_typed_response:
-            return response
-        return response.to_legacy_outputs()
+        return response if return_typed_response else response.to_legacy_outputs()
 
     @with_callbacks
     async def acall(
@@ -401,9 +399,7 @@ class BaseLM:
             response = self._finalize_lm_response(normalized_request, self._validate_typed_lm_response(response))
         else:
             response = await self._legacy_aforward_as_lm_response(normalized_request)
-        if return_typed_response:
-            return response
-        return response.to_legacy_outputs()
+        return response if return_typed_response else response.to_legacy_outputs()
 
     def _prepare_lm_call(
         self,
@@ -439,12 +435,7 @@ class BaseLM:
         """Execute the pre-typed synchronous call path and return legacy outputs."""
         prompt = self._legacy_prompt_from_items(items, prompt=prompt)
         response = self.forward(prompt=prompt, messages=messages, **kwargs)
-        if isinstance(response, LMResponse):
-            raise TypeError(
-                f"{type(self).__name__}.forward() returned dspy.LMResponse on the legacy direct path. "
-                "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
-            )
-        return self._process_lm_response(response, prompt, messages, **kwargs)
+        return self._finish_legacy_direct(response, prompt, messages, kwargs, "forward")
 
     async def _legacy_acall_direct(
         self,
@@ -456,9 +447,12 @@ class BaseLM:
         """Execute the pre-typed asynchronous call path and return legacy outputs."""
         prompt = self._legacy_prompt_from_items(items, prompt=prompt)
         response = await self.aforward(prompt=prompt, messages=messages, **kwargs)
+        return self._finish_legacy_direct(response, prompt, messages, kwargs, "aforward")
+
+    def _finish_legacy_direct(self, response, prompt, messages, kwargs, method):
         if isinstance(response, LMResponse):
             raise TypeError(
-                f"{type(self).__name__}.aforward() returned dspy.LMResponse on the legacy direct path. "
+                f"{type(self).__name__}.{method}() returned dspy.LMResponse on the legacy direct path. "
                 "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
             )
         return self._process_lm_response(response, prompt, messages, **kwargs)

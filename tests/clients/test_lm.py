@@ -2252,3 +2252,16 @@ def test_responses_to_lm_response_normalizes_mixed_text_reasoning_and_tool_calls
     assert output.tool_calls[0].provider_data["raw_arguments"] == '{"city": "Paris",}'
     assert "arguments_parse_error" in output.tool_calls[0].provider_data
     assert lm_response.usage.total_tokens == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_request_construction_errors_keep_lm_error_boundary(asynchronous):
+    lm = dspy.LM("openai/dspy-test-model", cache=False)
+    with pytest.raises(dspy.LMUnexpectedError) as error:
+        if asynchronous:
+            await lm.aforward(prompt="hello", model="duplicate-model")
+        else:
+            lm.forward(prompt="hello", model="duplicate-model")
+    assert isinstance(error.value.__cause__, TypeError)
+    assert "model" in str(error.value.__cause__)

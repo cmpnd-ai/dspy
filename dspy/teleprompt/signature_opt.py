@@ -1,1 +1,1 @@
-from .copro_optimizer import COPRO
+from .copro_optimizer import COPRO  # noqa: F401

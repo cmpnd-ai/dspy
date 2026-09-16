@@ -215,7 +215,7 @@ class BetterTogether(Teleprompter):
 
         Args:
             student: DSPy program to optimize. All predictors must have language models assigned.
-                program.set_lm(lm) can be used to assign a language model to all modules of a 
+                program.set_lm(lm) can be used to assign a language model to all modules of a
                 program.
             trainset: Training examples for optimization. Each optimizer receives the full trainset
                 (or a shuffled version if ``shuffle_trainset_between_steps=True``).
@@ -422,7 +422,6 @@ class BetterTogether(Teleprompter):
     ) -> Module:
         rng = random.Random(seed)
         candidate_programs = []
-        flag_lms_launched = False
         flag_compilation_error_occurred = False
 
         # Evaluate original program
@@ -430,7 +429,6 @@ class BetterTogether(Teleprompter):
         logger.info("Evaluating original program (no optimization applied)")
 
         launch_lms(student)
-        flag_lms_launched = True
 
         score = self._evaluate_on_valset(student, valset, rng, num_threads, effective_max_errors, provide_traceback)
         self._add_candidate(candidate_programs, student, strategy="", score=score)
@@ -452,14 +450,11 @@ class BetterTogether(Teleprompter):
 
                 # Run optimizer, evaluate, and record results
                 compile_args = optimizer_args.get(step_code, {})
-                student, score, is_new_best, lms_relaunched = self._run_and_evaluate_step(
+                student, score, is_new_best = self._run_and_evaluate_step(
                     optimizer, student, teacher, trainset, valset, compile_args,
                     candidate_programs, current_strategy, rng,
                     num_threads, effective_max_errors, provide_traceback
                 )
-
-                if lms_relaunched:
-                    flag_lms_launched = True
 
                 # Log score
                 if is_new_best:
@@ -479,8 +474,7 @@ class BetterTogether(Teleprompter):
                 break
 
         # Cleanup and finalize
-        if flag_lms_launched:
-            kill_lms(student)
+        kill_lms(student)
 
         # Sort candidates by score (best first), with earlier programs winning ties
         candidate_programs_with_idx = [(i, cp) for i, cp in enumerate(candidate_programs)]
@@ -525,14 +519,13 @@ class BetterTogether(Teleprompter):
         num_threads: int | None,
         effective_max_errors: int | None,
         provide_traceback: bool | None,
-    ) -> tuple[Module, float | None, bool, bool]:
+    ) -> tuple[Module, float | None, bool]:
         """Run optimizer, evaluate result, and record candidate program.
 
         Returns:
             student: Optimized student program
             score: Validation score (None if no valset)
             is_new_best: Whether this score is the best so far
-            lms_relaunched: Whether LMs were relaunched (for flag tracking)
         """
         # Save LMs before optimization
         pred_lms_before = [pred.lm for pred in student.predictors()]
@@ -567,10 +560,8 @@ class BetterTogether(Teleprompter):
         # We detect this via model name changes and relaunch the new models.
         # Note: launch() and kill() are no-ops for most API-based LMs; these mainly affect local
         # LMs that need launch or clean up routines.
-        lms_relaunched = False
         if self._models_changed(student, pred_lms_before):
             launch_lms(student)
-            lms_relaunched = True
 
         # Evaluate optimized program
         score = self._evaluate_on_valset(student, valset, rng, num_threads, effective_max_errors, provide_traceback)
@@ -581,7 +572,7 @@ class BetterTogether(Teleprompter):
         best_score_so_far = max(valid_scores) if valid_scores else float("-inf")
         is_new_best = score is not None and score >= best_score_so_far
 
-        return student, score, is_new_best, lms_relaunched
+        return student, score, is_new_best
 
     def _models_changed(self, student: Module, pred_lms_before: list) -> bool:
         """Check if model names changed after optimization (e.g., fine-tuning)."""

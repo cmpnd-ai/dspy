@@ -69,7 +69,6 @@ class BootstrapFewShotWithRandomSearch(Teleprompter):
         effective_max_errors = self.max_errors if self.max_errors is not None else dspy.settings.max_errors
 
         scores = []
-        all_subscores = []
         score_data = []
 
         for seed in range(-3, self.num_candidate_sets):
@@ -87,25 +86,11 @@ class BootstrapFewShotWithRandomSearch(Teleprompter):
                 teleprompter = LabeledFewShot(k=self.max_labeled_demos)
                 program = teleprompter.compile(student, trainset=trainset_copy, sample=labeled_sample)
 
-            elif seed == -1:
-                # unshuffled few-shot
-                optimizer = BootstrapFewShot(
-                    metric=self.metric,
-                    metric_threshold=self.metric_threshold,
-                    max_bootstrapped_demos=self.max_num_samples,
-                    max_labeled_demos=self.max_labeled_demos,
-                    teacher_settings=self.teacher_settings,
-                    max_rounds=self.max_rounds,
-                    max_errors=effective_max_errors,
-                )
-                program = optimizer.compile(student, teacher=teacher, trainset=trainset_copy)
-
             else:
-                assert seed >= 0, seed
-
-                random.Random(seed).shuffle(trainset_copy)
-                size = random.Random(seed).randint(self.min_num_samples, self.max_num_samples)
-
+                size = self.max_num_samples
+                if seed >= 0:
+                    random.Random(seed).shuffle(trainset_copy)
+                    size = random.Random(seed).randint(self.min_num_samples, self.max_num_samples)
                 optimizer = BootstrapFewShot(
                     metric=self.metric,
                     metric_threshold=self.metric_threshold,
@@ -115,7 +100,6 @@ class BootstrapFewShotWithRandomSearch(Teleprompter):
                     max_rounds=self.max_rounds,
                     max_errors=effective_max_errors,
                 )
-
                 program = optimizer.compile(student, teacher=teacher, trainset=trainset_copy)
 
             evaluate = Evaluate(
@@ -130,8 +114,6 @@ class BootstrapFewShotWithRandomSearch(Teleprompter):
             result = evaluate(program)
 
             score, subscores = result.score, [output[2] for output in result.results]
-
-            all_subscores.append(subscores)
 
             if len(scores) == 0 or score > max(scores):
                 print("New best score:", score, "for seed", seed)

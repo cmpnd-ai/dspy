@@ -49,11 +49,7 @@ AUTO_RUN_SETTINGS = {
     "heavy": {"n": 18, "val_size": 1000},
 }
 
-# ANSI escape codes for colors
-YELLOW = "\033[93m"
 GREEN = "\033[92m"
-BLUE = "\033[94m"
-BOLD = "\033[1m"
 ENDC = "\033[0m"  # Resets the color to default
 
 
@@ -350,54 +346,6 @@ class MIPROv2(Teleprompter):
             f"\nvalset size: {len(valset)}\n"
         )
 
-    def _estimate_lm_calls(
-        self,
-        program: Any,
-        num_trials: int,
-        minibatch: bool,
-        minibatch_size: int,
-        minibatch_full_eval_steps: int,
-        valset: list,
-        program_aware_proposer: bool,
-        num_instruct_candidates: int,
-    ) -> tuple[str, str]:
-        num_predictors = len(program.predictors())
-
-        # Estimate prompt model calls
-        estimated_prompt_model_calls = (
-            10  # Data summarizer calls
-            + num_instruct_candidates * num_predictors  # Candidate generation
-            + (num_predictors + 1 if program_aware_proposer else 0)  # Program-aware proposer
-        )
-        prompt_model_line = (
-            f"{YELLOW}- Prompt Generation: {BLUE}{BOLD}10{ENDC}{YELLOW} data summarizer calls + "
-            f"{BLUE}{BOLD}{num_instruct_candidates}{ENDC}{YELLOW} * "
-            f"{BLUE}{BOLD}{num_predictors}{ENDC}{YELLOW} lm calls in program "
-            f"+ ({BLUE}{BOLD}{num_predictors + 1}{ENDC}{YELLOW}) lm calls in program-aware proposer "
-            f"= {BLUE}{BOLD}{estimated_prompt_model_calls}{ENDC}{YELLOW} prompt model calls{ENDC}"
-        )
-
-        # Estimate task model calls
-        if not minibatch:
-            estimated_task_model_calls = len(valset) * num_trials
-            task_model_line = (
-                f"{YELLOW}- Program Evaluation: {BLUE}{BOLD}{len(valset)}{ENDC}{YELLOW} examples in val set * "
-                f"{BLUE}{BOLD}{num_trials}{ENDC}{YELLOW} batches = "
-                f"{BLUE}{BOLD}{estimated_task_model_calls}{ENDC}{YELLOW} LM program calls{ENDC}"
-            )
-        else:
-            full_eval_steps = num_trials // minibatch_full_eval_steps + 1
-            estimated_task_model_calls = minibatch_size * num_trials + len(valset) * full_eval_steps
-            task_model_line = (
-                f"{YELLOW}- Program Evaluation: {BLUE}{BOLD}{minibatch_size}{ENDC}{YELLOW} examples in minibatch * "
-                f"{BLUE}{BOLD}{num_trials}{ENDC}{YELLOW} batches + "
-                f"{BLUE}{BOLD}{len(valset)}{ENDC}{YELLOW} examples in val set * "
-                f"{BLUE}{BOLD}{full_eval_steps}{ENDC}{YELLOW} full evals = "
-                f"{BLUE}{BOLD}{estimated_task_model_calls}{ENDC}{YELLOW} LM Program calls{ENDC}"
-            )
-
-        return prompt_model_line, task_model_line
-
     def _bootstrap_fewshot_examples(
         self,
         program: Any,
@@ -598,35 +546,19 @@ class MIPROv2(Teleprompter):
             score_data.append(
                 {"score": score, "program": candidate_program, "full_eval": batch_size >= len(valset)}
             )  # score, prog, full_eval
-            if minibatch:
-                self._log_minibatch_eval(
-                    score,
-                    best_score,
-                    batch_size,
-                    chosen_params,
-                    score_data,
-                    trial,
-                    adjusted_num_trials,
-                    trial_logs,
-                    trial_num,
-                    candidate_program,
-                    total_eval_calls,
-                )
-            else:
-                self._log_normal_eval(
-                    score,
-                    best_score,
-                    chosen_params,
-                    score_data,
-                    trial,
-                    num_trials,
-                    trial_logs,
-                    trial_num,
-                    valset,
-                    batch_size,
-                    candidate_program,
-                    total_eval_calls,
-                )
+            self._log_evaluation(
+                score=score,
+                best_score=best_score,
+                batch_size=batch_size,
+                chosen_params=chosen_params,
+                score_data=score_data,
+                total_trials=adjusted_num_trials if minibatch else num_trials,
+                trial_log=trial_logs[trial_num],
+                trial_num=trial_num,
+                candidate_program=candidate_program,
+                total_eval_calls=total_eval_calls,
+                minibatch=minibatch,
+            )
             categorical_key = ",".join(map(str, chosen_params))
             param_score_dict[categorical_key].append(
                 (score, candidate_program, raw_chosen_params),
@@ -691,63 +623,41 @@ class MIPROv2(Teleprompter):
 
         return best_program
 
-    def _log_minibatch_eval(
+    def _log_evaluation(
         self,
         score,
         best_score,
         batch_size,
         chosen_params,
         score_data,
-        trial,
-        adjusted_num_trials,
-        trial_logs,
+        total_trials,
+        trial_log,
         trial_num,
         candidate_program,
         total_eval_calls,
+        minibatch,
     ):
-        trial_logs[trial_num]["mb_program_path"] = save_candidate_program(candidate_program, self.log_dir, trial_num)
-        trial_logs[trial_num]["mb_score"] = score
-        trial_logs[trial_num]["total_eval_calls_so_far"] = total_eval_calls
-        trial_logs[trial_num]["mb_program"] = candidate_program.deepcopy()
+        prefix = "mb" if minibatch else "full_eval"
+        trial_log[f"{prefix}_program_path"] = save_candidate_program(candidate_program, self.log_dir, trial_num)
+        trial_log[f"{prefix}_score"] = score
+        trial_log["total_eval_calls_so_far"] = total_eval_calls
+        trial_log[f"{prefix}_program"] = candidate_program.deepcopy()
 
-        logger.info(f"Score: {score} on minibatch of size {batch_size} with parameters {chosen_params}.")
-        minibatch_scores = ", ".join([f"{s['score']}" for s in score_data if not s["full_eval"]])
-        logger.info(f"Minibatch scores so far: {'[' + minibatch_scores + ']'}")
+        if minibatch:
+            logger.info(f"Score: {score} on minibatch of size {batch_size} with parameters {chosen_params}.")
+            minibatch_scores = ", ".join(f"{item['score']}" for item in score_data if not item["full_eval"])
+            logger.info(f"Minibatch scores so far: [{minibatch_scores}]")
+        else:
+            logger.info(f"Score: {score} with parameters {chosen_params}.")
         full_eval_scores = ", ".join([f"{s['score']}" for s in score_data if s["full_eval"]])
-        trajectory = "[" + full_eval_scores + "]"
-        logger.info(f"Full eval scores so far: {trajectory}")
-        logger.info(f"Best full score so far: {best_score}")
-        logger.info(
-            f"{'=' * len(f'== Trial {trial.number + 1} / {adjusted_num_trials} - Minibatch Evaluation ==')}\n\n"
+        logger.info(f"{'Full eval scores' if minibatch else 'Scores'} so far: [{full_eval_scores}]")
+        logger.info(f"Best {'full ' if minibatch else ''}score so far: {best_score}")
+        heading = (
+            f"== Trial {trial_num} / {total_trials} - Minibatch Evaluation =="
+            if minibatch
+            else f"===== Trial {trial_num} / {total_trials} ====="
         )
-
-    def _log_normal_eval(
-        self,
-        score,
-        best_score,
-        chosen_params,
-        score_data,
-        trial,
-        num_trials,
-        trial_logs,
-        trial_num,
-        valset,
-        batch_size,
-        candidate_program,
-        total_eval_calls,
-    ):
-        trial_logs[trial_num]["full_eval_program_path"] = save_candidate_program(
-            candidate_program, self.log_dir, trial_num
-        )
-        trial_logs[trial_num]["full_eval_score"] = score
-        trial_logs[trial_num]["total_eval_calls_so_far"] = total_eval_calls
-        trial_logs[trial_num]["full_eval_program"] = candidate_program.deepcopy()
-
-        logger.info(f"Score: {score} with parameters {chosen_params}.")
-        full_eval_scores = ", ".join([f"{s['score']}" for s in score_data if s["full_eval"]])
-        logger.info(f"Scores so far: {'[' + full_eval_scores + ']'}")
-        logger.info(f"Best score so far: {best_score}")
-        logger.info(f"{'=' * len(f'===== Trial {trial.number + 1} / {num_trials} =====')}\n\n")
+        logger.info(f"{'=' * len(heading)}\n\n")
 
     def _select_and_insert_instructions_and_demos(
         self,

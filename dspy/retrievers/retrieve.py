@@ -5,16 +5,6 @@ from dspy.primitives.prediction import Prediction
 from dspy.utils.callback import with_callbacks
 
 
-def single_query_passage(passages):
-    passages_dict = {key: [] for key in list(passages[0].keys())}
-    for docs in passages:
-        for key, value in docs.items():
-            passages_dict[key].append(value)
-    if "long_text" in passages_dict:
-        passages_dict["passages"] = passages_dict.pop("long_text")
-    return Prediction(**passages_dict)
-
-
 class Retrieve(Parameter):
     name = "Search"
     input_variable = "query"

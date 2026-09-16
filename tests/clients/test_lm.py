@@ -1099,6 +1099,86 @@ async def test_async_lm_call():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sync_wrapper", "async_wrapper", "sync_transport", "async_transport", "request_data"),
+    [
+        (
+            "litellm_completion",
+            "alitellm_completion",
+            "completion",
+            "acompletion",
+            {"model": "openai/test", "messages": [{"role": "user", "content": "hello"}]},
+        ),
+        (
+            "litellm_text_completion",
+            "alitellm_text_completion",
+            "text_completion",
+            "atext_completion",
+            {"model": "provider/test", "messages": [{"role": "user", "content": "hello"}]},
+        ),
+        (
+            "litellm_responses_completion",
+            "alitellm_responses_completion",
+            "responses",
+            "aresponses",
+            {"model": "openai/test", "messages": [{"role": "user", "content": "hello"}]},
+        ),
+    ],
+)
+async def test_litellm_sync_and_async_wrappers_prepare_identical_requests(
+    sync_wrapper, async_wrapper, sync_transport, async_transport, request_data
+):
+    import dspy.clients.lm as lm_module
+
+    request_data.update({"rollout_id": 9, "headers": {"X-Test": "kept"}, "temperature": 0.25})
+    original_request = json.loads(json.dumps(request_data))
+    cache = {"no-cache": False, "custom": "kept"}
+    litellm_mock = mock.Mock()
+    setattr(litellm_mock, async_transport, mock.AsyncMock(return_value="async result"))
+    getattr(litellm_mock, sync_transport).return_value = "sync result"
+
+    with mock.patch.object(lm_module, "_get_litellm", return_value=litellm_mock):
+        sync_result = getattr(lm_module, sync_wrapper)(request_data, num_retries=4, cache=cache)
+        async_result = await getattr(lm_module, async_wrapper)(request_data, num_retries=4, cache=cache)
+
+    sync_kwargs = getattr(litellm_mock, sync_transport).call_args.kwargs
+    async_kwargs = getattr(litellm_mock, async_transport).call_args.kwargs
+    assert sync_result == "sync result"
+    assert async_result == "async result"
+    assert sync_kwargs == async_kwargs
+    assert sync_kwargs["cache"] is cache
+    assert sync_kwargs["num_retries"] == 4
+    assert sync_kwargs["retry_strategy"] == "exponential_backoff_retry"
+    assert sync_kwargs["headers"]["X-Test"] == "kept"
+    assert sync_kwargs["headers"]["User-Agent"].startswith("DSPy/")
+    assert "rollout_id" not in sync_kwargs
+    assert request_data == original_request
+    if sync_transport == "text_completion":
+        assert sync_kwargs["model"] == "text-completion-openai/test"
+        assert sync_kwargs["prompt"] == "hello\n\nBEGIN RESPONSE:"
+        assert "messages" not in sync_kwargs
+    elif sync_transport == "responses":
+        assert sync_kwargs["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+        assert "messages" not in sync_kwargs
+    else:
+        assert sync_kwargs["messages"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_text_wrappers_reject_duplicate_prompt_without_calling_provider():
+    import dspy.clients.lm as lm_module
+
+    request = {"model": "openai/test", "messages": [{"role": "user", "content": "hello"}], "prompt": "conflict"}
+    with mock.patch.object(lm_module, "_get_litellm") as provider:
+        with pytest.raises(TypeError, match="prompt"):
+            lm_module.litellm_text_completion(request, num_retries=0)
+        with pytest.raises(TypeError, match="prompt"):
+            await lm_module.alitellm_text_completion(request, num_retries=0)
+    provider.return_value.text_completion.assert_not_called()
+    provider.return_value.atext_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_async_lm_call_with_cache(tmp_path):
     """Test the async LM call with caching."""
     original_cache = dspy.cache

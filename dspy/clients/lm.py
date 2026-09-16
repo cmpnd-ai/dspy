@@ -492,128 +492,82 @@ def _get_stream_completion_fn(
         return async_stream_completion
 
 
-def litellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
+def _prepare_litellm_request(request: dict[str, Any], cache: dict[str, Any] | None):
     cache = cache or {"no-cache": True, "no-store": True}
     request = dict(request)
     request.pop("rollout_id", None)
     headers = _add_dspy_identifier_to_headers(request.pop("headers", None))
+    return request, cache, headers
+
+
+def _get_litellm_retry_kwargs(cache: dict[str, Any], headers: dict[str, Any], num_retries: int):
+    return {
+        "cache": cache,
+        "num_retries": num_retries,
+        "retry_strategy": "exponential_backoff_retry",
+        "headers": headers,
+    }
+
+
+def _prepare_litellm_text_request(request: dict[str, Any], cache: dict[str, Any] | None, num_retries: int):
+    request, cache, headers = _prepare_litellm_request(request, cache)
+    # TODO: Not all the models are in the format of "provider/model"
+    model = request.pop("model").split("/", 1)
+    provider, model = model[0] if len(model) > 1 else "openai", model[-1]
+    request = dict(
+        model=f"text-completion-openai/{model}",
+        api_key=request.pop("api_key", None) or os.getenv(f"{provider}_API_KEY"),
+        api_base=request.pop("api_base", None) or os.getenv(f"{provider}_API_BASE"),
+        prompt="\n\n".join([x["content"] for x in request.pop("messages")] + ["BEGIN RESPONSE:"]),
+        **request,
+    )
+    return request, _get_litellm_retry_kwargs(cache, headers, num_retries)
+
+
+def litellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
+    request, cache, headers = _prepare_litellm_request(request, cache)
     stream_completion = _get_stream_completion_fn(request, cache, sync=True, headers=headers)
     if stream_completion is None:
-        return _get_litellm().completion(
-            cache=cache,
-            num_retries=num_retries,
-            retry_strategy="exponential_backoff_retry",
-            headers=headers,
-            **request,
-        )
+        return _get_litellm().completion(**_get_litellm_retry_kwargs(cache, headers, num_retries), **request)
 
     return stream_completion()
 
 
 def litellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
-    cache = cache or {"no-cache": True, "no-store": True}
-    request = dict(request)
-    request.pop("rollout_id", None)
-    headers = request.pop("headers", None)
-    # Extract the provider and model from the model string.
-    # TODO: Not all the models are in the format of "provider/model"
-    model = request.pop("model").split("/", 1)
-    provider, model = model[0] if len(model) > 1 else "openai", model[-1]
-
-    # Use the API key and base from the request, or from the environment.
-    api_key = request.pop("api_key", None) or os.getenv(f"{provider}_API_KEY")
-    api_base = request.pop("api_base", None) or os.getenv(f"{provider}_API_BASE")
-
-    # Build the prompt from the messages.
-    prompt = "\n\n".join([x["content"] for x in request.pop("messages")] + ["BEGIN RESPONSE:"])
-
-    return _get_litellm().text_completion(
-        cache=cache,
-        model=f"text-completion-openai/{model}",
-        api_key=api_key,
-        api_base=api_base,
-        prompt=prompt,
-        num_retries=num_retries,
-        retry_strategy="exponential_backoff_retry",
-        headers=_add_dspy_identifier_to_headers(headers),
-        **request,
-    )
+    request, retry_kwargs = _prepare_litellm_text_request(request, cache, num_retries)
+    return _get_litellm().text_completion(**retry_kwargs, **request)
 
 
 async def alitellm_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
-    cache = cache or {"no-cache": True, "no-store": True}
-    request = dict(request)
-    request.pop("rollout_id", None)
-    headers = _add_dspy_identifier_to_headers(request.pop("headers", None))
+    request, cache, headers = _prepare_litellm_request(request, cache)
     stream_completion = _get_stream_completion_fn(request, cache, sync=False, headers=headers)
     if stream_completion is None:
-        return await _get_litellm().acompletion(
-            cache=cache,
-            num_retries=num_retries,
-            retry_strategy="exponential_backoff_retry",
-            headers=headers,
-            **request,
-        )
+        return await _get_litellm().acompletion(**_get_litellm_retry_kwargs(cache, headers, num_retries), **request)
 
     return await stream_completion()
 
 
 async def alitellm_text_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
-    cache = cache or {"no-cache": True, "no-store": True}
-    request = dict(request)
-    request.pop("rollout_id", None)
-    model = request.pop("model").split("/", 1)
-    headers = request.pop("headers", None)
-    provider, model = model[0] if len(model) > 1 else "openai", model[-1]
-
-    # Use the API key and base from the request, or from the environment.
-    api_key = request.pop("api_key", None) or os.getenv(f"{provider}_API_KEY")
-    api_base = request.pop("api_base", None) or os.getenv(f"{provider}_API_BASE")
-
-    # Build the prompt from the messages.
-    prompt = "\n\n".join([x["content"] for x in request.pop("messages")] + ["BEGIN RESPONSE:"])
-
-    return await _get_litellm().atext_completion(
-        cache=cache,
-        model=f"text-completion-openai/{model}",
-        api_key=api_key,
-        api_base=api_base,
-        prompt=prompt,
-        num_retries=num_retries,
-        retry_strategy="exponential_backoff_retry",
-        headers=_add_dspy_identifier_to_headers(headers),
-        **request,
-    )
+    request, retry_kwargs = _prepare_litellm_text_request(request, cache, num_retries)
+    return await _get_litellm().atext_completion(**retry_kwargs, **request)
 
 
 def litellm_responses_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
-    cache = cache or {"no-cache": True, "no-store": True}
-    request = dict(request)
-    request.pop("rollout_id", None)
-    headers = request.pop("headers", None)
+    request, cache, headers = _prepare_litellm_request(request, cache)
     request = _convert_chat_request_to_responses_request(request)
 
     return _get_litellm().responses(
-        cache=cache,
-        num_retries=num_retries,
-        retry_strategy="exponential_backoff_retry",
-        headers=_add_dspy_identifier_to_headers(headers),
+        **_get_litellm_retry_kwargs(cache, headers, num_retries),
         **request,
     )
 
 
 async def alitellm_responses_completion(request: dict[str, Any], num_retries: int, cache: dict[str, Any] | None = None):
-    cache = cache or {"no-cache": True, "no-store": True}
-    request = dict(request)
-    request.pop("rollout_id", None)
-    headers = request.pop("headers", None)
+    request, cache, headers = _prepare_litellm_request(request, cache)
     request = _convert_chat_request_to_responses_request(request)
 
     return await _get_litellm().aresponses(
-        cache=cache,
-        num_retries=num_retries,
-        retry_strategy="exponential_backoff_retry",
-        headers=_add_dspy_identifier_to_headers(headers),
+        **_get_litellm_retry_kwargs(cache, headers, num_retries),
         **request,
     )
 

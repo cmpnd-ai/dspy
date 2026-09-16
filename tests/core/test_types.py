@@ -1,4 +1,5 @@
 import json
+import pickle
 
 import pydantic
 import pytest
@@ -494,3 +495,23 @@ def test_stream_builder_rejects_incomplete_tool_call_arguments():
 
     with pytest.raises(ValueError, match="tool-call arguments"):
         builder.to_response()
+
+
+def test_streaming_types_are_reexported_from_compatibility_module_and_pickle():
+    from dspy.core.streaming import LMStreamDeltaEvent as ExtractedStreamDeltaEvent
+    from dspy.core.streaming import LMTextDelta as ExtractedTextDelta
+
+    event = ExtractedStreamDeltaEvent(part_index=0, delta=ExtractedTextDelta(text="hello"))
+
+    assert ExtractedStreamDeltaEvent is LMStreamDeltaEvent
+    assert ExtractedTextDelta is LMTextDelta
+    assert pickle.loads(pickle.dumps(event)) == event
+
+
+def test_pickles_with_legacy_streaming_type_path_still_load():
+    # Protocol 0 keeps module paths as plain text, allowing this to model a
+    # pickle written before the classes moved to dspy.core.streaming.
+    delta = LMTextDelta(text="hello")
+    legacy_pickle = pickle.dumps(delta, protocol=0).replace(b"dspy.core.streaming", b"dspy.core.types")
+
+    assert pickle.loads(legacy_pickle) == delta

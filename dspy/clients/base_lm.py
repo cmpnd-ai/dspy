@@ -509,29 +509,28 @@ class BaseLM:
 
     def _legacy_forward_as_lm_response(self, request: LMRequest) -> LMResponse:
         """Call a legacy `forward()` implementation and normalize its provider response."""
-        data = self._legacy_forward_kwargs(request)
-        messages = data.pop("messages", None)
-        prompt = self._prompt_from_lm_request(request)
-        if prompt is not None:
-            messages = None
+        prompt, messages, data = self._prepare_legacy_forward(request)
         response = self.forward(prompt=prompt, messages=messages, **data)
-        typed_response = self._validate_legacy_lm_response(response, stacklevel=4)
-        if typed_response is not None:
-            return self._finalize_lm_response(request, typed_response)
-        with settings.context(disable_history=True, usage_tracker=None):
-            outputs = self._process_lm_response(response, prompt, messages, **data)
-        lm_response = self._legacy_outputs_to_lm_response(outputs, request=request, provider_response=response)
-        return self._finalize_lm_response(request, lm_response)
+        return self._finalize_legacy_forward(request, response, prompt, messages, data)
 
     async def _legacy_aforward_as_lm_response(self, request: LMRequest) -> LMResponse:
         """Async variant of `_legacy_forward_as_lm_response()`."""
+        prompt, messages, data = self._prepare_legacy_forward(request)
+        response = await self.aforward(prompt=prompt, messages=messages, **data)
+        return self._finalize_legacy_forward(request, response, prompt, messages, data)
+
+    def _prepare_legacy_forward(
+        self, request: LMRequest
+    ) -> tuple[str | None, list[dict[str, Any]] | None, dict[str, Any]]:
         data = self._legacy_forward_kwargs(request)
         messages = data.pop("messages", None)
         prompt = self._prompt_from_lm_request(request)
         if prompt is not None:
             messages = None
-        response = await self.aforward(prompt=prompt, messages=messages, **data)
-        typed_response = self._validate_legacy_lm_response(response, stacklevel=4)
+        return prompt, messages, data
+
+    def _finalize_legacy_forward(self, request, response, prompt, messages, data) -> LMResponse:
+        typed_response = self._validate_legacy_lm_response(response, stacklevel=5)
         if typed_response is not None:
             return self._finalize_lm_response(request, typed_response)
         with settings.context(disable_history=True, usage_tracker=None):

@@ -215,30 +215,6 @@ def build_call_data_from_trace(
     return call_data
 
 
-# # TODO(PR) check with team
-# def bootstrap_trace_data_one_example(
-#     example: Example,
-#     program: Program,
-#     metric: Optional[Callable] = None
-# ) -> dict[str, Any]:
-#     # Return a dict with the following keys:
-#     #     example, prediction, trace, and score (if metric != None)
-#     with dspy.context(trace=[]):
-#         prediction = program(**example.inputs())
-#         trace = dspy.settings.trace
-#         score = metric(example, prediction, trace) if metric else None
-
-#     data_dict = dict(
-#         example=example,
-#         prediction=prediction,
-#         trace=trace,
-#     )
-#     if metric:
-#         data_dict["score"] = score
-
-#     return data_dict
-
-
 # Note: Shared below are useful functions for preparing student/teacher programs
 # Similar methods are implemented separately and used by other DSPy
 # teleprompters. These can be moved to shared locations.

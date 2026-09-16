@@ -159,28 +159,6 @@ class DummyLM(BaseLM):
         return self.history[index]["messages"], self.history[index]["outputs"]
 
 
-def dummy_rm(passages=()) -> callable:
-    if not passages:
-
-        def inner(query: str, *, k: int, **kwargs):
-            raise ValueError("No passages defined")
-
-        return inner
-    max_length = max(map(len, passages)) + 100
-    vectorizer = DummyVectorizer(max_length)
-    passage_vecs = vectorizer(passages)
-
-    def inner(query: str, *, k: int, **kwargs):
-        assert k <= len(passages)
-        query_vec = vectorizer([query])[0]
-        scores = passage_vecs @ query_vec
-        largest_idx = (-scores).argsort()[:k]
-
-        return [dotdict(long_text=passages[i]) for i in largest_idx]
-
-    return inner
-
-
 class DummyVectorizer:
     """Simple vectorizer based on n-grams."""
 

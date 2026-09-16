@@ -135,11 +135,6 @@ class BootstrapFewShot(Teleprompter):
             name2predictor[name1] = None  # dict(student=predictor1, teacher=predictor2)
             predictor2name[id(predictor1)] = name1
 
-            # FIXME(shangyint): This is an ugly hack to bind traces of
-            # retry.module to retry
-            # if isinstance(predictor1, Retry):
-            #     predictor2name[id(predictor1.module)] = name1
-
             predictor2name[id(predictor2)] = name2
 
         self.name2predictor = name2predictor
@@ -173,11 +168,7 @@ class BootstrapFewShot(Teleprompter):
         self.validation = [x for idx, x in enumerate(self.trainset) if idx not in bootstrapped]
         random.Random(0).shuffle(self.validation)
 
-        self.validation = self.validation
-
         # NOTE: Can't yet use evaluate because we need to trace *per example*
-        # evaluate = Evaluate(program=self.teacher, metric=self.metric, num_threads=12)
-        # score = evaluate(self.metric, display_table=False, display_progress=True)
 
     def _bootstrap_one_example(self, example, round_idx=0):
         name2traces = {}
@@ -229,16 +220,6 @@ class BootstrapFewShot(Teleprompter):
                     predictor_name = self.predictor2name[id(predictor)]
                 except KeyError:
                     continue  # FIXME: !
-
-                    # # TODO: Look closer into this. It's a bit tricky to reproduce.
-                    # print(f"Failed to find predictor {predictor} in {self.predictor2name}.")
-                    # print(
-                    #     "Are you doing this in a notebook (Jupyter)? This might be caused by redefining values by rerunning cells.",
-                    # )
-                    # print("Try restarting the notebook, or open an issue.")
-                    # raise KeyError(
-                    #     f"Failed to find predictor {id(predictor)} {predictor} in {self.predictor2name}.",
-                    # ) from e
 
                 name2traces[predictor_name] = name2traces.get(predictor_name, [])
                 name2traces[predictor_name].append(demo)

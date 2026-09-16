@@ -6,7 +6,7 @@ from dspy.streaming.messages import StatusMessage, StatusMessageProvider
 from dspy.utils import exceptions
 from dspy.utils.annotation import experimental
 from dspy.utils.callback import BaseCallback, with_callbacks
-from dspy.utils.dummies import DummyLM, DummyVectorizer, dummy_rm
+from dspy.utils.dummies import DummyLM, DummyVectorizer
 from dspy.utils.inspect_history import pretty_print_history
 from dspy.utils.syncify import syncify
 
@@ -30,7 +30,6 @@ __all__ = [
     "with_callbacks",
     "DummyLM",
     "DummyVectorizer",
-    "dummy_rm",
     "experimental",
     "StatusMessage",
     "StatusMessageProvider",

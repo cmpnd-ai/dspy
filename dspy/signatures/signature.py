@@ -628,17 +628,15 @@ def make_signature(
             raise ValueError(f"Field values must be Field instances, but received: {field}.")
         fixed_fields[name] = (type_, field)
 
-    # Default prompt when no instructions are provided
-    if instructions is None:
-        sig = Signature(signature, "", custom_types=custom_types)  # Simple way to parse input/output fields
-        instructions = _default_instructions(sig)
-
-    return create_model(
+    signature = create_model(
         signature_name,
         __base__=Signature,
-        __doc__=instructions,
+        __doc__=instructions if instructions is not None else "",
         **fixed_fields,
     )
+    if instructions is None:
+        signature.instructions = _default_instructions(signature)
+    return signature
 
 
 def _parse_signature(signature: str, names=None) -> dict[str, tuple[type, Any]]:

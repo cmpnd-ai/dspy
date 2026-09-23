@@ -16,7 +16,6 @@ Lazy modules are materialized under a per-module lock so concurrent first use
 cannot expose a partially initialized module.
 """
 
-import functools
 import importlib
 import importlib.machinery
 import importlib.metadata
@@ -126,15 +125,6 @@ class _LazyModule(types.ModuleType):
 
     def __dir__(self) -> list[str]:
         return dir(self._load())
-
-
-@functools.cache
-def is_available(module: str) -> bool:
-    """Return True if *module* can be imported, without actually importing it."""
-    try:
-        return importlib.util.find_spec(module) is not None
-    except (ImportError, ValueError):
-        return False
 
 
 def require(module: str, *, extra: str | None = None, feature: str | None = None) -> Any:

@@ -4,29 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from dspy.utils.lazy_import import _INSTALL_HINTS, _detect_dspy_dist, _MissingModule, is_available, require
-
-
-def test_is_available_true_for_stdlib():
-    assert is_available("json") is True
-
-
-def test_is_available_false_for_missing():
-    assert is_available("definitely_not_a_real_module_xyz") is False
-
-
-def test_is_available_does_not_import_module(monkeypatch):
-    import sys
-
-    # Use a stdlib module that dspy never imports, so we can deterministically
-    # observe whether is_available() triggers an import as a side effect.
-    target = "mailbox"
-    monkeypatch.delitem(sys.modules, target, raising=False)
-    # is_available is @functools.cache'd; clear so we actually exercise find_spec.
-    is_available.cache_clear()
-
-    assert is_available(target) is True
-    assert target not in sys.modules
+from dspy.utils.lazy_import import _INSTALL_HINTS, _detect_dspy_dist, _MissingModule, require
 
 
 def test_require_returns_lazy_module_when_present():

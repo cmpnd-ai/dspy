@@ -1,4 +1,4 @@
-from dspy.signatures.field import InputField, OldField, OldInputField, OldOutputField, OutputField
+from dspy.signatures.field import InputField, OutputField
 from dspy.signatures.signature import (
     Signature,
     SignatureMeta,
@@ -10,9 +10,6 @@ from dspy.signatures.signature import (
 __all__ = [
     "InputField",
     "OutputField",
-    "OldField",
-    "OldInputField",
-    "OldOutputField",
     "SignatureMeta",
     "Signature",
     "infer_prefix",

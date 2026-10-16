@@ -34,6 +34,7 @@ def cache_config(tmp_path):
         "disk_cache_dir": str(tmp_path),
         "disk_size_limit_bytes": 1024 * 1024,  # 1MB
         "memory_max_entries": 100,
+        "safe_types": [DummyResponse],
     }
 
 
@@ -496,6 +497,7 @@ def test_restricted_and_unrestricted_share_wire_format(tmp_path):
     unrestricted = Cache(
         enable_disk_cache=True, enable_memory_cache=False,
         disk_cache_dir=shared_dir, disk_size_limit_bytes=1024 * 1024,
+        restrict_pickle=False,
     )
     unrestricted.put(request, {"value": "hello"})
     unrestricted.disk_cache.close()
@@ -565,3 +567,24 @@ def test_import_dspy_does_not_build_the_default_cache():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False", "`import dspy` built the default cache"
+
+
+class _ExecGadget:
+    def __reduce__(self):
+        return (os.getpid, ())
+
+
+def test_default_cache_rejects_untrusted_pickle(tmp_path, caplog):
+    request = {"model": "test", "prompt": "poisoned"}
+    cache = Cache(enable_disk_cache=True, enable_memory_cache=False, disk_cache_dir=str(tmp_path))
+    key = cache.cache_key(request)
+    cache.disk_cache.close()
+
+    attacker = FanoutCache(directory=str(tmp_path), shards=16, timeout=10)
+    attacker.set(key, _ExecGadget())
+    attacker.close()
+
+    cache = Cache(enable_disk_cache=True, enable_memory_cache=False, disk_cache_dir=str(tmp_path))
+    with caplog.at_level("WARNING", logger="dspy.clients.cache"):
+        assert cache.get(request) is None
+    assert "posix.getpid" in caplog.text or "nt.getpid" in caplog.text

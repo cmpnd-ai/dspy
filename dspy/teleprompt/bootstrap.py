@@ -5,7 +5,9 @@ import threading
 import tqdm
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.teleprompt.teleprompt import Teleprompter
+from dspy.utils.tracing import capture_trace, tracing_enabled
 
 from .vanilla import LabeledFewShot
 
@@ -55,10 +57,7 @@ class BootstrapFewShot(Teleprompter):
                 outputting the result of that comparison.
             metric_threshold (float, optional): If the metric yields a numerical value, then check it
                 against this threshold when deciding whether or not to accept a bootstrap example.
-                An example is accepted when ``metric_value >= metric_threshold``. Any value other
-                than None is applied, including ``0``; note that a boolean metric returning False
-                passes a threshold of ``0`` because ``False >= 0``. When None, the metric's own
-                truthiness decides. Defaults to None.
+                Defaults to None.
             teacher_settings (dict, optional): Settings for the `teacher` model.
                 Defaults to None.
             max_bootstrapped_demos (int): Maximum number of bootstrapped demonstrations to include.
@@ -199,15 +198,18 @@ class BootstrapFewShot(Teleprompter):
                         predictor_cache[name] = predictor.demos
                         predictor.demos = [x for x in predictor.demos if x != example]
 
-                    prediction = teacher(**example.inputs())
+                    with capture_trace(teacher, enabled=tracing_enabled() or accepts_metric_context(self.metric)) as execution:
+                        prediction = teacher(**example.inputs())
                     trace = dspy.settings.trace
 
                     for name, predictor in teacher.named_predictors():
                         predictor.demos = predictor_cache[name]
 
                 if self.metric:
-                    metric_val = self.metric(example, prediction, trace)
-                    if self.metric_threshold is not None:
+                    metric_val = call_metric(
+                        self.metric, example, prediction, MetricContext("bootstrap", execution), legacy_args=(trace,)
+                    )
+                    if self.metric_threshold:
                         success = metric_val >= self.metric_threshold
                     else:
                         success = metric_val

@@ -16,7 +16,7 @@ from dspy.clients._deprecation import warn_legacy_shortcut
 from dspy.clients._http import finite_seconds
 from dspy.clients.backend_selection import CLIENT_KEYS, select_backend
 from dspy.clients.call_context import stream_emitted
-from dspy.clients.call_result import CACHE_FORMAT, CallResult, combine, usage_dict
+from dspy.clients.call_result import CACHE_FORMAT, CallResult, combine, observe_result, usage_dict
 from dspy.clients.engines.legacy_engine import AsyncLegacyEngine, LegacyEngine
 from dspy.clients.engines.lifecycle import aclosing_stream, closing_stream
 from dspy.clients.engines.litellm_engine import AsyncLiteLLMEngine, LiteLLMEngine
@@ -38,6 +38,8 @@ from dspy.lm15 import (
 )
 from dspy.utils.exceptions import LMConfigurationError, LMUnsupportedFeatureError, is_retryable_lm_error
 from dspy.utils.lazy_import import require
+from dspy.utils.tracing import record_event
+from dspy.utils.usage_tracker import record_usage
 
 anyio = require("anyio")
 
@@ -553,10 +555,10 @@ def _hint_responses_api(lm, exc):
 
 
 def _account_failed_call(lm, results, primary):
-    if settings.usage_tracker:
+    if settings.usage_tracker or settings.get("execution_traces", ()):
         for result in results:
             try:
-                settings.usage_tracker.add_usage(lm.model, result.usage)
+                record_usage(lm.model, result.usage)
             except Exception as secondary:
                 # A custom tracker must not replace an engine error or cancel.
                 try:
@@ -727,8 +729,10 @@ async def aexecute(lm, call):
 
 
 def finalize(lm, call, result):
-    if not result.cache_hit and settings.usage_tracker:
-        settings.usage_tracker.add_usage(lm.model, result.usage)
+    observe_result(lm, result, call.kwargs)
+    record_event("lm_result", {"cache_hit": result.cache_hit, "cost": result.cost, "usage": result.usage})
+    if not result.cache_hit:
+        record_usage(lm.model, result.usage)
     if not settings.disable_history:
         import datetime
         import uuid

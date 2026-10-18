@@ -7,6 +7,14 @@ from typing import Any, Generator, TypeGuard
 from pydantic import BaseModel
 
 from dspy.dsp.utils.settings import settings
+from dspy.utils.tracing import record_event
+
+
+def record_usage(model, usage):
+    """Account for completed, non-cached LM work at its invocation boundary."""
+    record_event("usage", {"model": model, "usage": usage})
+    if settings.usage_tracker:
+        settings.usage_tracker.add_usage(model, usage)
 
 
 class UsageTracker:

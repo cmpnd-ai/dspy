@@ -2,13 +2,11 @@ import functools
 import inspect
 import logging
 import uuid
-from types import FunctionType
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable
 
 import dspy
 import dspy.utils.callback_context as callback_context
-
-F = TypeVar("F", bound=FunctionType)
+from dspy.utils.tracing import begin_invocation, end_invocation, tracing_enabled
 
 ACTIVE_CALL_ID = callback_context.ACTIVE_CALL_ID
 
@@ -309,38 +307,18 @@ class BaseCallback:
         pass
 
 
-def with_callbacks(fn: F) -> F:
-    """Add callbacks to an instance method while preserving its parameters and return type."""
+def with_callbacks(fn):
+    """Instrument an invocation; callbacks and structured capture share its identity."""
 
-    def _execute_start_callbacks(
-        instance: object,
-        fn: F,
-        call_id: str,
-        callbacks: list[BaseCallback],
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> None:
+    def _execute_start_callbacks(instance, fn, call_id, callbacks, inputs):
         """Execute all start callbacks for a function call."""
-        # Keep the existing argument-binding behavior during this typing-only migration.
-        inputs = inspect.getcallargs(fn, instance, *args, **kwargs)  # ty: ignore[deprecated]
-        if "self" in inputs:
-            inputs.pop("self")
-        elif "instance" in inputs:
-            inputs.pop("instance")
         for callback in callbacks:
             try:
                 _get_on_start_handler(callback, instance, fn)(call_id=call_id, instance=instance, inputs=inputs)
             except Exception as e:
                 logger.warning(f"Error when calling callback {callback}: {e}")
 
-    def _execute_end_callbacks(
-        instance: object,
-        fn: F,
-        call_id: str,
-        results: object,
-        exception: BaseException | None,
-        callbacks: list[BaseCallback],
-    ) -> None:
+    def _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks):
         """Execute all end callbacks for a function call."""
         for callback in callbacks:
             try:
@@ -352,22 +330,32 @@ def with_callbacks(fn: F) -> F:
             except Exception as e:
                 logger.warning(f"Error when applying callback {callback}'s end handler on function {fn.__name__}: {e}.")
 
-    def _get_active_callbacks(instance: object) -> list[BaseCallback]:
+    def _get_active_callbacks(instance):
         """Get combined global and instance-level callbacks."""
-        callbacks: list[BaseCallback] = dspy.settings.get("callbacks", []) + getattr(instance, "callbacks", [])
-        return callbacks
+        return dspy.settings.get("callbacks", []) + getattr(instance, "callbacks", [])
+
+    def _start(instance, call_id, callbacks, args, kwargs):
+        inputs = inspect.getcallargs(fn, instance, *args, **kwargs)
+        if "self" in inputs:
+            inputs.pop("self")
+        else:
+            inputs.pop("instance", None)
+        invocation = begin_invocation(call_id, instance, _operation(instance, fn), inputs)
+        with dspy.context(execution_callback_ref=invocation.ref if invocation else None):
+            _execute_start_callbacks(instance, fn, call_id, callbacks, inputs)
+        return invocation
 
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
-        async def async_wrapper(instance: object, *args: Any, **kwargs: Any) -> object:
+        async def async_wrapper(instance, *args, **kwargs):
             callbacks = _get_active_callbacks(instance)
-            if not callbacks:
+            if not callbacks and not tracing_enabled():
                 return await fn(instance, *args, **kwargs)
 
             call_id = uuid.uuid4().hex
 
-            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs)
+            invocation = _start(instance, call_id, callbacks, args, kwargs)
 
             # Active ID must be set right before the function is called, not before calling the callbacks.
             parent_call_id = callback_context.ACTIVE_CALL_ID.get()
@@ -376,30 +364,31 @@ def with_callbacks(fn: F) -> F:
             results = None
             exception = None
             try:
-                results = await fn(instance, *args, **kwargs)
+                with dspy.context(active_invocation=invocation):
+                    results = await fn(instance, *args, **kwargs)
                 return results
             except BaseException as e:
                 exception = e
                 raise
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
-                _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
+                end_invocation(invocation, results, exception)
+                with dspy.context(execution_callback_ref=invocation.ref if invocation else None):
+                    _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
-        # Both wrappers forward arguments and results unchanged. Preserve the full
-        # callable type, including generic/overloaded methods and coroutine results.
-        return cast(F, async_wrapper)
+        return async_wrapper
 
     else:
 
         @functools.wraps(fn)
-        def sync_wrapper(instance: object, *args: Any, **kwargs: Any) -> object:
+        def sync_wrapper(instance, *args, **kwargs):
             callbacks = _get_active_callbacks(instance)
-            if not callbacks:
+            if not callbacks and not tracing_enabled():
                 return fn(instance, *args, **kwargs)
 
             call_id = uuid.uuid4().hex
 
-            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs)
+            invocation = _start(instance, call_id, callbacks, args, kwargs)
 
             # Active ID must be set right before the function is called, not before calling the callbacks.
             parent_call_id = callback_context.ACTIVE_CALL_ID.get()
@@ -408,69 +397,47 @@ def with_callbacks(fn: F) -> F:
             results = None
             exception = None
             try:
-                results = fn(instance, *args, **kwargs)
+                with dspy.context(active_invocation=invocation):
+                    results = fn(instance, *args, **kwargs)
                 return results
             except BaseException as e:
                 exception = e
                 raise
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
-                _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
+                end_invocation(invocation, results, exception)
+                with dspy.context(execution_callback_ref=invocation.ref if invocation else None):
+                    _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
-        return cast(F, sync_wrapper)
+        return sync_wrapper
 
 
-def _get_on_start_handler(callback: BaseCallback, instance: object, fn: FunctionType) -> Callable[..., Any]:
-    """Selects the appropriate on_start handler of the callback based on the instance and function name."""
+def _operation(instance: Any, fn: Callable) -> str:
     from dspy.teleprompt.teleprompt import Teleprompter
 
-    if isinstance(instance, dspy.BaseLM):
-        return callback.on_lm_start
+    if isinstance(instance, dspy.BaseLM) or getattr(instance, "supports_decision_requests", False) is True:
+        return "lm"
     elif isinstance(instance, dspy.Evaluate):
-        return callback.on_evaluate_start
+        return "evaluate"
     elif isinstance(instance, dspy.CodeInterpreter):
-        return getattr(callback, f"on_interpreter_{_INTERPRETER_OPERATIONS[fn.__name__]}_start")
+        return f"interpreter_{_INTERPRETER_OPERATIONS[fn.__name__]}"
     elif isinstance(instance, Teleprompter):
-        return callback.on_compile_start
+        return "compile"
 
     if isinstance(instance, dspy.Adapter):
-        if fn.__name__ == "format":
-            return callback.on_adapter_format_start
-        elif fn.__name__ == "parse":
-            return callback.on_adapter_parse_start
-        else:
-            raise ValueError(f"Unsupported adapter method for using callback: {fn.__name__}.")
+        if fn.__name__ not in ("format", "parse"):
+            raise ValueError(f"Unsupported adapter method for instrumentation: {fn.__name__}.")
+        return f"adapter_{fn.__name__}"
 
     if isinstance(instance, dspy.Tool):
-        return callback.on_tool_start
+        return "tool"
 
-    # We treat everything else as a module.
-    return callback.on_module_start
+    return "module"
 
 
-def _get_on_end_handler(callback: BaseCallback, instance: object, fn: FunctionType) -> Callable[..., Any]:
-    """Selects the appropriate on_end handler of the callback based on the instance and function name."""
-    from dspy.teleprompt.teleprompt import Teleprompter
+def _get_on_start_handler(callback: BaseCallback, instance: Any, fn: Callable) -> Callable:
+    return getattr(callback, f"on_{_operation(instance, fn)}_start")
 
-    if isinstance(instance, dspy.BaseLM):
-        return callback.on_lm_end
-    elif isinstance(instance, dspy.Evaluate):
-        return callback.on_evaluate_end
-    elif isinstance(instance, dspy.CodeInterpreter):
-        return getattr(callback, f"on_interpreter_{_INTERPRETER_OPERATIONS[fn.__name__]}_end")
-    elif isinstance(instance, Teleprompter):
-        return callback.on_compile_end
 
-    if isinstance(instance, (dspy.Adapter)):
-        if fn.__name__ == "format":
-            return callback.on_adapter_format_end
-        elif fn.__name__ == "parse":
-            return callback.on_adapter_parse_end
-        else:
-            raise ValueError(f"Unsupported adapter method for using callback: {fn.__name__}.")
-
-    if isinstance(instance, dspy.Tool):
-        return callback.on_tool_end
-
-    # We treat everything else as a module.
-    return callback.on_module_end
+def _get_on_end_handler(callback: BaseCallback, instance: Any, fn: Callable) -> Callable:
+    return getattr(callback, f"on_{_operation(instance, fn)}_end")

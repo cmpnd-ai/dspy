@@ -7,6 +7,7 @@ from typing import Any
 from gepa import EvaluationBatch
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.flex import Flex
 from dspy.predict.flex.ctx import _strip_code_fences
 from dspy.predict.flex.primitives_doc import PRIMITIVES_CATALOG
@@ -242,7 +243,10 @@ def evaluate_with_trace(
             result = failure_score
         else:
             try:
-                result = metric_fn(t["example"], pred, **_metric_scoring_kwargs(metric_fn, t["trace"]))
+                result = call_metric(
+                    metric_fn, t["example"], pred, MetricContext("score", t.get("execution")),
+                    legacy_kwargs=_metric_scoring_kwargs(metric_fn, t["trace"]),
+                )
             except Exception as e:
                 logger.warning(
                     "Metric raised while scoring an example; scoring it at failure_score: %s: %s",

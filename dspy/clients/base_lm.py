@@ -10,6 +10,8 @@ from dspy.clients.legacy_outputs import responses_outputs
 from dspy.dsp.utils import settings
 from dspy.utils.callback import BaseCallback, with_callbacks
 from dspy.utils.inspect_history import pretty_print_history
+from dspy.utils.tracing import current_invocation, record_event
+from dspy.utils.usage_tracker import record_usage
 
 MAX_HISTORY_SIZE = 10_000
 GLOBAL_HISTORY = []
@@ -19,6 +21,9 @@ _BUILTIN_LM_CLASS_PATH = "dspy.clients.lm.LM"
 
 def record_history(client, entry):
     """Record a client call in global, client, and calling-module histories."""
+    if invocation := current_invocation():
+        entry = {**entry, "call_id": invocation.call_id, "run_id": invocation.run_id}
+        record_event("history", entry)
     if settings.disable_history:
         return
     if len(GLOBAL_HISTORY) >= MAX_HISTORY_SIZE:
@@ -151,8 +156,14 @@ class BaseLM:
         return self._record_response(response, prompt, messages, outputs, kwargs)
 
     def _record_response(self, response, prompt, messages, outputs, kwargs, request=None):
-        if not getattr(response, "cache_hit", False) and settings.usage_tracker:
-            settings.usage_tracker.add_usage(self.model, dict(getattr(response, "usage", {}) or {}))
+        from dspy.clients.call_result import CallResult, observe_result
+
+        observe_result(self, CallResult(outputs=outputs, raw=response,
+                                       usage=dict(getattr(response, "usage", {}) or {}),
+                                       response_model=getattr(response, "model", None),
+                                       cache_hit=bool(getattr(response, "cache_hit", False))), kwargs)
+        if not getattr(response, "cache_hit", False):
+            record_usage(self.model, dict(getattr(response, "usage", {}) or {}))
 
         if settings.disable_history:
             return outputs

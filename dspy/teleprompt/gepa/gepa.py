@@ -10,6 +10,7 @@ from gepa.core.adapter import ProposalFn
 from gepa.proposer.reflective_mutation.base import ReflectionComponentSelector
 
 from dspy.clients.lm import LM
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.primitives import Example, Module, Prediction
 from dspy.teleprompt.gepa.gepa_utils import (
     CodeProposalFn,
@@ -435,10 +436,14 @@ class GEPA(Teleprompter):
         gepa_kwargs: dict | None = None,
     ):
         try:
-            inspect.signature(metric).bind(None, None, None, None, None)
+            if accepts_metric_context(metric):
+                inspect.signature(getattr(metric, "forward", metric)).bind(None, None, metric_context=MetricContext())
+            else:
+                inspect.signature(metric).bind(None, None, None, None, None)
         except TypeError as e:
             raise TypeError(
-                "GEPA metric must accept five arguments: (gold, pred, trace, pred_name, pred_trace). "
+                "GEPA metric must accept (gold, pred, *, metric_context) or the legacy five arguments: "
+                "(gold, pred, trace, pred_name, pred_trace). "
                 "See https://dspy.ai/api/optimizers/GEPA for details."
             ) from e
 
@@ -611,14 +616,15 @@ class GEPA(Teleprompter):
                 module_inputs: Example,
                 module_outputs: Prediction,
                 captured_trace: "DSPyTrace",
+                metric_context: MetricContext | None = None,
             ) -> "ScoreWithFeedback":
                 trace_for_pred = [(predictor, predictor_inputs, predictor_output)]
-                o = self.metric_fn(
+                o = call_metric(
+                    self.metric_fn,
                     module_inputs,
                     module_outputs,
-                    captured_trace,
-                    pred_name,
-                    trace_for_pred,
+                    metric_context or MetricContext("feedback", component_name=pred_name),
+                    legacy_args=(captured_trace, pred_name, trace_for_pred),
                 )
                 if hasattr(o, "feedback"):
                     if o["feedback"] is None:

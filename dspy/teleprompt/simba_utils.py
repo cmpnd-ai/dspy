@@ -7,7 +7,9 @@ import orjson
 
 import dspy
 from dspy.adapters.utils import get_field_description_string
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.signatures import InputField, OutputField
+from dspy.utils.tracing import capture_trace, tracing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +35,21 @@ def prepare_models_for_resampling(program: dspy.Module, n: int, teacher_settings
 
 def wrap_program(program: dspy.Module, metric: Callable):
     def wrapped_program(example):
-        with dspy.context(trace=[]):
+        capture = tracing_enabled() or accepts_metric_context(metric)
+        with dspy.context(trace=[]), capture_trace(program, enabled=capture) as execution:
             prediction, trace, score = None, None, 0.0
             try:
                 prediction = program(**example.inputs())
             except Exception as e:
                 logger.warning(e)
-            trace = dspy.settings.trace.copy()
+            trace = execution.predictor_trace() if execution is not None else list(dspy.settings.trace)
 
         output = None
         score = 0.0
         output_metadata = {}
 
         try:
-            output = metric(example, prediction)
+            output = call_metric(metric, example, prediction, MetricContext("score", execution))
             if isinstance(output, (int, float)):
                 score = output
             elif isinstance(output, dspy.Prediction):
@@ -63,6 +66,7 @@ def wrap_program(program: dspy.Module, metric: Callable):
         return {
             "prediction": prediction,
             "trace": trace,
+            **({"execution": execution} if execution is not None else {}),
             "score": score,
             "example": example,
             "output_metadata": output_metadata

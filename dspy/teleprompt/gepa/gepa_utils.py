@@ -12,6 +12,7 @@ from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types import History
 from dspy.adapters.types.base_type import Type
 from dspy.evaluate import Evaluate
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context
 from dspy.primitives import Example, Prediction
 from dspy.primitives.code_interpreter import CodeInterpreterError
 from dspy.teleprompt.bootstrap_trace import FailedPrediction, TraceData
@@ -372,7 +373,15 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                 if hasattr(module_score, "score"):
                     module_score = module_score["score"]
 
-                trace_instances = [t for t in trace if t[0].signature.equals(module.signature)]
+                execution = data.get("execution")
+                if execution is not None:
+                    trace_instances = [
+                        i.prediction for i in execution.predictor_invocations()
+                        if execution.component_name(i) == pred_name
+                    ]
+                else:
+                    # Compatibility with previously captured tuple-only trajectories.
+                    trace_instances = [t for t in trace if t[0].signature.equals(module.signature)]
                 if not self.add_format_failure_as_feedback:
                     trace_instances = [t for t in trace_instances if not isinstance(t[2], FailedPrediction)]
                 if len(trace_instances) == 0:
@@ -441,12 +450,21 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     # d['score'] = self.failure_score
                 else:
                     feedback_fn = self.feedback_map[pred_name]
+                    feedback_kwargs = {}
+                    if accepts_metric_context(feedback_fn):
+                        invocation_id = next(
+                            (i.call_id for i in execution.predictor_invocations() if i.prediction is selected), None
+                        ) if execution is not None else None
+                        feedback_kwargs["metric_context"] = MetricContext(
+                            "feedback", execution, pred_name, invocation_id
+                        )
                     fb = feedback_fn(
                         predictor_output=outputs,
                         predictor_inputs=inputs,
                         module_inputs=example,
                         module_outputs=prediction,
                         captured_trace=trace,
+                        **feedback_kwargs,
                     )
                     d["Feedback"] = fb["feedback"]
                     if fb["score"] != module_score:

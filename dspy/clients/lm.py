@@ -665,6 +665,7 @@ def _get_stream_completion_fn(
 ):
     stream = dspy.settings.send_stream
     caller_predict = dspy.settings.caller_predict
+    caller_predict_invocation = dspy.settings.get("caller_predict_invocation")
 
     if stream is None:
         return None
@@ -690,6 +691,9 @@ def _get_stream_completion_fn(
                 if caller_predict_id:
                     chunk.predict_id = caller_predict_id
                 chunks.append(chunk)
+                if caller_predict_invocation is not None:
+                    # Only the listener-facing copy carries execution identity, never the cached response.
+                    chunk = chunk.model_copy(update={"invocation": caller_predict_invocation})
                 stream_emitted()
                 await stream.send(chunk)
             raw = _get_litellm().stream_chunk_builder(chunks)

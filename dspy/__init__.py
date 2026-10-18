@@ -41,6 +41,10 @@ from dspy.utils.syncify import syncify
 from dspy.utils.saving import load
 from dspy.streaming.streamify import streamify
 from dspy.utils.usage_tracker import track_usage
+from dspy.utils.tracing import (
+    ExecutionObserver, ExecutionSelection, ExecutionTrace, Invocation, InvocationRef, capture_trace, record_event,
+)
+from dspy.evaluate.metric_context import MetricContext
 
 from dspy.dsp.utils.settings import settings
 from dspy.dsp.colbertv2 import ColBERTv2

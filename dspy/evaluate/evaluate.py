@@ -2,7 +2,10 @@ import csv
 import importlib
 import json
 import logging
+import threading
 import types
+import uuid
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -11,9 +14,11 @@ if TYPE_CHECKING:
 import tqdm
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.primitives.prediction import Prediction
 from dspy.utils.callback import with_callbacks
 from dspy.utils.parallelizer import ParallelExecutor
+from dspy.utils.tracing import ExecutionTrace, InvocationRef, capture_trace, tracing_enabled
 
 try:
     from IPython.display import HTML
@@ -45,6 +50,22 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class EvaluationAttempt:
+    attempt_id: str
+    program: tuple[InvocationRef, ...] = ()
+    metric: tuple[InvocationRef, ...] = ()
+    execution: ExecutionTrace | None = None
+    status: str = "running"
+    error: str | None = None
+
+
+@dataclass
+class ExampleExecution:
+    attempts: list[EvaluationAttempt] = field(default_factory=list)
+    accepted: EvaluationAttempt | None = None
+
+
 class EvaluationResult(Prediction):
     """
     A class that represents the result of an evaluation.
@@ -52,10 +73,13 @@ class EvaluationResult(Prediction):
 
     - score: An float value (e.g., 67.30) representing the overall performance
     - results: a list of (example, prediction, score) tuples for each example in devset
+    - executions: optional per-example attempt provenance (experimental, opt-in)
     """
 
-    def __init__(self, score: float, results: list[tuple["dspy.Example", "dspy.Example", Any]]):
+    def __init__(self, score: float, results: list[tuple["dspy.Example", "dspy.Example", Any]], executions=None):
         super().__init__(score=score, results=results)
+        if executions is not None:
+            self.executions = executions
 
     def __repr__(self):
         return f"EvaluationResult(score={self.score}, results=<list of {len(self.results)} results>)"
@@ -81,6 +105,7 @@ class Evaluate:
         failure_score: float = 0.0,
         save_as_csv: str | None = None,
         save_as_json: str | None = None,
+        capture_execution: bool = False,
         **kwargs,
     ):
         """
@@ -109,6 +134,7 @@ class Evaluate:
         self.failure_score = failure_score
         self.save_as_csv = save_as_csv
         self.save_as_json = save_as_json
+        self.capture_execution = capture_execution
 
         if "return_outputs" in kwargs:
             raise ValueError("`return_outputs` is no longer supported. Results are always returned inside the `results` field of the `EvaluationResult` object.")
@@ -170,15 +196,49 @@ class Evaluate:
             compare_results=True,
         )
 
-        def process_item(example):
-            prediction = program(**example.inputs())
-            score = metric(example, prediction)
-            return prediction, score
+        capture = self.capture_execution or tracing_enabled() or accepts_metric_context(metric)
+        executions = [ExampleExecution() for _ in devset] if capture else None
+        attempts_lock = threading.Lock()
 
-        results = executor.execute(process_item, devset)
+        def process_item(item):
+            index, example = item
+            if not capture:
+                prediction = program(**example.inputs())
+                return (prediction, None), metric(example, prediction)
+            attempt = EvaluationAttempt(uuid.uuid4().hex)
+            with attempts_lock:
+                executions[index].attempts.append(attempt)
+            metadata = {**dspy.settings.get("execution_metadata", {}),
+                        "example_index": index, "attempt_id": attempt.attempt_id}
+            with dspy.context(execution_metadata=metadata, execution_tracing=True):
+                metric_execution = None
+                try:
+                    with capture_trace(program) as execution:
+                        attempt.execution = execution
+                        prediction = program(**example.inputs())
+                    with capture_trace() as metric_execution:
+                        score = call_metric(metric, example, prediction, MetricContext("score", execution))
+                    attempt.status = "ok"
+                    return (prediction, attempt), score
+                except BaseException as exc:
+                    attempt.status = "error"
+                    attempt.error = type(exc).__qualname__
+                    raise
+                finally:
+                    attempt.program = attempt.execution.roots if attempt.execution else ()
+                    attempt.metric = metric_execution.roots if metric_execution else ()
+                    if not self.capture_execution:
+                        attempt.execution = None
+
+        results = executor.execute(process_item, list(enumerate(devset)))
         assert len(devset) == len(results)
 
-        results = [((dspy.Prediction(), self.failure_score) if r is None else r) for r in results]
+        # A resubmitted straggler can start after the accepted attempt. Carry successful
+        # execution identity with its result instead of choosing the latest started scope.
+        if executions is not None:
+            for index, result in enumerate(results):
+                executions[index].accepted = result[0][1] if result is not None else None
+        results = [(dspy.Prediction(), self.failure_score) if r is None else (r[0][0], r[1]) for r in results]
         results = [(example, prediction, score) for example, (prediction, score) in zip(devset, results, strict=False)]
         ncorrect, ntotal = sum(score for *_, score in results), len(devset)
 
@@ -226,6 +286,7 @@ class Evaluate:
         return EvaluationResult(
             score=round(100 * ncorrect / ntotal, 2),
             results=results,
+            executions=executions,
         )
 
     @staticmethod

@@ -28,6 +28,14 @@ class LMCallEvidence:
     cost: float | None
 
 
+def _has_reported_usage(usage):
+    # Normalized native and legacy usage omit absent dimensions or carry None.
+    # Nested details can also be empty; a reported zero is still evidence.
+    if isinstance(usage, dict):
+        return any(_has_reported_usage(item) for item in usage.values())
+    return usage is not None
+
+
 def observe_result(lm, result, kwargs):
     from dspy.utils.tracing import current_invocation, snapshot
 
@@ -48,7 +56,7 @@ def observe_result(lm, result, kwargs):
                 reasons.append(str(reason))
     invocation.lm = LMCallEvidence(
         model_requested=lm.model, model_reported=result.response_model, cache_hit=result.cache_hit,
-        usage_reported=not result.cache_hit and any(u is not None for u in raw_usage),
+        usage_reported=not result.cache_hit and _has_reported_usage(result.usage),
         usage_raw=snapshot(raw_usage[0] if len(raw_usage) == 1 else raw_usage), usage=snapshot(result.usage),
         response_ids=ids, finish_reasons=tuple(reasons),
         service_tier_requested=kwargs.get("service_tier", lm.kwargs.get("service_tier")),

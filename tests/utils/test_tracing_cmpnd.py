@@ -202,3 +202,36 @@ def test_external_trace_identity_is_mapped_not_uuid_reformatted(consumer, provid
     assert json.loads(span["attributes"]["dspy.ref"])["trace_id"] == external.trace_id
     assert execution.invocations[0].component is lm  # detached delivery didn't touch capture
     assert observer.address(execution.invocations[0].ref)["trace_id"] == span["trace_id"]
+
+
+def test_failed_lm_preserves_partial_accounting_events(consumer):
+    from dspy.lm15 import Message as LMMessage
+    from dspy.lm15 import Response, Usage
+
+    class Engine:
+        calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            if self.calls == 2:
+                raise dspy.LMAuthError("failed second candidate")
+            return Response(
+                id="paid",
+                model=request.model,
+                finish_reason="stop",
+                message=LMMessage.assistant("first"),
+                usage=Usage(input_tokens=7, output_tokens=3),
+            )
+
+    observer, events = consumer
+    lm = dspy.LM("custom/accounting", engine=Engine(), cache=False, num_retries=0)
+    with dspy.context(execution_observers=[observer], disable_history=True):
+        with pytest.raises(dspy.LMAuthError):
+            lm("hello", n=2)
+    observer.finalize()
+    (span,) = spans(events)
+    assert span["status"] == "error" and span["span_type"] == "lm_call"
+    assert "lm_usage" not in span  # no fabricated whole-call result
+    (entry,) = json.loads(span["attributes"]["dspy.data"])["usage"]
+    assert entry["model"] == lm.model
+    assert entry["usage"]["total_tokens"] == 10

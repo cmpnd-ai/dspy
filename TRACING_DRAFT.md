@@ -218,6 +218,8 @@ Enter `bridge.context()` before the DSPy root. It joins valid ambient OTel conte
 
 `docs/examples/tracing_cmpnd.py` implements an injected **in-memory**, ingestion-shaped sink, not a cmpnd SDK migration or backend test. `CmpndObserver` consumes start/end snapshots without capture/history, maps canonical trace IDs to destination UUIDv4 IDs explicitly, preserves span IDs and correlation refs, and shapes LM evidence into usage observations. Its `address(ref)` joins Evaluate attempt roots to destination addresses. Its cost field is an estimate, not provider-origin cost.
 
+When an LM call fails after completing some candidates, completed usage remains in `Invocation.data["usage"]`, exported by the example as `dspy.data`. There is no fabricated final `LMCallEvidence` or whole-call `lm_usage` for that failure. Consumers must read those events to account for partial paid work; on successful calls they overlap with `lm_usage` and must not be added twice. The example preserves this evidence but does not perform backend reconciliation.
+
 `finalize()` is an explicit caller-owned boundary after work has stopped and all workers have joined; root completion alone cannot finalize a multi-root trace. The example retains state for one bounded run but does not implement general queue/memory limits. It exports sensitive payloads and needs a destination-owned privacy policy before production use. Tests in `tests/utils/test_tracing_cmpnd.py` exercise this local consumer contract only. No SDK migration, HTTP delivery, retry behavior, live backend acceptance, or external integration compatibility is asserted.
 
 ## Remaining design risks and limits

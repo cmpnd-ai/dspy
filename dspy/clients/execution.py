@@ -38,7 +38,7 @@ from dspy.lm15 import (
 )
 from dspy.utils.exceptions import LMConfigurationError, LMUnsupportedFeatureError, is_retryable_lm_error
 from dspy.utils.lazy_import import require
-from dspy.utils.tracing import record_event
+from dspy.utils.tracing import record_event, tracing_enabled
 from dspy.utils.usage_tracker import record_usage
 
 anyio = require("anyio")
@@ -555,7 +555,7 @@ def _hint_responses_api(lm, exc):
 
 
 def _account_failed_call(lm, results, primary):
-    if settings.usage_tracker or settings.get("execution_traces", ()):
+    if settings.usage_tracker or tracing_enabled():
         for result in results:
             try:
                 record_usage(lm.model, result.usage)

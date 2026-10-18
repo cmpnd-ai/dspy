@@ -301,3 +301,85 @@ def test_failed_metric_keeps_program_and_metric_provenance():
     assert item.attempts[0].program and item.attempts[0].metric
     assert item.attempts[0].program != item.attempts[0].metric
     assert item.attempts[0].execution is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_observer_only_accounts_completed_candidates_when_later_candidate_fails(asynchronous):
+    from dspy.lm15 import Message as LMMessage
+    from dspy.lm15 import Response, Usage
+
+    class Engine:
+        calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            if self.calls == 2:
+                raise dspy.LMAuthError("second candidate failed")
+            return Response(
+                id="first",
+                model=request.model,
+                finish_reason="stop",
+                message=LMMessage.assistant("first"),
+                usage=Usage(input_tokens=7, output_tokens=3),
+            )
+
+    class AsyncEngine(Engine):
+        async def complete(self, request):
+            return super().complete(request)
+
+    ended = []
+
+    class Observer(dspy.ExecutionObserver):
+        def on_end(self, invocation):
+            ended.append(invocation)
+
+    lm = dspy.LM("custom/accounting", engine=Engine(), async_engine=AsyncEngine(), cache=False, num_retries=0)
+    with dspy.context(execution_observers=[Observer()], usage_tracker=None, disable_history=True):
+        with pytest.raises(dspy.LMAuthError, match="second candidate failed"):
+            if asynchronous:
+                await lm.acall("hello", n=2)
+            else:
+                lm("hello", n=2)
+    (invocation,) = ended
+    assert invocation.error["type"] == "LMAuthError"
+    (entry,) = invocation.data["usage"]
+    assert entry["model"] == lm.model
+    assert entry["usage"]["total_tokens"] == 10
+    assert lm.history == []
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("reported", [None, 0, 9])
+@pytest.mark.parametrize("details", [False, True])
+def test_lm_evidence_distinguishes_missing_usage_from_reported_zero(native, reported, details):
+    from dspy.lm15 import Message as LMMessage
+    from dspy.lm15 import Response, Usage
+
+    class Engine:
+        def complete(self, request):
+            return Response(
+                id="response",
+                model=request.model,
+                finish_reason="stop",
+                message=LMMessage.assistant("answer"),
+                usage=Usage(reasoning_tokens=reported) if details else Usage(output_tokens=reported),
+            )
+
+    raw = {
+        "model": "test-model",
+        "choices": [{"message": {"content": "answer"}}],
+        "usage": {} if reported is None else {"completion_tokens": reported},
+    }
+    if details:
+        raw["usage"] = {"completion_tokens_details": {"reasoning_tokens": reported}}
+    lm = dspy.LM("openai/test-model", engine=Engine() if native else "litellm", cache=False)
+    with patch("litellm.completion", return_value=raw), dspy.capture_trace() as execution:
+        assert lm("hello") == ["answer"]
+    (invocation,) = execution.invocations
+    assert invocation.lm.usage_reported is (reported is not None)
+    if reported is not None:
+        usage = invocation.lm.usage
+        assert (
+            usage["completion_tokens_details"]["reasoning_tokens"] if details else usage["completion_tokens"]
+        ) == reported

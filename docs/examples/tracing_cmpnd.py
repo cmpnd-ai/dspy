@@ -97,12 +97,15 @@ class CmpndObserver(ExecutionObserver):
                 "dspy.call_id": invocation.call_id,  # legacy compatibility, never span identity
                 "dspy.metadata": json.dumps(_json_value(invocation.metadata)),
                 "dspy.signature": json.dumps(_json_value(signature)),
+                # Completed paid work can survive a failed multi-candidate call
+                # as usage events even when there is no final LMCallEvidence.
+                "dspy.data": json.dumps(_json_value(invocation.data)),
             }
             span = {
                 **address,
                 "parent_span_id": invocation.parent.span_id if invocation.parent else None,
                 "name": invocation.operation,
-                "span_type": "lm_call" if invocation.lm else "unknown",
+                "span_type": "lm_call" if invocation.operation == "lm" else "unknown",
                 "start_time": timestamp(invocation.start_time_ns),
                 "end_time": timestamp(invocation.end_time_ns),
                 "status": "error" if invocation.error else "ok",

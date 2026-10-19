@@ -44,10 +44,15 @@ def observe_result(lm, result, kwargs):
         return
     responses = result.responses or ((result.raw,) if result.raw is not None else ())
     raw_usage = [plain(value(response, "usage")) for response in responses]
-    ids = tuple(str(identity) for response in responses
-                if (identity := value(response, "id") or value(response, "response_id")))
+    ids = []
     reasons = []
     for response in responses:
+        identity = value(response, "id") or value(response, "response_id")
+        if not identity and isinstance(response, Response):
+            # Native chat streaming can retain the provider's ID only in raw metadata.
+            identity = value(response.provider_data, "id")
+        if identity:
+            ids.append(str(identity))
         reason = value(response, "finish_reason") or value(response, "stop_reason")
         if reason:
             reasons.append(str(reason))
@@ -58,7 +63,7 @@ def observe_result(lm, result, kwargs):
         model_requested=lm.model, model_reported=result.response_model, cache_hit=result.cache_hit,
         usage_reported=not result.cache_hit and _has_reported_usage(result.usage),
         usage_raw=snapshot(raw_usage[0] if len(raw_usage) == 1 else raw_usage), usage=snapshot(result.usage),
-        response_ids=ids, finish_reasons=tuple(reasons),
+        response_ids=tuple(ids), finish_reasons=tuple(reasons),
         service_tier_requested=kwargs.get("service_tier", lm.kwargs.get("service_tier")),
         service_tier_reported=value(responses[0], "service_tier") if responses else None,
         cost=result.cost,

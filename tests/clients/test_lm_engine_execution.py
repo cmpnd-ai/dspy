@@ -217,19 +217,23 @@ async def test_native_streaming_reaches_existing_listener(monkeypatch):
                 for text in ("[[ ## answer ## ]]\n", "native", "\n\n[[ ## completed ## ]]")]
     payloads.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                      "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}})
+    for payload in payloads:
+        payload["id"] = "provider-stream-response"
     chunks = [f"data: {json.dumps(payload)}\n\n".encode() for payload in payloads]
     chunks.append(b"data: [DONE]\n\n")
     transport = native_transport(monkeypatch, [FakeResponse(status=200, body=b"", chunks=chunks)])
     lm = dspy.LM("openai/gpt-4o-mini")
     predict = dspy.Predict("question -> answer")
     streamer = dspy.streamify(predict, stream_listeners=[dspy.streaming.StreamListener("answer")])
-    with dspy.context(lm=lm):
+    with dspy.context(lm=lm), dspy.capture_trace() as execution:
         values = [value async for value in streamer(question="hello")]
         cached = [value async for value in streamer(question="hello")]
     assert values[-1].answer == "native"
     assert "".join(value.chunk for value in values if isinstance(value, dspy.streaming.StreamResponse)) == "native"
     assert len(cached) == 1 and cached[0].answer == "native"
     assert len(transport.requests) == 1
+    calls = [invocation.lm for invocation in execution.invocations if invocation.operation == "lm"]
+    assert [call.response_ids for call in calls] == [("provider-stream-response",)] * 2
 
 
 @pytest.mark.asyncio

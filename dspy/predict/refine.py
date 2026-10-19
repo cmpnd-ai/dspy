@@ -140,7 +140,7 @@ class Refine(Module):
 
                     # NOTE: Not including the trace of reward_fn.
                     reward = self.reward_fn(kwargs, outputs, MetricContext(
-                        "score", trace=trace, execution=capture.trace if capture is not None else None,
+                        "score", trace=trace, execution=capture.trace if capture is not None and capture.recording else None,
                     ))
 
                 if reward > best_reward:

@@ -1,11 +1,15 @@
 import functools
 from contextvars import ContextVar
-from typing import Callable, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar
+
+if TYPE_CHECKING:
+    from dspy.utils.execution import Invocation
 
 P = ParamSpec("P")
 T = TypeVar("T")
 
 ACTIVE_CALL_ID: ContextVar[str | None] = ContextVar("active_call_id", default=None)
+ACTIVE_INVOCATION: ContextVar["Invocation | None"] = ContextVar("active_invocation", default=None)
 _ACTIVE_COMPILES = ContextVar("active_compiles", default=())
 
 

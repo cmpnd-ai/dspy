@@ -31,13 +31,12 @@ from proposed searchable-trace/component-replay tools. ProAct already accepts la
 feedback; its CMPND example drops annotation targets when importing assessment bodies. Neither
 system establishes a requirement for DSPy to own persistence or in-flight agent intervention.
 
-## Three implementation rounds
+## Implementation rounds
 
 1. **Ordinary callbacks as the sole recorder.** Implemented and rejected: a tool inside
    `dspy.context(callbacks=[])` disappears, and retained raw output changes after caller mutation.
    Capture now runs at the existing decorated invocation boundary, using the same call ID as
-   callbacks. It is independent of optional observer configuration, not a second instrumentation
-   decorator or an external tracing dependency.
+   callbacks. It is independent of optional observer configuration and external tracing dependencies.
 2. **One execution record, linked consumer views.** Records include all observed attempts, but
    demonstration tuples still select the winner. Projecting all predictor spans into demonstrations
    would be incorrect. Predictor outputs carry their invocation reference. A capture-local weak
@@ -48,6 +47,108 @@ system establishes a requirement for DSPy to own persistence or in-flight agent 
    target requires an explicit invocation: a scope may contain multiple roots. Sealing prevents
    late workers rewriting a finished record. Parse failures now retain the exact failing sibling
    and its inputs when execution capture is enabled, instead of inferring identity from signature.
+4. **One typed observation, three projections (rejected as insufficient).** A private `_Invocation`
+   unified completion, but consumers still rebuilt attribution from tuples, signatures, and JSON.
+   This fixed inconsistent final outcomes without making consumers simpler. Centralizing capture
+   alone did not justify the abstraction.
+5. **Retain the named call, not another projection (current revision).** The same public
+   `Invocation` reaches typed callbacks and selected predictor traces. It carries component and
+   occurrence identity directly. GEPA no longer joins JSON or guesses by signature; bootstrap
+   failures no longer reconstruct predictor identity; SIMBA and BootstrapFewShot no longer keep
+   reverse maps. Finetuning and GRPO route by component name rather than call ordinal or signature
+   hash. Predict owns demonstration retention; the generic observation object does not.
+
+### The smaller consumer contract
+
+```text
+program(...) → Invocation(instance, inputs, outputs, component_name, ref, parent, times, error)
+                  ├─ callback.on_end(call)     all observed calls; no start-event lookup
+                  ├─ settings.trace           selected successful predictor calls
+                  └─ capture.trace            optional detached JSON representation
+```
+
+There is one call object, not a new optimizer trace registry beside the observation. Three-element
+unpacking remains a migration view of the object. Metric purpose and result interpretation are
+unchanged. Name lookup works without retaining JSON; an internal name-only capture scope supplies
+identity to ordinary predictor collection. At collection boundaries, `_trace_program` declares
+the optimizer-relative root, including when collection is nested in an outer execution capture.
+The existing weak name map owns provenance, including copied BestOfN/Refine attempts. Unknown
+dynamic predictors remain unnamed rather than being matched to a similar signature.
+
+`component_name` is specifically a `named_predictors()` address. Module/tool/LM nesting uses
+parent/call IDs; those nodes do not need optimizer addresses. An initial version walked
+`named_sub_modules()`, including accumulated history, on each root call. Removing that traversal
+eliminated the largest measured regression without adding a graph cache or invalidation protocol.
+
+The rejected alternative was to keep raw tuples and make every consumer resolve them through an
+execution graph. It requires capture to answer an ordinary attribution question, loses typed
+inputs on JSON round-trip, and leaves the joins in callers. The retained-call design costs one
+public record type and two typed callback hooks; it deletes those consumer-side mechanisms.
+
+| Consumer | Deleted reconstruction | Current operation |
+| --- | --- | --- |
+| GEPA | JSON span join and separate signature fallback | Filter calls by component; select an occurrence |
+| Parse-failure collection | Signature scan, span lookup, prediction-attached identity | Retain the failed call with a caller-owned failure output |
+| BootstrapFewShot | Student/teacher reverse identity maps | Add selected call to the named component's demonstrations |
+| SIMBA | Cross-candidate reverse identity map | Read names directly for demonstrations and advice trajectories |
+| Finetuning | Trace-position routing and formatting wrapper | Format every call belonging to the requested component |
+| GRPO | Signature-hash routing and reconstructed identity | Group named calls and scores using the existing policy |
+| Typed callbacks | Consumer's start-event lookup table | Read the completed call in `on_end(call)` |
+
+Not every consumer shrinks: BestOfN's selection policy stays intact. Refine still needs local
+names for advice and a signature lookup before an adapter runs; removing those requires changing
+the hint-injection contract, not merely improving completed evidence. CMPND still owns wire IDs
+and export. This is a narrower claim than eliminating all tracing-related code.
+
+### What the shared-observation experiment preserves and changes
+
+- **Preserved:** legacy callback signatures and tuple access, `_trace=False`, trace disabling/limits,
+  nested capture isolation, parentage, retry winner selection, and metric return interpretation.
+  Capturing JSON is still optional; tuple collection does not retain a complete execution graph.
+- **Changed intentionally:** a custom `Predict.forward` that replaces its parsed prediction now
+  contributes the returned value, not an intermediate prediction. A call that raises after parsing
+  contributes no successful demonstration tuple. Callbacks and snapshots already saw these final
+  outcomes; all three views now agree.
+- **Direct base Predict calls:** `forward`/`aforward` also use the observation boundary, retaining
+  their existing tuple collection and now producing callbacks/spans. Normal `__call__`/`acall`
+  reuse the outer invocation rather than recording twice. Calling `forward` directly remains
+  discouraged; an undecorated custom override still bypasses the module's outer lifecycle.
+- **New API:** `Invocation`, `BaseCallback.on_start(call)`, and `on_end(call)`. A callback can consume
+  completed calls without maintaining its own start-event table. Default hooks dispatch to the old
+  callbacks, including duck-typed SDK callbacks. No event bus, observer registry, exporter, or storage
+  is added. CMPND still owns its callback-to-backend translation.
+
+Round 5 verification uses the preceding draft as baseline. The 611-case differential replay has
+zero differences; coercing returns to bool changes 182 cases. Eight additional mutations fail the
+intended assertions: wrong purpose, missing execution evidence, stripped result metadata, wrong
+failing sibling, wrong collection root, wrong selected occurrence, admitted failed prediction,
+and signature-based GRPO routing. The last mutation initially survived a weak fixture: constructing
+two signatures from identical strings creates distinct classes. Both predictors now share the
+same Signature object, and the test detects the real collision.
+
+Public compile tests inspect finetuning rows and GRPO groups at the provider boundary: repeated,
+reordered, and skipped calls route correctly; same-signature components stay separate. The two
+attribution regressions fail against the preceding draft; the multitask control passes. No provider
+training is run. The full suite passes with **2,576 passed, 544 skipped, 2 xfailed**:
+
+```sh
+PATH="$PWD/.venv/bin:/usr/lib/git-core:$PATH" .venv/bin/pytest -q -n 4
+.venv/bin/pytest -q tests/utils/test_execution.py tests/callback/test_callback.py \
+  tests/teleprompt/test_bootstrap_finetune.py tests/teleprompt/test_grpo.py \
+  tests/teleprompt/test_gepa_builtin_instruction_proposer.py
+```
+
+The focused command passes 110 tests. A real CMPND 0.40.0 SDK probe confirms three selected calls
+are the same three objects seen by typed callbacks, linked to three SDK-exported spans and the
+local JSON record. Export transport is intercepted: zero backend writes. Duck-typed SDK callbacks
+require dispatch to declared hooks; their dynamic fallback must not silently swallow legacy events.
+
+**Cost remains:** two paired runs, each with five 500-call DummyLM samples, measured these median
+microseconds per call (before → after): disabled 313 → 355 and 348 → 341; selected evidence
+294 → 456 and 354 → 568; JSON capture 932 → 1,007 and 995 → 1,021. Selected collection therefore
+costs about 162–214 extra microseconds here (55–60%). These are noisy local measurements, not
+provider-latency claims or a performance improvement. The rejected history-walking version cost
+about 2,965 microseconds per selected call. Consumer simplification is real; it is not free.
 
 **Migration policy:** preserving legacy metric signatures is no longer a design constraint.
 The [migrating-dspy-metrics skill](.agents/skills/migrating-dspy-metrics/SKILL.md) guides application
@@ -64,11 +165,12 @@ The implementation lives in [`execution.py`](dspy/utils/execution.py) and
 
 | Object | Actual representation and lifetime | What consumers do with it |
 | --- | --- | --- |
+| `Invocation` | Live dataclass: instance, kind, bound arguments, prepared predictor inputs, output/error, parent/call IDs, times, component name and reference. An active ContextVar lets Predict supply prepared inputs. | Typed callbacks receive it; `settings.trace` retains selected predictor calls. Use `.inputs`, `.outputs`, `.component_name`, and `.ref` directly. Treat it as read-only; it retains live Python objects. |
 | `capture_execution(program=None)` | Context manager yielding a private `_Capture`: mutable span dictionary, lock, weak component-name map, and trace ID. Stored in DSPy's existing scoped settings while active. | Run work inside the scope; read `capture.trace`. Do not use the private recorder methods as an API. |
 | `ExecutionTrace` | Frozen dataclass holding a JSON string. Every `capture.trace` read makes a new detached snapshot. `to_dict()`, `spans`, and `span(id)` return fresh values. | Inspect, serialize, or hand evidence to another consumer without retaining live program objects. It is not a live subscription. |
-| A span | A plain dictionary inside that JSON record, not a new `Invocation` class. One observed call to an instrumented boundary. | Follow `parent_span_id`, inspect inputs/outputs/error, or select by kind/component. |
+| A span | A plain dictionary inside that JSON record, not the live `Invocation`. One observed call to an instrumented boundary. | Follow `parent_span_id`, inspect inputs/outputs/error, or select by kind/component. |
 | `ExecutionRef` | Frozen dataclass: `trace_id`, optional `span_id`, optional `output_path`. Contains no record or program object. | Address the whole record, one invocation, or a JSON Pointer into that invocation's output. Resolve against an explicitly supplied record. |
-| `MetricContext` | Frozen request dataclass: purpose plus optional tuple trace, target index/component name, usage, and execution snapshot. Tuple membership is frozen; tuple payloads and usage are not deeply immutable. | Decide whether to score, accept demonstrations, or produce feedback; use whatever evidence this caller supplies. `target_ref` derives a reference for the selected predictor occurrence. |
+| `MetricContext` | Frozen request dataclass: purpose plus optional tuple of `Invocation`s, target index/component name, usage, and execution snapshot. Membership is frozen; calls and usage are not deeply immutable. | Decide whether to score, accept demonstrations, or produce feedback; use whatever evidence this caller supplies. `target_ref` links the selected call to the supplied record. |
 | `Feedback` | Frozen dataclass containing only `target: ExecutionRef` and `content: str`. Created and validated by `execution.annotate(...)`. | Carry an annotation separately from execution and metric results. No implicit storage, dispatch, channel, author, or revision behavior. |
 
 There is no public `ExecutionContext` or `TraceExecution` type in this revision. The active owner is
@@ -92,7 +194,7 @@ The record shape is currently this, with IDs and times shortened for illustratio
     "parent_span_id": null,
     "kind": "module",
     "name": "Answer",
-    "component_name": "self",
+    "component_name": null,
     "start_time": 100.0,
     "end_time": 100.1,
     "inputs": {"args": [], "kwargs": {"question": "evidence"}},
@@ -104,7 +206,7 @@ The record shape is currently this, with IDs and times shortened for illustratio
 
 Kinds come from callback dispatch: module, predict, lm, tool, adapter format/parse, interpreter
 operations, evaluate, and compile. Names are class names except tools, which retain their declared
-name. Component paths identify known module ownership, not occurrence identity. Inputs follow
+name. Component paths identify known predictor ownership, not occurrence identity. Inputs follow
 the decorated method's bound arguments, so their shape varies by boundary. Times are wall-clock
 seconds. Failure is an error type/message; an unfinished span has `end_time=None`.
 
@@ -112,24 +214,26 @@ seconds. Failure is an error type/message; an unfinished span has `end_time=None
 taken while running never updates itself. Nested capture scopes are isolated; they are not merged
 into the outer record. These are implemented semantics, not a proposed persistence/OTel schema.
 
-## The call stack records once and notifies callbacks separately
+## One invocation feeds callbacks, selected predictor evidence, and JSON records
 
 For a normal `program(...)` call, [`with_callbacks`](dspy/utils/callback.py) already surrounds
-`Module.__call__`. The added recorder uses that boundary and its call ID:
+`Module.__call__`. Its shared lifecycle creates one typed observation when a consumer needs it:
 
 ```text
 with capture_execution(program) as capture
   program(question=...)
-    with_callbacks wrapper                         allocate call_id
-      capture.start(call_id, ...)                   record parent and input snapshot
-      callback.on_module_start(call_id, ...)        existing observers; raw objects
-      set ACTIVE_CALL_ID = call_id
+    with_callbacks wrapper                         create Invocation with ID and parent
+      capture.start(invocation)                    optional input snapshot
+      callback.on_start(invocation)                default dispatches legacy start hook
+      set active invocation and call ID
       Module.__call__
         program.forward
           predictor(...) / tool(...) / child(...)  same boundary for each child
-      restore parent's ACTIVE_CALL_ID              also when the call raises
-      capture.end(call_id, output, exception, kwargs)  record output/error snapshot
-      callback.on_module_end(call_id, ...)          same ID; existing observer protocol
+          Predict preprocessing                    attach prepared typed inputs
+      restore parent's active invocation and ID    also when the call raises
+      Predict._record_trace(invocation)            retain eligible predictor call
+      capture.end(invocation)                      optional JSON output snapshot
+      callback.on_end(invocation)                  complete call; default dispatches legacy end hook
   scope exit                                       seal recorder, clear weak name map
 execution = capture.trace                          detached JSON-backed value
 ```
@@ -169,11 +273,11 @@ bootstrap_trace_data(program, dataset, metric=metric)
 
 The evaluation wrapper itself starts outside the candidate capture. A separate outer callback SDK
 may observe evaluation and judging as well; that does not put them in this candidate's record.
-Returned row `trace` is still live predictor-tuple evidence; row `execution` is detached JSON.
-Callers that retain the entire row still retain tuple objects, even though the record itself does not.
-On a predictor failure, the boundary attaches the occurrence reference and original keyword inputs
-to the exception. Collection uses those typed inputs for the failed tuple, not the JSON record's
-copy: a `History` must remain a `History` when a training consumer calls the adapter again.
+Returned row `trace` contains live predictor invocations; row `execution` is detached JSON.
+Callers that retain the entire row still retain program/input/output objects. On a predictor failure,
+the boundary attaches the failing call to the exception. Collection makes a view of that call with
+its caller-owned `FailedPrediction` output, retaining its identity, inputs, and error. Neither JSON
+joins nor signature matching are involved. A `History` remains a `History` for adapter reuse.
 
 | Entry point | What this draft actually supplies |
 | --- | --- |
@@ -248,7 +352,7 @@ The actual feedback path is:
 
 ```text
 DspyAdapter.make_reflective_dataset
-  decode each record once; group tuple occurrences by recorded component path
+  filter typed calls by component_name; keep their trace indices
   choose an occurrence (failure first; otherwise the existing sampling policy)
   MetricContext("feedback", component_name=..., target=tuple_index, execution=...)
   GEPA feedback_fn -> call_metric -> user's metric
@@ -273,8 +377,8 @@ def critique(gold, pred, *, metric_context):
     score = float(gold.answer == pred.answer)
     if metric_context.purpose != "feedback":
         return score
-    selected = metric_context.execution.resolve(metric_context.target_ref)
-    return dspy.Prediction(score=score, feedback=f"Review {selected['component_name']}: {selected['outputs']}")
+    call = metric_context.trace[metric_context.target]
+    return dspy.Prediction(score=score, feedback=f"Review {call.component_name}: {call.outputs}")
 
 with dspy.context(lm=DummyLM([{"answer": "draft"}, {"answer": "EVIDENCE"}])):
     row, = bootstrap_trace_data(Twice(), [gold], metric=critique, num_threads=1)
@@ -307,10 +411,10 @@ adapters and fallback parsing can produce different children without changing th
 Predictor component paths use the optimizer's `named_predictors()` spelling, including quoted
 dictionary keys such as `steps['answer']`; copied attempts inherit that same path.
 
-`target` is local to the selected tuple list; `target_ref` is the invocation address. Internally,
-Predict attaches a private `_execution_ref` to its Prediction, and `target_ref` reads that link.
-Consumers should use the context property, not depend on the private attribute. If no corresponding
-record was supplied, `target_ref` is `None`; this critique deliberately requires GEPA's evidence.
+`target` is local to the selected call list; `target_ref` reads that call's `.ref` when a matching
+execution record is supplied. No identity is attached to the Prediction. The critique above needs
+only typed evidence; the separate assertions demonstrate resolving the same occurrence in JSON.
+If no corresponding record was supplied, `target_ref` is `None`.
 
 ### A future optimizer can collect evidence without defining a metric
 
@@ -366,13 +470,16 @@ from dspy.utils.callback import BaseCallback
 
 events = []
 class Observer(BaseCallback):
-    def on_tool_end(self, call_id, outputs, exception):
-        events.append((call_id, outputs))
+    def on_end(self, call):
+        if call.kind == "tool":
+            events.append(call)
 
 with dspy.context(callbacks=[Observer()]), dspy.capture_execution(program) as observed:
     program(question="callbacks")
-call_id, output = events[0]
-assert observed.trace.span(call_id)["outputs"] == output == "CALLBACKS"
+call = events[0]
+assert call.parent_id is not None
+assert call.end_time >= call.start_time
+assert observed.trace.span(call.call_id)["outputs"] == call.outputs == "CALLBACKS"
 ```
 
 The observer sees the live output object; the record stores its converted snapshot. An observability
@@ -457,7 +564,7 @@ adapter calls once and returns the exact object. It never retries a metric's Typ
 `MetricContext` retains its decision fields and adds optional recorded execution:
 
 - `purpose`: `score`, `accept`, or `feedback`.
-- `trace`: optional tuple of existing `(predictor, inputs, prediction)` steps. None means unavailable;
+- `trace`: optional tuple of `Invocation` objects. None means unavailable;
   an empty tuple means no steps recorded. Membership is frozen, payload objects are not deep-copied.
 - `component_name` and `target`: optional GEPA name and zero-based index into this trace. Repeated
   calls have distinct indices. These are not global execution IDs or a persistence schema.
@@ -470,16 +577,16 @@ tuple evidence. Flex additionally supplies usage even with `capture_traces=False
 ends before the judge runs. A tuple count is **not an LM-request count**: cached predictions still
 produce tuples; direct LM calls and failures need not produce them.
 
-GEPA reads component names from the referenced invocation, then selects an occurrence. Legacy
-metrics retain signature matching. BestOfN/Refine tell capture the provenance of their copies;
+GEPA reads component names directly from each call, then selects an occurrence. Both legacy and
+contextual metrics use this attribution. BestOfN/Refine tell capture the provenance of their copies;
 unnamed dynamic modules still have invocation IDs but no invented static component path.
 Candidate usage continues using the existing tracker and joined-worker sharing policy. Recording
 does not charge usage again. Totals do not establish accounting for detached or abandoned work.
 
 Execution capture is automatic at the contextual bootstrap/GEPA/Flex candidate boundary and
 available explicitly through `capture_execution()` or `bootstrap_trace_data(capture_execution=True)`.
-Other metric callers need not have execution evidence. Existing demonstration tuple collection
-remains: this prototype links its identity, not a claim to have removed every collection path.
+Other metric callers need not have execution evidence. Existing demonstration selection remains;
+its retained entries are now the same typed observations delivered to callbacks.
 
 ## Context-only migration and current runtime behavior
 
@@ -524,12 +631,18 @@ remain implementation work; the earlier compatibility replay records the current
 
 ## What gets simpler, and what deliberately remains
 
-- Removed the metric-only `_metric_predictor_names` registry and aligned `trace_names` arrays.
-  Component provenance is recorded once per invocation; consumers resolve references.
+- Removed the metric-only `_metric_predictor_names` registry and aligned `trace_names` arrays,
+  the prediction-attached `_execution_ref` bridge, GEPA's JSON-to-tuple join and signature fallback,
+  bootstrap failure's predictor scan, SIMBA/BootstrapFewShot's reverse identity maps, and finetuning's
+  trace-ordinal formatting helper. Component and occurrence identity travel with typed evidence.
+- GRPO no longer hashes signatures for routing or reconstructs identity after selecting a group.
+  Finetuning selects every call to the requested component, including repeated and skipped calls.
+  These correct previously ambiguous attribution; reward/grouping policies are unchanged.
 - Removed temporary `program.forward` replacement/restoration from bootstrap collection.
   The wrapper owns each candidate boundary without mutating the candidate program.
 - Callbacks and recorded invocations use one ID generator and the existing worker propagation.
-  No second ContextVar hierarchy, decorator, event bus, or tracing SDK is introduced.
+  One active-call ContextVar permits Predict's input handoff; it is not a separate parent hierarchy.
+  Sync/async callbacks share their lifecycle and one kind classifier instead of two dispatch tables.
 - Completed records contain JSON, not predictor objects or discarded cloned programs.
 - Demonstration selection, metric results, existing UsageTracker, and History remain distinct.
 
@@ -567,8 +680,8 @@ The differential harness executes identical bytes against the baseline and revis
 separate processes: 611 cases, zero differences. Coercing returns to bool changes 182 cases,
 including BestOfN incorrectly selecting 0.2 over 0.8. Cases cover ABIs, raw results, exceptions,
 thresholds, bootstrap, ranking, trace collection, and GEPA score/feedback interpretation.
-The new replay uses the metric-only head as baseline and again finds zero differences. Nine new
-mutations are caught: lost parent, reused invocation ID, wrong occurrence, wrong purpose, erased
+The earlier capture-round replay used the metric-only head as baseline and found zero differences.
+Its nine mutations were caught: lost parent, reused invocation ID, wrong occurrence, wrong purpose, erased
 evidence, coerced result, accepted foreign feedback, mutable output, and late writes after sealing.
 Two test-fixture mistakes were corrected: Parallel is an executor, not an instrumented module;
 the two-attempt test now supplies two LM responses and asserts both attempts succeed.
@@ -577,16 +690,19 @@ Real Azure + Deno + cmpnd callback checks compare independent provider requests 
 evidence: cached and uncached two-step candidates have two tuples but one versus two requests;
 deterministic candidates have none. Judge requests are excluded, with trajectory retention both
 on and off. The fresh 12-trial run also checks exact invocation references and sealed record
-stability across judge execution. cmpnd delivery is captured locally, not sent to a deployed backend.
+stability across judge execution. This was rerun after the retained-call changes: all 12 trials pass,
+with 179 candidate tokens for cached calls, 358 for uncached calls, and zero for deterministic calls.
+cmpnd delivery is captured locally, not sent to a deployed backend.
 
-A nine-repeat local deterministic-call probe measured medians of 9.50 ms before and 9.12 ms with
+An earlier nine-repeat local deterministic-call probe measured medians of 9.50 ms before and 9.12 ms with
 capture disabled per 1,000 calls (noise, not a speedup claim), versus 172.26 ms with capture and
 JSON readout enabled. That record is about 282 KB. All 1,000 discarded module objects were collected
-while retaining the record. This prototype trades capture cost for evidence; it is not free.
+while retaining the record. This is historical capture-round evidence, not the current overhead:
+the round 5 measurements above include automatic typed collection and its additional naming cost.
 
 Limits: replay is not a proof over arbitrary user metrics. Refine replay covers one attempt, not
-iterative advice. Full GRPO training and live fine-tuning are not run; tests exercise their metric
-capture/filter boundaries. Existing partial-parse arithmetic remains outside this change.
+iterative advice. Full GRPO training and live fine-tuning are not run; tests exercise compilation
+through the submitted training rows/groups. Existing partial-parse arithmetic remains outside this change.
 Tuple evidence is incomplete and shallow. JSON payload conversion is lossy for custom objects;
 payload redaction, capture size limits, alias paths, arbitrary user-thread propagation, schema
 versioning, and complete provider accounting remain unresolved. Nested capture scopes are isolated,

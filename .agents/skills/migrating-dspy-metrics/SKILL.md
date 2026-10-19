@@ -107,8 +107,8 @@ def metric(gold, pred, *, metric_context):
         trace, target = metric_context.trace, metric_context.target
         if trace is None or target is None:
             raise ValueError("Component feedback requires its selected trace occurrence")
-        predictor, inputs, output = trace[target]
-        text = critique(metric_context.component_name, inputs, output)
+        call = trace[target]
+        text = critique(call.component_name, call.inputs, call.outputs)
         return dspy.Prediction(score=score, feedback=text)
     return score
 ```
@@ -119,12 +119,29 @@ feedback generation into the component-feedback branch. Keep program fitness and
 separate from a component-specific critique. Do not migrate DSPy's internal PredictorFeedbackFn
 callback ABI as though it were the user metric's five-argument API.
 
+### Typed predictor evidence
+
+In this prototype, trace entries are `dspy.Invocation` objects, not JSON spans. Use
+`call.instance`, `call.inputs`, `call.outputs`, `call.component_name`, and `call.ref`.
+Tuple unpacking/indexing remains a transitional view; do not rebuild tuples and lose identity.
+`component_name` identifies an optimizable component; `call_id`/`ref` identify one occurrence.
+Equal signatures, repeated invocations, and copied retry attempts are not interchangeable.
+Names are relative to the collecting optimizer's program. Dynamically constructed, unowned
+predictors can have no component name; never guess one from their signature or ordinal.
+
+Use prepared `call.inputs` for metrics/training, not bound `call.arguments` (which can contain
+LM/config overrides). Treat calls as read-only. They retain live Python objects and are not a
+portable persistence format. A failed parse can have a caller-owned `FailedPrediction` in
+`call.outputs` while retaining its exception and occurrence reference.
+
 ### Flex and evidence-dependent metrics
 
 Replace experimental program_trace with metric_context.trace, not with a new execution recorder.
 For the former tracing prototype, replace execution.predictor_trace() with trace and execution.usage()
-with usage only after checking the fields/units actually consumed. Invocation refs, span IDs, event
-streams, and provider-request counts have no replacement in this metric context; report such needs.
+with usage only after checking the fields/units actually consumed. If the target version supplies
+`metric_context.execution`, it is a separate detached record; `target_ref` links the selected call
+to that record. Check availability rather than requiring a JSON record to inspect typed evidence.
+Provider-request counts still cannot be inferred from predictor calls or span counts.
 
 ```python
 def token_budget(gold, pred, *, metric_context):

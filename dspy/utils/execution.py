@@ -1,7 +1,7 @@
-"""Opt-in execution records built at DSPy's existing callback boundaries.
+"""Typed invocation observations and opt-in detached execution records.
 
-Records are detached observations, not replay state or demonstration selection.
-Callbacks and records share invocation IDs. No exporter or storage is required.
+Callbacks, predictor tuples, and JSON records project the same invocation lifecycle.
+Consumers still own retention and attempt selection. No exporter or storage is required.
 """
 
 import json
@@ -9,13 +9,46 @@ import re
 import threading
 import time
 import uuid
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from weakref import WeakKeyDictionary
 
 from dspy.adapters.utils import serialize_for_json
 from dspy.dsp.utils.settings import settings
-from dspy.utils.callback_context import ACTIVE_CALL_ID
+
+
+@dataclass
+class Invocation:
+    """One observed call, retained as typed evidence by predictor trace collectors.
+
+    ``arguments`` contains bound callback arguments; ``inputs`` contains prepared
+    predictor inputs (including defaults and hints, excluding LM/config overrides).
+    Component names are predictor addresses relative to the collecting program,
+    not paths through every observed module or signature identities.
+    Tuple access is the migration view: (instance, inputs, outputs).
+    """
+
+    instance: Any
+    kind: str
+    arguments: dict
+    parent_id: str | None
+    call_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    start_time: float = field(default_factory=time.time)
+    end_time: float | None = None
+    outputs: Any = None
+    exception: BaseException | None = None
+    inputs: dict | None = None
+    component_name: str | None = None
+    ref: "ExecutionRef | None" = None
+
+    def __iter__(self):
+        return iter((self.instance, self.inputs, self.outputs))
+
+    def __getitem__(self, index):
+        return (self.instance, self.inputs, self.outputs)[index]
+
+    def __len__(self):
+        return 3
 
 
 @dataclass(frozen=True)
@@ -112,8 +145,9 @@ class ExecutionTrace:
 
 
 class _Capture:
-    def __init__(self, program=None):
+    def __init__(self, program=None, *, recording=True):
         self.trace_id = uuid.uuid4().hex
+        self.recording = recording
         self._spans = {}
         self._names = WeakKeyDictionary()
         self._lock = threading.RLock()
@@ -121,68 +155,78 @@ class _Capture:
         if program is not None:
             self._register(program)
 
+    def __enter__(self):
+        self._context = settings.context(_execution_capture=self)
+        self._context.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return self._context.__exit__(*exc)
+
     def _register(self, program):
-        for name, module in program.named_sub_modules():
-            self._names[module] = name.removeprefix("self.")
-        # Optimizers address predictors through named_predictors(), whose dictionary
-        # paths differ from named_sub_modules(). Preserve that canonical spelling.
+        # Component names are optimizer addresses, not paths through arbitrary
+        # runtime objects (notably accumulated LM history).
+        self._names[program] = None
         for name, predictor in program.named_predictors():
             self._names[predictor] = name
 
     def inherit_names(self, original, copied):
         """A retry wrapper knows the provenance of its copy; a signature does not."""
         with self._lock:
-            originals = dict(original.named_sub_modules())
-            for name, module in copied.named_sub_modules():
+            originals = dict(original.named_predictors())
+            for name, predictor in copied.named_predictors():
                 path = self._names.get(originals[name])
                 if path is not None:
-                    self._names[module] = path
+                    self._names[predictor] = path
 
-    def start(self, call_id, instance, kind, inputs):
-        from dspy.predict.predict import Predict
-
+    def start(self, invocation):
+        instance = invocation.instance
         with self._lock:
             if self._closed:
                 return
-            if not self._spans and hasattr(instance, "named_sub_modules") and not self._names:
+            # A collector declares its optimizer-relative root, even inside an
+            # outer observation scope. Copies inherit these names explicitly.
+            if instance is settings.get("_trace_program"):
                 self._register(instance)
-            parent = ACTIVE_CALL_ID.get()
-            self._spans[call_id] = {
-                "span_id": call_id,
+            elif not self._names and hasattr(instance, "named_predictors"):
+                self._register(instance)
+            invocation.component_name = self._names.get(instance) if invocation.kind == "predict" else None
+            invocation.ref = ExecutionRef(self.trace_id, invocation.call_id)
+            if not self.recording:
+                return
+            parent = invocation.parent_id
+            self._spans[invocation.call_id] = {
+                "span_id": invocation.call_id,
                 "parent_span_id": parent if parent in self._spans else None,
-                "kind": "predict" if isinstance(instance, Predict) else kind,
-                "name": instance.name if kind == "tool" else type(instance).__qualname__,
-                "component_name": self._names.get(instance) if hasattr(instance, "named_sub_modules") else None,
-                "start_time": time.time(),
+                "kind": invocation.kind,
+                "name": instance.name if invocation.kind == "tool" else type(instance).__qualname__,
+                "component_name": invocation.component_name,
+                "start_time": invocation.start_time,
                 "end_time": None,
-                "inputs": json.loads(json.dumps(serialize_for_json(inputs))),
+                "inputs": json.loads(json.dumps(serialize_for_json(invocation.arguments))),
                 "outputs": None,
                 "error": None,
             }
 
-    def end(self, call_id, outputs, exception, inputs):
+    def end(self, invocation):
+        call_id, outputs, exception = invocation.call_id, invocation.outputs, invocation.exception
         with self._lock:
-            if self._closed or call_id not in self._spans:
+            if self._closed:
                 return
-            if exception is not None and self._spans[call_id]["kind"] == "predict":
-                if getattr(exception, "_execution_ref", None) is None:
-                    exception._execution_ref = ExecutionRef(self.trace_id, call_id)
-                    # Failed demonstration tuples need typed values, not the JSON view.
-                    exception._execution_inputs = inputs
+            if invocation.kind == "predict" and exception is not None:
+                failed = getattr(exception, "_execution_call", None)
+                if failed is None or failed.ref.trace_id != self.trace_id:
+                    exception._execution_call = invocation
+            if call_id not in self._spans:
+                return
             if hasattr(outputs, "toDict"):
                 outputs = outputs.toDict()
             self._spans[call_id].update(
-                end_time=time.time(),
+                end_time=invocation.end_time,
                 outputs=json.loads(json.dumps(serialize_for_json(outputs))),
                 error={"type": type(exception).__name__, "message": str(exception)} if exception else None,
             )
-
-    def predictor_ref(self):
-        call_id = ACTIVE_CALL_ID.get()
-        with self._lock:
-            if not self._closed and call_id in self._spans:
-                return ExecutionRef(self.trace_id, call_id)
-        return None
 
     @property
     def trace(self):
@@ -197,7 +241,6 @@ class _Capture:
             self._names.clear()
 
 
-@contextmanager
 def capture_execution(program=None):
     """Capture this scope, including joined DSPy workers, independently of callbacks.
 
@@ -205,9 +248,4 @@ def capture_execution(program=None):
     modify the sealed record; unfinished spans remain visibly unfinished.
     Optional ``program`` supplies component paths when capture begins inside it.
     """
-    capture = _Capture(program)
-    with settings.context(_execution_capture=capture):
-        try:
-            yield capture
-        finally:
-            capture.close()
+    return _Capture(program)

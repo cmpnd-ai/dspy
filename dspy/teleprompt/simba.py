@@ -189,7 +189,6 @@ class SIMBA(Teleprompter):
             top_programs = top_k_plus_baseline(self.num_candidates)
 
             exec_pairs = []
-            predictor2name = {}
 
             # For each model, for each example, pick a program from the pool via softmax
             for model in models:
@@ -197,9 +196,6 @@ class SIMBA(Teleprompter):
                     chosen_prog_idx = softmax_sample(rng, top_programs, self.temperature_for_sampling)
                     candidate_system = programs[chosen_prog_idx].deepcopy()
                     candidate_system.set_lm(model)
-
-                    for name, predictor in candidate_system.named_predictors():
-                        predictor2name[id(predictor)] = name
 
                     # Use the special wrap that includes the 'example' in the output
                     wrapped_candidate_system = wrap_program(candidate_system, self.metric)
@@ -284,7 +280,6 @@ class SIMBA(Teleprompter):
                     strategy(
                         bucket,
                         system_candidate,
-                        predictor2name=predictor2name,
                         name2predictor=name2predictor,
                         batch_10p_score=batch_10th_percentile_score,
                         batch_90p_score=batch_90th_percentile_score,

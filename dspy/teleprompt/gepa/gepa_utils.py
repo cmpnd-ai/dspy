@@ -343,20 +343,6 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         program = self.build_program(candidate)
 
         ret_d: dict[str, list[ReflectiveExample]] = {}
-        contextual = accepts_metric_context(self.metric_fn)
-        trajectories = []
-        for data in eval_batch.trajectories or []:
-            occurrences = {}
-            if contextual and data.get("execution") is not None:
-                record = data["execution"].to_dict()
-                spans = {(record["trace_id"], span["span_id"]): span for span in record["spans"]}
-                for index, step in enumerate(data["trace"]):
-                    ref = getattr(step[2], "_execution_ref", None)
-                    if ref is not None:
-                        name = spans[(ref.trace_id, ref.span_id)]["component_name"]
-                        occurrences.setdefault(name, []).append((index, step))
-            trajectories.append((data, occurrences))
-
         for pred_name in components_to_update:
             # Code components (dspy.Flex submodules) reflect on whole-program I/O, not per-predictor
             # traces.
@@ -376,7 +362,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
 
             # Create reflective examples from traces
             items: list[ReflectiveExample] = []
-            for data, occurrences in trajectories:
+            for data in eval_batch.trajectories or []:
                 trace = data["trace"]
                 example = data["example"]
                 prediction = data["prediction"]
@@ -384,11 +370,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                 if hasattr(module_score, "score"):
                     module_score = module_score["score"]
 
-                if contextual:
-                    trace_instances = occurrences.get(pred_name, [])
-                else:
-                    # Preserve legacy matching until callers explicitly migrate.
-                    trace_instances = [(index, t) for index, t in enumerate(trace) if t[0].signature.equals(module.signature)]
+                trace_instances = [(index, t) for index, t in enumerate(trace) if t.component_name == pred_name]
                 if not self.add_format_failure_as_feedback:
                     trace_instances = [t for t in trace_instances if not isinstance(t[1][2], FailedPrediction)]
                 if len(trace_instances) == 0:

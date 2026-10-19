@@ -2,9 +2,9 @@
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
-from dspy.utils.execution import ExecutionRef, ExecutionTrace
+from dspy.utils.execution import ExecutionRef, ExecutionTrace, Invocation
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class MetricContext:
     """
 
     purpose: Literal["score", "accept", "feedback"] = "score"
-    trace: tuple[tuple[Any, dict, Any], ...] | None = None
+    trace: tuple[Invocation, ...] | None = None
     component_name: str | None = None
     target: int | None = None
     usage: dict | None = None
@@ -33,7 +33,7 @@ class MetricContext:
         """Durable identity of the selected predictor occurrence, when recorded."""
         if self.execution is None or self.trace is None or self.target is None:
             return None
-        ref = getattr(self.trace[self.target][2], "_execution_ref", None)
+        ref = self.trace[self.target].ref
         if ref is not None and ref.trace_id == self.execution.trace_id:
             return ref
         return None

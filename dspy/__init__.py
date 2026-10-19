@@ -42,7 +42,7 @@ from dspy.utils.syncify import syncify
 from dspy.utils.saving import load
 from dspy.streaming.streamify import streamify
 from dspy.utils.usage_tracker import track_usage
-from dspy.utils.execution import ExecutionRef, ExecutionTrace, Feedback, capture_execution
+from dspy.utils.execution import ExecutionRef, ExecutionTrace, Feedback, Invocation, capture_execution
 
 from dspy.dsp.utils.settings import settings
 from dspy.dsp.colbertv2 import ColBERTv2

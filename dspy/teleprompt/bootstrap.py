@@ -107,7 +107,6 @@ class BootstrapFewShot(Teleprompter):
             self.teacher = teleprompter.compile(self.teacher.reset_copy(), trainset=self.trainset)
 
     def _prepare_predictor_mappings(self):
-        name2predictor, predictor2name = {}, {}
         student, teacher = self.student, self.teacher
 
         assert len(student.predictors()) == len(
@@ -133,25 +132,12 @@ class BootstrapFewShot(Teleprompter):
                 )
             assert id(predictor1) != id(predictor2), "Student and teacher must be different objects."
 
-            name2predictor[name1] = None  # dict(student=predictor1, teacher=predictor2)
-            predictor2name[id(predictor1)] = name1
-
-            # FIXME(shangyint): This is an ugly hack to bind traces of
-            # retry.module to retry
-            # if isinstance(predictor1, Retry):
-            #     predictor2name[id(predictor1.module)] = name1
-
-            predictor2name[id(predictor2)] = name2
-
-        self.name2predictor = name2predictor
-        self.predictor2name = predictor2name
-
     def _bootstrap(self, *, max_bootstraps=None):
         max_bootstraps = max_bootstraps or self.max_bootstrapped_demos
         bootstrap_attempts = 0
 
         bootstrapped = {}
-        self.name2traces = {name: [] for name in self.name2predictor}
+        self.name2traces = {name: [] for name, _ in self.student.named_predictors()}
 
         for example_idx, example in enumerate(tqdm.tqdm(self.trainset)):
             if len(bootstrapped) >= max_bootstraps:
@@ -186,7 +172,7 @@ class BootstrapFewShot(Teleprompter):
         predictor_cache = {}
 
         try:
-            with dspy.context(trace=[], **self.teacher_settings):
+            with dspy.context(trace=[], _trace_program=teacher, **self.teacher_settings):
                 lm = dspy.settings.lm
                 # Use a fresh rollout with temperature=1.0 to bypass caches.
                 lm = lm.copy(rollout_id=round_idx, temperature=1.0) if round_idx > 0 else lm
@@ -230,20 +216,9 @@ class BootstrapFewShot(Teleprompter):
                 predictor, inputs, outputs = step
                 demo = dspy.Example(augmented=True, **inputs, **outputs)
 
-                try:
-                    predictor_name = self.predictor2name[id(predictor)]
-                except KeyError:
-                    continue  # FIXME: !
-
-                    # # TODO: Look closer into this. It's a bit tricky to reproduce.
-                    # print(f"Failed to find predictor {predictor} in {self.predictor2name}.")
-                    # print(
-                    #     "Are you doing this in a notebook (Jupyter)? This might be caused by redefining values by rerunning cells.",
-                    # )
-                    # print("Try restarting the notebook, or open an issue.")
-                    # raise KeyError(
-                    #     f"Failed to find predictor {id(predictor)} {predictor} in {self.predictor2name}.",
-                    # ) from e
+                predictor_name = step.component_name
+                if predictor_name not in self.name2traces:
+                    continue
 
                 name2traces[predictor_name] = name2traces.get(predictor_name, [])
                 name2traces[predictor_name].append(demo)

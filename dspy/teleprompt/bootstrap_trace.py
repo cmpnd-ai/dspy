@@ -1,6 +1,6 @@
 import logging
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, TypedDict
 
 import dspy
@@ -10,6 +10,7 @@ from dspy.primitives.example import Example
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.utils.exceptions import AdapterParseError, LMError
+from dspy.utils.execution import Invocation
 from dspy.utils.execution import capture_execution as record_execution
 from dspy.utils.usage_tracker import track_usage
 
@@ -26,7 +27,7 @@ class TraceData(TypedDict):
     example_ind: int
     example: Example
     prediction: Prediction
-    trace: list[tuple[Any, dict[str, Any], Prediction]]
+    trace: list[Invocation]
     score: float | None
 
 
@@ -75,9 +76,9 @@ def bootstrap_trace_data(
 
     def collect(**kwargs):
         with (
-            dspy.context(trace=[], **capture_settings),
+            dspy.context(trace=[], _trace_program=program, **capture_settings),
             track_usage() if capture_usage else nullcontext() as usage,
-            record_execution(program) if record else nullcontext() as capture,
+            record_execution() if record else nullcontext() as capture,
         ):
             try:
                 prediction = program(**kwargs)
@@ -86,25 +87,15 @@ def bootstrap_trace_data(
                 completion_str = e.lm_response
                 parsed_result = e.parsed_result
                 failed_signature = e.signature
-                failed_inputs = kwargs
 
                 present = list(parsed_result.keys()) if parsed_result else None
                 expected = list(failed_signature.output_fields.keys())
 
-                found_pred = None
-                failed_ref = getattr(e, "_execution_ref", None)
-                failed_span = capture.trace.resolve(failed_ref) if capture is not None and failed_ref else None
-                if failed_span is not None:
-                    failed_inputs = e._execution_inputs
-                for name, pred in program.named_predictors():
-                    if (name == failed_span["component_name"] if failed_span else pred.signature == failed_signature):
-                        found_pred = pred
-                        break
-                if found_pred is None:
-                    raise ValueError(f"Failed to find the predictor for the failed signature: {failed_signature}")
+                failed_call = getattr(e, "_execution_call", None)
+                if failed_call is None:
+                    raise ValueError("The parse error did not originate in an observed predictor call") from e
 
                 trace = dspy.settings.trace.copy()
-                # Trace is Tuple[signature, inputs, prediction outputs]
                 if present:
                     failed_pred = FailedPrediction(
                         completion_text=completion_str,
@@ -113,16 +104,7 @@ def bootstrap_trace_data(
                     )
                 else:
                     failed_pred = FailedPrediction(completion_text=completion_str, format_reward=format_failure_score)
-                if failed_ref is not None:
-                    failed_pred._execution_ref = failed_ref
-
-                trace.append(
-                    (
-                        found_pred,
-                        failed_inputs,
-                        failed_pred,
-                    )
-                )
+                trace.append(replace(failed_call, outputs=failed_pred))
 
                 if log_format_failures:
                     logging.warning(

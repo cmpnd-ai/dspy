@@ -88,7 +88,7 @@ class GRPO(FinetuneTeleprompter):
         subsample_training_dataset: list[Example],
         num_teachers: int,
         num_samples_per_input: int,
-        pred_signature_hash_to_ind: dict[int, int],
+        predictor_names: list[str],
     ):
         # At this point, trace_data: list[example_idx -> list[teacher_idx -> [num_samples_per_input * Dict(example, prediction, trace, example_ind, score)]]]
         # Shape of trace is: [dspy_module_invocation_idx -> Tuple[Predictor, PredictorInputs, Prediction]]
@@ -107,7 +107,7 @@ class GRPO(FinetuneTeleprompter):
             for teacher_data in example_data:
                 for sample in teacher_data:
                     for t in sample["trace"]:
-                        assert hash(t[0].signature) in pred_signature_hash_to_ind
+                        assert t.component_name in predictor_names
 
     def report_validation_metrics(self, student, trainset, valset, logger, step_idx=-1):
         if step_idx == -1 or step_idx == self.num_train_steps - 1 or (step_idx + 1) % self.num_steps_for_val == 0:
@@ -291,7 +291,7 @@ class GRPO(FinetuneTeleprompter):
 
         logger.info("Preparing the student program...")
         all_predictors_have_lms(student)
-        pred_signature_hash_to_ind = {hash(pred.signature): ind for ind, pred in enumerate(student.predictors())}
+        predictor_names = [name for name, _ in student.named_predictors()]
         num_student_predictors = len(student.predictors())
 
         logging.info("Preparing the teacher program(s)... We will ensure that the provided programs have the same program structure as the student program.")
@@ -399,14 +399,14 @@ class GRPO(FinetuneTeleprompter):
                 subsample_training_dataset=subsample_training_dataset,
                 num_teachers=len(teachers),
                 num_samples_per_input=num_samples_per_input,
-                pred_signature_hash_to_ind=pred_signature_hash_to_ind,
+                predictor_names=predictor_names,
             )
 
             logger.info("Preparing the training data batch from bootstrapped examples for GRPO...")
             # Now, we need to prepare batches of data to be sent for training
             # Shape of train_batch_per_predictor: list[num_student_predictors -> list[ ]]
             train_batch_per_predictor: list[list[GRPOGroup]] = [[] for _ in range(num_student_predictors)]
-            for pred_id in range(num_student_predictors):
+            for pred_id, pred_name in enumerate(predictor_names):
                 for example_ind, example_data in enumerate(trace_data):
                     # Each example_data is a list of teacher_idx -> [num_samples_per_input * Dict(example, prediction, trace, example_ind, score)]
                     # We need to flatten this list and create a batch for each predictor
@@ -420,7 +420,9 @@ class GRPO(FinetuneTeleprompter):
                             # sample['prediction'] is module_level prediction
                             assert sample["example_ind"] == example_ind, f"Example index {sample['example_ind']} does not match the expected index {example_ind}"
 
-                            trace_instances_for_current_pred = [(*t, sample["score"]) for t in sample["trace"] if hash(t[0].signature) == hash(student.predictors()[pred_id].signature)]
+                            trace_instances_for_current_pred = [
+                                (call, sample["score"]) for call in sample["trace"] if call.component_name == pred_name
+                            ]
 
                             predictor_example_invocations.append(trace_instances_for_current_pred)
 
@@ -455,42 +457,34 @@ class GRPO(FinetuneTeleprompter):
 
                     for group_idx in range(max_len):
                         for rollout_idx in range(len(predictor_example_invocations)):
-                            trace_instance = predictor_example_invocations[rollout_idx][group_idx]
-                            score = trace_instance[3]
-                            # for module_invocation_idx, trace_instance in enumerate(trace_instances_for_current_pred):
-                            # Each trace is a tuple of (Predictor, PredictorInputs, Prediction)
-                            trace_pred_id = pred_signature_hash_to_ind.get(hash(trace_instance[0].signature))
-                            assert trace_pred_id == pred_id
-
-                            predictor = trace_instance[0]
+                            call, score = predictor_example_invocations[rollout_idx][group_idx]
+                            predictor = call.instance
                             pred_lm = predictor.lm
                             adapter = self.adapter[pred_lm] or settings.adapter or XMLAdapter()
                             assert isinstance(adapter, ChatAdapter), f"Adapter {adapter} is not a ChatAdapter. GRPO training is not supported for this adapter."
                             # TODO(Lakshya): Currently we exclude demos from the training data
-                            # TODO(GRPO Team): Use build_call_data_from_trace (from bootstrap_finetune) instead of
-                            # dealing with the message formatting ourselves.
                             inp_messages = adapter.format(
-                                signature=trace_instance[0].signature,
-                                inputs=trace_instance[1],
+                                signature=predictor.signature,
+                                inputs=call.inputs,
                                 demos=[] # TODO: Add support for demos
                             )
 
-                            if isinstance(trace_instance[2], FailedPrediction):
-                                score = trace_instance[2].format_reward or self.format_failure_score
+                            if isinstance(call.outputs, FailedPrediction):
+                                score = call.outputs.format_reward or self.format_failure_score
                                 example_training_data[group_idx].append({
                                     "messages": inp_messages,
                                     "completion": {
                                         "role": "assistant",
-                                        "content": trace_instance[2].completion_text,
+                                        "content": call.outputs.completion_text,
                                     },
                                     "reward": float(score),
                                 })
                                 logger.warning(f"Adding a format failure example to the training data for predictor {pred_id} and example {example_ind}.")
                             else:
                                 all_messages = adapter.format_finetune_data(
-                                    signature=trace_instance[0].signature,
-                                    inputs=trace_instance[1],
-                                    outputs=trace_instance[2],
+                                    signature=predictor.signature,
+                                    inputs=call.inputs,
+                                    outputs=call.outputs,
                                     demos=[] # TODO: Add support for demos
                                 )["messages"]
 

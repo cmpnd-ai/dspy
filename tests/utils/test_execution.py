@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from contextlib import nullcontext
 from dataclasses import asdict
 
 import pytest
@@ -41,6 +42,80 @@ def test_capture_shares_callback_ids_but_not_callback_configuration_or_payload_r
     detached["spans"][0]["outputs"]["values"].append("external mutation")
     assert record.span(root["span_id"])["outputs"] == {"values": ["before"]}
     assert dspy.ExecutionTrace.from_dict(json.loads(json.dumps(record.to_dict()))) == record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_predictor_views_share_the_completed_outcome_and_typed_inputs(asynchronous):
+    class Chat(dspy.Signature):
+        question: str = dspy.InputField()
+        history: dspy.History = dspy.InputField()
+        language: str = dspy.InputField(default="English")
+        answer: str = dspy.OutputField()
+
+    failure = RuntimeError("rejected after parsing")
+
+    class Finalize(dspy.Predict):
+        def forward(self, **kwargs):
+            draft = super().forward(**kwargs)
+            if kwargs["question"] == "fail":
+                raise failure
+            return dspy.Prediction(answer=draft.answer.upper())
+
+        async def aforward(self, **kwargs):
+            draft = await super().aforward(**kwargs)
+            if kwargs["question"] == "fail":
+                raise failure
+            return dspy.Prediction(answer=draft.answer.upper())
+
+    started, ended = [], []
+
+    class Observer(BaseCallback):
+        def on_module_start(self, call_id, instance, inputs):
+            started.append(call_id)
+
+        def on_module_end(self, call_id, outputs, exception):
+            ended.append((call_id, outputs, exception))
+
+    history = dspy.History(messages=[{"question": "prior", "answer": "past"}])
+    program = Finalize(Chat)
+    with dspy.context(lm=DummyLM([{"answer": "draft"}]), trace=[], callbacks=[Observer()]), dspy.capture_execution() as capture:
+        kwargs = {"question": "ok", "history": history, "config": {"temperature": 0.1}}
+        result = await program.acall(**kwargs) if asynchronous else program(**kwargs)
+        with pytest.raises(RuntimeError) as exc:
+            if asynchronous:
+                await program.acall(question="fail", history=history)
+            else:
+                program(question="fail", history=history)
+        assert exc.value is failure
+        (predictor, inputs, output), = dspy.settings.trace
+        trace = dspy.settings.trace.copy()
+
+    assert predictor is program
+    assert inputs == {"question": "ok", "history": history, "language": "English"}
+    assert inputs["history"] is history
+    assert output is result and result.answer == "DRAFT"
+    spans = [span for span in capture.trace.spans if span["kind"] == "predict"]
+    assert started == [span["span_id"] for span in spans]
+    assert ended == [(started[0], result, None), (started[1], None, failure)]
+    assert spans[0]["outputs"] == {"answer": "DRAFT"}
+    assert spans[1]["outputs"] is None
+    assert spans[1]["error"] == {"type": "RuntimeError", "message": str(failure)}
+    context = dspy.MetricContext("feedback", trace=trace, target=0, execution=capture.trace)
+    assert context.target_ref.span_id == started[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_direct_predict_forward_uses_the_same_observation_boundary(asynchronous):
+    program = dspy.Predict("question -> answer")
+    with dspy.context(lm=DummyLM([{"answer": "direct"}]), trace=[]), dspy.capture_execution() as capture:
+        result = await program.aforward(question="q") if asynchronous else program.forward(question="q")
+        (predictor, inputs, output), = dspy.settings.trace
+    span, = [s for s in capture.trace.spans if s["kind"] == "predict"]
+    assert predictor is program and output is result
+    assert inputs == {"question": "q"}
+    assert span["outputs"] == {"answer": "direct"}
 
 
 def test_failure_is_recorded_without_changing_the_exception():
@@ -86,7 +161,15 @@ async def test_concurrent_captures_and_joined_workers_have_correct_parents():
         assert all(s["end_time"] is not None for s in spans.values())
 
 
-def test_all_attempts_are_observed_but_only_winner_is_a_demonstration():
+@pytest.mark.parametrize("record", [False, True])
+def test_all_attempts_are_observed_but_only_winner_is_a_demonstration(record):
+    observed = []
+
+    class Observer(BaseCallback):
+        def on_end(self, call):
+            if call.kind == "predict":
+                observed.append(call)
+
     class Candidate(dspy.Module):
         def __init__(self):
             self.answer = dspy.Predict("q -> a")
@@ -96,16 +179,23 @@ def test_all_attempts_are_observed_but_only_winner_is_a_demonstration():
 
     scores = iter([0.8, 0.2])
     candidate = dspy.BestOfN(Candidate(), N=2, reward_fn=lambda inputs, pred: next(scores), threshold=1)
-    with dspy.context(lm=DummyLM([{"a": "same"}, {"a": "same"}]), trace=[]), dspy.capture_execution(candidate) as capture:
+    with (
+        dspy.context(lm=DummyLM([{"a": "same"}, {"a": "same"}]), trace=[], callbacks=[Observer()]),
+        dspy.capture_execution(candidate) if record else nullcontext() as capture,
+    ):
         candidate(q="repeat")
         chosen, = dspy.settings.trace
-    record = capture.trace
-    calls = [s for s in record.spans if s["component_name"] == "module.answer"]
-    assert len(calls) == 2
-    assert all(s["error"] is None and s["outputs"] == {"a": "same"} for s in calls)
-    assert calls[0]["span_id"] != calls[1]["span_id"]
-    context = dspy.MetricContext("feedback", trace=[chosen], target=0, execution=record)
-    assert context.target_ref.span_id == calls[0]["span_id"]
+    assert len(observed) == 2
+    assert chosen is observed[0]
+    assert all(call.component_name == "module.answer" and call.exception is None for call in observed)
+    assert all(dict(call.outputs) == {"a": "same"} and call.inputs == {"q": "repeat"} for call in observed)
+    assert all(call.parent_id and call.end_time >= call.start_time for call in observed)
+    assert observed[0].call_id != observed[1].call_id
+    if record:
+        calls = [s for s in capture.trace.spans if s["component_name"] == "module.answer"]
+        assert [call.call_id for call in observed] == [s["span_id"] for s in calls]
+        context = dspy.MetricContext("feedback", trace=[chosen], target=0, execution=capture.trace)
+        assert context.target_ref.span_id == calls[0]["span_id"]
 
 
 def test_candidate_records_survive_for_optimizer_research_but_exclude_outer_judge():
@@ -199,7 +289,8 @@ async def test_async_and_nested_capture_boundaries_are_isolated():
     assert tool["outputs"] == "answer"
 
 
-def test_parse_failure_is_attributed_to_the_failing_sibling():
+@pytest.mark.parametrize("record", [False, True])
+def test_parse_failure_is_attributed_to_the_failing_sibling(record):
     from dspy.utils.exceptions import AdapterParseError
 
     class Chat(dspy.Signature):
@@ -226,16 +317,80 @@ def test_parse_failure_is_attributed_to_the_failing_sibling():
 
     with dspy.context(lm=DummyLM([]), adapter=Adapter()):
         data = bootstrap_trace_data(
-            Program(), [dspy.Example(q="root").with_inputs("q")], capture_execution=True, num_threads=1,
+            Program(), [dspy.Example(q="root").with_inputs("q")], capture_execution=record, num_threads=1,
         )[0]
-    context = dspy.MetricContext("feedback", trace=data["trace"], target=1, execution=data["execution"])
-    failed = context.execution.resolve(context.target_ref)
-    assert failed["component_name"] == "second"
-    assert failed["error"]["type"] == "AdapterParseError"
-    inputs = data["trace"][1][1]
+    call = data["trace"][1]
+    assert call.component_name == "second"
+    assert isinstance(call.exception, AdapterParseError)
+    inputs = call.inputs
     assert inputs == {"q": "second", "history": history}
     assert inputs["history"] is history
-    assert isinstance(failed["inputs"]["kwargs"]["history"], dict)
+    if record:
+        context = dspy.MetricContext("feedback", trace=data["trace"], target=1, execution=data["execution"])
+        failed = context.execution.resolve(context.target_ref)
+        assert failed["component_name"] == "second"
+        assert failed["error"]["type"] == "AdapterParseError"
+        assert isinstance(failed["inputs"]["kwargs"]["history"], dict)
+    else:
+        assert "execution" not in data
     messages = dspy.ChatAdapter().format(Chat, demos=[], inputs=inputs)
     assert "prior" in messages[1]["content"]
     assert "second" in messages[-1]["content"]
+
+
+@pytest.mark.parametrize("record", [False, True])
+def test_simba_strategies_use_collector_relative_names_across_copies(record):
+    from dspy.teleprompt.simba_utils import append_a_demo, append_a_rule, wrap_program
+
+    prompts = []
+
+    class Observer(BaseCallback):
+        def on_start(self, call):
+            arguments = call.arguments.get("kwargs", {})
+            if "better_program_trajectory" in arguments:
+                prompts.append(arguments)
+
+    class Program(dspy.Module):
+        def __init__(self):
+            self.first = dspy.Predict("q -> a")
+            self.second = dspy.Predict("q -> a")
+
+        def forward(self, q):
+            self.first(q="first-1")
+            self.second(q="second")
+            return self.first(q="first-2")
+
+    class Outer(dspy.Module):
+        def __init__(self):
+            self.program = Program()
+
+        def forward(self):
+            bucket = []
+            for output, score in (("good", 0.9), ("bad", 0.1)):
+                candidate = self.program.deepcopy()
+                candidate.set_lm(DummyLM([{"a": output}] * 3))
+
+                def metric(gold, pred, score=score):
+                    return score
+
+                bucket.append(wrap_program(candidate, metric)(dspy.Example(q="root").with_inputs("q")))
+            assert append_a_demo(None)(
+                bucket, self.program, name2predictor=dict(self.program.named_predictors()), batch_10p_score=0.2,
+            )
+            assert append_a_rule(
+                bucket, self.program, batch_10p_score=0.2, batch_90p_score=0.8,
+                prompt_model=DummyLM([{"discussion": "test", "module_advice": {"first": "First rule"}}]),
+            )
+
+    outer = Outer()
+    with dspy.context(callbacks=[Observer()]), dspy.capture_execution(outer) if record else nullcontext():
+        outer()
+    assert [(demo.q, demo.a) for demo in outer.program.first.demos] == [("first-2", "good")]
+    assert [(demo.q, demo.a) for demo in outer.program.second.demos] == [("second", "good")]
+    assert outer.program.first.signature.instructions.endswith("First rule")
+    assert len(prompts) == 1
+    for key, output in (("better_program_trajectory", "good"), ("worse_program_trajectory", "bad")):
+        assert json.loads(prompts[0][key]) == [
+            {"module_name": name, "inputs": {"q": q}, "outputs": {"a": output}}
+            for name, q in (("first", "first-1"), ("second", "second"), ("first", "first-2"))
+        ]

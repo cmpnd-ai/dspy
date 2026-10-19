@@ -10,6 +10,12 @@ def metric(example_or_inputs, prediction, *, metric_context): ...
 evidence it already has. Results remain caller-specific. No recorder, exporter, new trace identity,
 History API, or universal verdict is necessary for this contract.
 
+**Migration policy:** preserving legacy metric signatures is no longer a design constraint.
+The [migrating-dspy-metrics skill](.agents/skills/migrating-dspy-metrics/SKILL.md) guides application
+agents to the context-only contract, including direct callers, wrappers, and behavioral checks.
+The current implementation still contains the compatibility bridge; it is transitional code, not
+a requirement of the target API. This skill addition does not itself remove runtime support.
+
 ## Start from the decisions, not the signatures
 
 The pre-prototype baseline is `ee02b214ab2aa27c458e5379ac7882da02dd4be6`. These are the direct invocation
@@ -83,19 +89,20 @@ details, not new public settings or an identity API. Dynamic unnamed predictors,
 are not given stronger identity guarantees. Evidence cannot be required at every boundary without
 expanding this design into a different project.
 
-## Compatibility and migration
+## Context-only migration and current runtime behavior
 
-Only an explicitly declared `metric_context` parameter opts in, including a Module's `forward`.
-`**kwargs` alone does not opt in. Existing positional arguments, return shapes, exception policies,
-and built-ins remain unchanged in 3.x. In particular, `Prediction(score=False)` is truthy and a zero
-bootstrap threshold remains absent. This change must not silently fix those behaviors.
+The migration target requires `metric_context`, including on a Module's `forward`; do not add
+dual signatures by default. The current bridge detects an explicitly declared parameter, not
+`**kwargs`, and still preserves old positional calls and built-ins. These are implementation facts,
+not a promise to retain that bridge. Agents must distinguish signature changes from policy changes:
+`Prediction(score=False)` is truthy and a zero bootstrap threshold currently means absent. Resolve
+intended acceptance decisions explicitly instead of mechanically changing return truthiness.
 
 ```python
-# Works with both old direct callers and new DSPy callers.
-def metric(gold, pred, trace=None, *, metric_context=None):
+# Target contract: migrate direct callers as well as the metric.
+def metric(gold, pred, *, metric_context):
     score = float(gold.answer == pred.answer)
-    accept = metric_context.purpose == "accept" if metric_context else trace is not None
-    return score >= 0.8 if accept else score
+    return score >= 0.8 if metric_context.purpose == "accept" else score
 
 # Migrated GEPA metric: only feedback requests pay for a targeted critique.
 def gepa_metric(gold, pred, *, metric_context):
@@ -113,9 +120,10 @@ def efficient(gold, pred, *, metric_context):
 
 The Flex example requires Flex's evidence guarantee; it is not a portable cost metric for Evaluate.
 Old `program_trace` metrics fail with a migration message. Ordinary legacy Flex metrics still work.
-For 4.0, context-only metrics can become the default after a separate compatibility decision;
-dual-contract metrics above provide an incremental path. No deprecation warnings or broad legacy
-removals are part of this draft.
+Use the migration skill to update projects to the target contract rather than preserving every old
+calling convention in DSPy. No release, dependency upgrade, or runtime removal is performed by
+adding the skill. Removing the bridge and migrating DSPy's remaining internal callers/built-ins
+remain implementation work; the earlier compatibility replay records the current bridge's behavior.
 
 ## What this deletes from the previous prototype
 

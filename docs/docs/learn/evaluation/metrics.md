@@ -143,15 +143,15 @@ def validate_hops(example, pred, trace=None):
 
 ## Experimental: explicit metric requests
 
-Existing metrics keep their calling conventions. New metrics can explicitly declare
-`metric_context` to separate the question being asked from available trace evidence:
+The target API explicitly declares `metric_context` to separate the question being asked
+from available trace evidence. Migrate metrics and their direct callers together:
 
 ```python
-def metric(gold, pred, trace=None, *, metric_context=None):
+def metric(gold, pred, *, metric_context):
     score = float(gold.answer == pred.answer)
-    # Legacy direct callers can still use trace as their mode switch.
-    accept = metric_context.purpose == "accept" if metric_context else trace is not None
-    return score >= 0.8 if accept else score
+    return score >= 0.8 if metric_context.purpose == "accept" else score
+
+score = metric(gold, pred, metric_context=dspy.MetricContext("score"))
 ```
 
 `dspy.MetricContext` contains:
@@ -178,5 +178,17 @@ on `forward`. For a fully migrated metric, remove the legacy `trace` argument an
 acceptance, or the existing `Prediction(score=..., feedback=...)` for GEPA feedback.
 The bridge does not coerce results, apply thresholds, or retry exceptions. Legacy
 truthiness is unchanged: notably, `Prediction(score=False)` is truthy. Built-in metrics
-are not silently migrated. Context-only metrics can support a future major-release
-migration without requiring existing users to change now.
+are not silently migrated by the current bridge. That bridge still accepts legacy metrics;
+it is not a requirement of the target API.
+
+### Agent-assisted migration
+
+The repository includes `.agents/skills/migrating-dspy-metrics/SKILL.md`. Copy the
+`migrating-dspy-metrics` directory into your project's `.agents/skills/` (or your agent's
+supported skill directory), then ask: **"Use migrating-dspy-metrics to migrate our DSPy
+metrics and direct callers to the context-only API."**
+
+The skill checks the target DSPy API before editing, follows metrics through wrappers and
+optimizers, and tests scoring, acceptance, and feedback separately. It does not add legacy
+signature fallbacks by default. It also identifies behavioral decisions a signature rewrite
+cannot settle, such as a false-valued Prediction that previously admitted demonstrations.

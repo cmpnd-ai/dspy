@@ -147,7 +147,7 @@ class _Capture:
                 "span_id": call_id,
                 "parent_span_id": parent if parent in self._spans else None,
                 "kind": "predict" if isinstance(instance, Predict) else kind,
-                "name": type(instance).__qualname__,
+                "name": instance.name if kind == "tool" else type(instance).__qualname__,
                 "component_name": self._names.get(instance) if hasattr(instance, "named_sub_modules") else None,
                 "start_time": time.time(),
                 "end_time": None,

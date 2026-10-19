@@ -34,6 +34,7 @@ def test_capture_shares_callback_ids_but_not_callback_configuration_or_payload_r
     root, tool = record.spans
     assert observed == [root["span_id"]]
     assert tool["parent_span_id"] == root["span_id"]
+    assert tool["name"] == "increment"
     assert tool["outputs"] == 4
     assert root["outputs"] == {"values": ["before"]}
     detached = record.to_dict()

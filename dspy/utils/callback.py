@@ -369,7 +369,7 @@ def with_callbacks(fn):
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
                 if capture is not None:
-                    capture.end(call_id, results, exception)
+                    capture.end(call_id, results, exception, kwargs)
                 _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
         return async_wrapper
@@ -402,7 +402,7 @@ def with_callbacks(fn):
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
                 if capture is not None:
-                    capture.end(call_id, results, exception)
+                    capture.end(call_id, results, exception, kwargs)
                 _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
         return sync_wrapper

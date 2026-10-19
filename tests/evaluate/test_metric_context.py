@@ -134,16 +134,15 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
 
     class Program(dspy.Module):
         def __init__(self):
-            self.first = dspy.Predict("q -> a")
-            self.sibling = dspy.Predict("q -> a")
+            self.steps = {"first": dspy.Predict("q -> a"), "sibling": dspy.Predict("q -> a")}
 
         def forward(self, q):
-            self.first(q="first call")
-            self.sibling(q="sibling call")
-            return self.first(q="last call")
+            self.steps["first"](q="first call")
+            self.steps["sibling"](q="sibling call")
+            return self.steps["first"](q="last call")
 
     feedback_results = []
-    component_name = "module.first" if strategy else "first"
+    component_name = ("module." if strategy else "") + "steps['first']"
 
     def metric(gold, pred, *, metric_context):
         if metric_context.purpose == "score":

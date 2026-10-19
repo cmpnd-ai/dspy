@@ -202,6 +202,13 @@ async def test_async_and_nested_capture_boundaries_are_isolated():
 def test_parse_failure_is_attributed_to_the_failing_sibling():
     from dspy.utils.exceptions import AdapterParseError
 
+    class Chat(dspy.Signature):
+        q: str = dspy.InputField()
+        history: dspy.History = dspy.InputField()
+        a: str = dspy.OutputField()
+
+    history = dspy.History(messages=[{"q": "prior", "a": "past"}])
+
     class Adapter(dspy.ChatAdapter):
         def __call__(self, lm, lm_kwargs, signature, demos, inputs):
             if inputs["q"] == "second":
@@ -210,12 +217,12 @@ def test_parse_failure_is_attributed_to_the_failing_sibling():
 
     class Program(dspy.Module):
         def __init__(self):
-            self.first = dspy.Predict("q -> a")
-            self.second = dspy.Predict("q -> a")
+            self.first = dspy.Predict(Chat)
+            self.second = dspy.Predict(Chat)
 
         def forward(self, q):
-            self.first(q="first")
-            return self.second(q="second")
+            self.first(q="first", history=history)
+            return self.second(q="second", history=history)
 
     with dspy.context(lm=DummyLM([]), adapter=Adapter()):
         data = bootstrap_trace_data(
@@ -225,4 +232,10 @@ def test_parse_failure_is_attributed_to_the_failing_sibling():
     failed = context.execution.resolve(context.target_ref)
     assert failed["component_name"] == "second"
     assert failed["error"]["type"] == "AdapterParseError"
-    assert data["trace"][1][1] == {"q": "second"}
+    inputs = data["trace"][1][1]
+    assert inputs == {"q": "second", "history": history}
+    assert inputs["history"] is history
+    assert isinstance(failed["inputs"]["kwargs"]["history"], dict)
+    messages = dspy.ChatAdapter().format(Chat, demos=[], inputs=inputs)
+    assert "prior" in messages[1]["content"]
+    assert "second" in messages[-1]["content"]

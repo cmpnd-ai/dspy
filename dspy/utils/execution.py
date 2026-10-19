@@ -124,6 +124,10 @@ class _Capture:
     def _register(self, program):
         for name, module in program.named_sub_modules():
             self._names[module] = name.removeprefix("self.")
+        # Optimizers address predictors through named_predictors(), whose dictionary
+        # paths differ from named_sub_modules(). Preserve that canonical spelling.
+        for name, predictor in program.named_predictors():
+            self._names[predictor] = name
 
     def inherit_names(self, original, copied):
         """A retry wrapper knows the provenance of its copy; a signature does not."""
@@ -156,13 +160,15 @@ class _Capture:
                 "error": None,
             }
 
-    def end(self, call_id, outputs, exception):
+    def end(self, call_id, outputs, exception, inputs):
         with self._lock:
             if self._closed or call_id not in self._spans:
                 return
             if exception is not None and self._spans[call_id]["kind"] == "predict":
                 if getattr(exception, "_execution_ref", None) is None:
                     exception._execution_ref = ExecutionRef(self.trace_id, call_id)
+                    # Failed demonstration tuples need typed values, not the JSON view.
+                    exception._execution_inputs = inputs
             if hasattr(outputs, "toDict"):
                 outputs = outputs.toDict()
             self._spans[call_id].update(

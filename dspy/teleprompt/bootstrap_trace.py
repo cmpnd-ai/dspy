@@ -95,7 +95,7 @@ def bootstrap_trace_data(
                 failed_ref = getattr(e, "_execution_ref", None)
                 failed_span = capture.trace.resolve(failed_ref) if capture is not None and failed_ref else None
                 if failed_span is not None:
-                    failed_inputs = failed_span["inputs"]["kwargs"]
+                    failed_inputs = e._execution_inputs
                 for name, pred in program.named_predictors():
                     if (name == failed_span["component_name"] if failed_span else pred.signature == failed_signature):
                         found_pred = pred

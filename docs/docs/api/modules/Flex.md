@@ -72,7 +72,12 @@ A common goal with `Flex` is to push work out of the LM and into deterministic c
 ```python
 def metric(gold, pred, *, metric_context):
     correct = getattr(pred, "total_cents", None) == gold.total_cents
-    tokens = sum(usage.get("total_tokens", 0) for usage in metric_context.usage.values())
+    tokens = 0
+    for counts in metric_context.usage.values():
+        total = counts.get("total_tokens")
+        if total is None:
+            total = counts["prompt_tokens"] + counts["completion_tokens"]
+        tokens += total
     score = max(0.0, float(correct) - tokens / 100000)
     fb = f"{'Correct' if correct else 'Wrong'} — {tokens} reported tokens. Settle clear cases in Python."
     return dspy.Prediction(score=score, feedback=fb)

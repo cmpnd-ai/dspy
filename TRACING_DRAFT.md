@@ -114,7 +114,12 @@ def gepa_metric(gold, pred, *, metric_context):
 
 # Experimental Flex exception: replace program_trace now, rather than migrate twice.
 def efficient(gold, pred, *, metric_context):
-    tokens = sum(u.get("total_tokens", 0) for u in metric_context.usage.values())
+    tokens = 0
+    for counts in metric_context.usage.values():
+        total = counts.get("total_tokens")
+        if total is None:
+            total = counts["prompt_tokens"] + counts["completion_tokens"]
+        tokens += total
     return float(gold.answer == pred.answer) - tokens / 100000
 ```
 

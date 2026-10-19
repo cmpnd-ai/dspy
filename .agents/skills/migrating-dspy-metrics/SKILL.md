@@ -131,12 +131,19 @@ def token_budget(gold, pred, *, metric_context):
     usage = metric_context.usage
     if usage is None:
         raise ValueError("This metric needs candidate usage, as supplied by Flex evaluation")
-    tokens = sum(model_usage.get("total_tokens", 0) for model_usage in usage.values())
+    tokens = 0
+    for counts in usage.values():
+        total = counts.get("total_tokens")
+        if total is None:
+            total = counts["prompt_tokens"] + counts["completion_tokens"]
+        tokens += total
     return float(gold.answer == pred.answer) - tokens / 100000
 ```
 
 None means unavailable; empty trace/usage means nothing was recorded. Do not use `or {}` or `or []`
-to turn unavailable evidence into free execution. Reported usage is not an invoice or proof every
+to turn unavailable evidence into free execution. The example accepts a reported total (including
+zero) or both component counts; incomplete counts fail rather than defaulting to zero.
+Reported usage is not an invoice or proof every
 provider reported tokens. Tuple length counts predictor steps, not LM requests: cache hits still
 produce steps. Preserve a deliberate predictor-step penalty; changing it to a token penalty changes
 units and requires an explicit policy. Never relabel tuple length as a request count.

@@ -4,6 +4,8 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from dspy.utils.execution import ExecutionRef, ExecutionTrace
+
 
 @dataclass(frozen=True)
 class MetricContext:
@@ -20,10 +22,21 @@ class MetricContext:
     component_name: str | None = None
     target: int | None = None
     usage: dict | None = None
+    execution: ExecutionTrace | None = None
 
     def __post_init__(self):
         if self.trace is not None:
             object.__setattr__(self, "trace", tuple(self.trace))
+
+    @property
+    def target_ref(self) -> ExecutionRef | None:
+        """Durable identity of the selected predictor occurrence, when recorded."""
+        if self.execution is None or self.trace is None or self.target is None:
+            return None
+        ref = getattr(self.trace[self.target][2], "_execution_ref", None)
+        if ref is not None and ref.trace_id == self.execution.trace_id:
+            return ref
+        return None
 
 
 def accepts_metric_context(metric):

@@ -372,10 +372,13 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     module_score = module_score["score"]
 
                 if accepts_metric_context(self.metric_fn):
-                    trace_instances = [
-                        (index, step) for index, (step, name) in enumerate(zip(trace, data.get("trace_names", [])))
-                        if name == pred_name
-                    ]
+                    trace_instances = []
+                    execution = data.get("execution")
+                    if execution is not None:
+                        for index, step in enumerate(trace):
+                            ref = getattr(step[2], "_execution_ref", None)
+                            if ref is not None and execution.resolve(ref)["component_name"] == pred_name:
+                                trace_instances.append((index, step))
                 else:
                     # Preserve legacy matching until callers explicitly migrate.
                     trace_instances = [(index, t) for index, t in enumerate(trace) if t[0].signature.equals(module.signature)]
@@ -452,6 +455,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     if accepts_metric_context(feedback_fn):
                         context_kwargs["metric_context"] = MetricContext(
                             "feedback", trace=trace, component_name=pred_name, target=target, usage=data.get("usage"),
+                            execution=data.get("execution"),
                         )
                     fb = feedback_fn(
                         predictor_output=outputs,

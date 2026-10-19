@@ -245,6 +245,9 @@ class Predict(Module, Parameter):
 
     def _forward_postprocess(self, completions, signature, **kwargs):
         pred = Prediction.from_completions(completions, signature=signature)
+        capture = settings.get("_execution_capture")
+        if capture is not None:
+            pred._execution_ref = capture.predictor_ref()
         if kwargs.pop("_trace", True) and settings.trace is not None and settings.max_trace_size > 0:
             trace = settings.trace
             if len(trace) >= settings.max_trace_size:

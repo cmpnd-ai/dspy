@@ -109,10 +109,9 @@ class Refine(Module):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
             mod = self.module.deepcopy()
             mod.set_lm(lm_)
-            names = dspy.settings.get("_metric_predictor_names")
-            if names is not None:
-                originals = dict(self.module.named_predictors())
-                names.update((p, names.get(originals[name])) for name, p in mod.named_predictors())
+            capture = dspy.settings.get("_execution_capture")
+            if capture is not None:
+                capture.inherit_names(self.module, mod)
 
             predictor2name = {predictor: name for name, predictor in mod.named_predictors()}
             signature2name = {predictor.signature: name for name, predictor in mod.named_predictors()}
@@ -140,7 +139,9 @@ class Refine(Module):
                     # TODO: Remove the hint from the trace, if it's there.
 
                     # NOTE: Not including the trace of reward_fn.
-                    reward = self.reward_fn(kwargs, outputs, MetricContext("score", trace=trace))
+                    reward = self.reward_fn(kwargs, outputs, MetricContext(
+                        "score", trace=trace, execution=capture.trace if capture is not None else None,
+                    ))
 
                 if reward > best_reward:
                     best_reward, best_pred, best_trace = reward, outputs, trace

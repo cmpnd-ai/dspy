@@ -165,10 +165,20 @@ score = metric(gold, pred, metric_context=dspy.MetricContext("score"))
 - `component_name` and `target`: optional GEPA component name and occurrence index
   into `trace`. Use `metric_context.trace[metric_context.target]` for that step.
 - `usage`: optional reported non-cached token totals by model, not invoice accounting.
+- `execution`: optional detached `ExecutionTrace`. Its invocation IDs distinguish
+  repeated calls and copied attempts. `target_ref` identifies the selected predictor
+  occurrence when it was recorded; it is otherwise `None`.
 
 Evidence availability never determines purpose. Evaluate does not capture a trace for
 this API; existing bootstrap/ranking collectors supply tuples. Flex additionally supplies
 usage even when trajectories are not retained. Predictor tuples are not provider requests.
+
+Contextual bootstrap/GEPA and Flex capture candidate execution before the outer metric
+runs. For standalone inspection, use `with dspy.capture_execution(program) as capture`,
+then read `capture.trace`. Records include observed losing attempts; demonstration tuples
+still select winners. Records are JSON snapshots, not replay state or conversation history.
+`execution.annotate(text, span_id=..., output_path="/answer")` creates separate feedback
+addressed to an invocation's output; it does not change the metric's return contract.
 
 Only a declared parameter opts in; `**kwargs` alone does not. Module metrics declare it
 on `forward`. For a fully migrated metric, remove the legacy `trace` argument and require

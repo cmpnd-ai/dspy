@@ -249,7 +249,8 @@ def evaluate_with_trace(
             try:
                 result = call_metric(
                     metric_fn, t["example"], pred,
-                    MetricContext("score", trace=t["trace"], usage=t.get("usage")), legacy_kwargs=legacy_kwargs,
+                    MetricContext("score", trace=t["trace"], usage=t.get("usage"), execution=t.get("execution")),
+                    legacy_kwargs=legacy_kwargs,
                 )
             except Exception as e:
                 logger.warning(

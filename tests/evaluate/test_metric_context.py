@@ -154,6 +154,9 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
         assert len(metric_context.trace) == 3
         step = metric_context.trace[metric_context.target]
         assert step[1]["q"] == ("last call" if target == 2 else "first call")
+        selected = metric_context.execution.span(metric_context.target_ref.span_id)
+        assert selected["component_name"] == component_name
+        assert selected["outputs"] == dict(step[2])
         result = dspy.Prediction(score=0.9, feedback=f"Improve {step[1]['q']}")
         feedback_results.append(result)
         return result

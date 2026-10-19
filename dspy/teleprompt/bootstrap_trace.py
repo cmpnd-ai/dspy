@@ -1,9 +1,7 @@
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
-from types import MethodType
 from typing import Any, Callable, TypedDict
-from weakref import WeakKeyDictionary
 
 import dspy
 from dspy.evaluate.evaluate import Evaluate
@@ -12,6 +10,7 @@ from dspy.primitives.example import Example
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.utils.exceptions import AdapterParseError, LMError
+from dspy.utils.execution import capture_execution as record_execution
 from dspy.utils.usage_tracker import track_usage
 
 logger = logging.getLogger(__name__)
@@ -45,6 +44,7 @@ def bootstrap_trace_data(
     capture_crashes: bool = False,
     metric_purpose: str = "score",
     capture_usage: bool = False,
+    capture_execution: bool = False,
 ) -> list[TraceData]:
     # Return a list of dicts with the following keys: example_ind, example, prediction, trace, and score
     # (if metric != None)
@@ -58,29 +58,30 @@ def bootstrap_trace_data(
     )
 
     def wrapped_metric(example, prediction, trace=None):
-        prediction, candidate_trace, usage = prediction
+        prediction, candidate_trace, usage, execution = prediction
         if isinstance(prediction, FailedPrediction):
             return prediction.format_reward or format_failure_score
         return call_metric(
-            metric, example, prediction, MetricContext(metric_purpose, trace=candidate_trace, usage=usage),
+            metric, example, prediction,
+            MetricContext(metric_purpose, trace=candidate_trace, usage=usage, execution=execution),
             legacy_args=(trace,),
         ) if metric else True
 
-    # Use `object.__getattribute__` to bypass the custom hook `Module.__getattribute__` so that we avoid
-    # the warning that `forward` is not accessed through `__call__`.
-    original_forward = object.__getattribute__(program, "forward")
+    record = capture_execution or accepts_metric_context(metric) or capture_usage
     capture_settings = {}
-    if accepts_metric_context(metric) or capture_usage:
-        capture_settings["_metric_predictor_names"] = WeakKeyDictionary({p: name for name, p in program.named_predictors()})
     if capture_usage:
         # Candidate totals include joined DSPy workers, not independent per-worker snapshots.
         capture_settings["_share_usage_tracker"] = True
 
-    def patched_forward(program_to_use: Module, **kwargs):
-        with dspy.context(trace=[], **capture_settings), track_usage() if capture_usage else nullcontext() as usage:
+    def collect(**kwargs):
+        with (
+            dspy.context(trace=[], **capture_settings),
+            track_usage() if capture_usage else nullcontext() as usage,
+            record_execution(program) if record else nullcontext() as capture,
+        ):
             try:
-                prediction = original_forward(**kwargs)
-                return prediction, dspy.settings.trace.copy(), usage.get_total_tokens() if usage else None
+                prediction = program(**kwargs)
+                return prediction, dspy.settings.trace.copy(), usage.get_total_tokens() if usage else None, capture
             except AdapterParseError as e:
                 completion_str = e.lm_response
                 parsed_result = e.parsed_result
@@ -91,8 +92,12 @@ def bootstrap_trace_data(
                 expected = list(failed_signature.output_fields.keys())
 
                 found_pred = None
-                for pred in program_to_use.predictors():
-                    if pred.signature == failed_signature:
+                failed_ref = getattr(e, "_execution_ref", None)
+                failed_span = capture.trace.resolve(failed_ref) if capture is not None and failed_ref else None
+                if failed_span is not None:
+                    failed_inputs = failed_span["inputs"]["kwargs"]
+                for name, pred in program.named_predictors():
+                    if (name == failed_span["component_name"] if failed_span else pred.signature == failed_signature):
                         found_pred = pred
                         break
                 if found_pred is None:
@@ -108,6 +113,8 @@ def bootstrap_trace_data(
                     )
                 else:
                     failed_pred = FailedPrediction(completion_text=completion_str, format_reward=format_failure_score)
+                if failed_ref is not None:
+                    failed_pred._execution_ref = failed_ref
 
                 trace.append(
                     (
@@ -123,7 +130,7 @@ def bootstrap_trace_data(
                         "the adapter's formatting."
                     )
 
-                return failed_pred, trace, usage.get_total_tokens() if usage else None
+                return failed_pred, trace, usage.get_total_tokens() if usage else None, capture
             except LMError:
                 raise
             except Exception as e:
@@ -133,25 +140,24 @@ def bootstrap_trace_data(
                                type(e).__name__, e)
                 return (
                     FailedPrediction(completion_text=f"{type(e).__name__}: {e}"), dspy.settings.trace.copy(),
-                    usage.get_total_tokens() if usage else None,
+                    usage.get_total_tokens() if usage else None, capture,
                 )
 
-    program.forward = MethodType(patched_forward, program)
+    class CapturedProgram(Module):
+        def forward(self, **kwargs):
+            prediction, trace, usage, capture = collect(**kwargs)
+            return prediction, trace, usage, capture.trace if capture is not None else None
 
-    try:
-        results = evaluator(
-            program,
-            metric=wrapped_metric,
-            callback_metadata=callback_metadata,
-        ).results
-    finally:
-        program.forward = original_forward
+    results = evaluator(
+        CapturedProgram(),
+        metric=wrapped_metric,
+        callback_metadata=callback_metadata,
+    ).results
 
     data = []
-    predictor_names = capture_settings.get("_metric_predictor_names")
     for example_ind, (example, prediction, score) in enumerate(results):
         try:
-            prediction, trace, usage = prediction
+            prediction, trace, usage, execution = prediction
         except ValueError as ve:
             # TODO(GRPO Team): Often during GRPO bootstrapping, the LLM response does not follow dspy formatting. This
             # leads to a value error. To reproduce this issue, try Qwen/Qwen2.5-Coder-0.5B-Instruct with MATH dataset.
@@ -166,8 +172,8 @@ def bootstrap_trace_data(
             else:
                 continue
         data_dict = {"example": example, "prediction": prediction, "trace": trace, "example_ind": example_ind}
-        if predictor_names is not None:
-            data_dict["trace_names"] = [predictor_names.get(step[0]) for step in trace]
+        if execution is not None:
+            data_dict["execution"] = execution
         if capture_usage:
             data_dict["usage"] = usage
         if metric:

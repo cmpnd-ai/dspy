@@ -309,13 +309,16 @@ class BaseCallback:
 def with_callbacks(fn):
     """Decorator to add callback functionality to instance methods."""
 
-    def _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs):
+    def _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs, capture):
         """Execute all start callbacks for a function call."""
         inputs = inspect.getcallargs(fn, instance, *args, **kwargs)
         if "self" in inputs:
             inputs.pop("self")
         elif "instance" in inputs:
             inputs.pop("instance")
+        if capture is not None:
+            kind = _get_on_start_handler(BaseCallback, instance, fn).__name__.removeprefix("on_").removesuffix("_start")
+            capture.start(call_id, instance, kind, inputs)
         for callback in callbacks:
             try:
                 _get_on_start_handler(callback, instance, fn)(call_id=call_id, instance=instance, inputs=inputs)
@@ -343,12 +346,13 @@ def with_callbacks(fn):
         @functools.wraps(fn)
         async def async_wrapper(instance, *args, **kwargs):
             callbacks = _get_active_callbacks(instance)
-            if not callbacks:
+            capture = dspy.settings.get("_execution_capture")
+            if not callbacks and capture is None:
                 return await fn(instance, *args, **kwargs)
 
             call_id = uuid.uuid4().hex
 
-            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs)
+            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs, capture)
 
             # Active ID must be set right before the function is called, not before calling the callbacks.
             parent_call_id = callback_context.ACTIVE_CALL_ID.get()
@@ -364,6 +368,8 @@ def with_callbacks(fn):
                 raise
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
+                if capture is not None:
+                    capture.end(call_id, results, exception)
                 _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
         return async_wrapper
@@ -373,12 +379,13 @@ def with_callbacks(fn):
         @functools.wraps(fn)
         def sync_wrapper(instance, *args, **kwargs):
             callbacks = _get_active_callbacks(instance)
-            if not callbacks:
+            capture = dspy.settings.get("_execution_capture")
+            if not callbacks and capture is None:
                 return fn(instance, *args, **kwargs)
 
             call_id = uuid.uuid4().hex
 
-            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs)
+            _execute_start_callbacks(instance, fn, call_id, callbacks, args, kwargs, capture)
 
             # Active ID must be set right before the function is called, not before calling the callbacks.
             parent_call_id = callback_context.ACTIVE_CALL_ID.get()
@@ -394,6 +401,8 @@ def with_callbacks(fn):
                 raise
             finally:
                 callback_context.ACTIVE_CALL_ID.set(parent_call_id)
+                if capture is not None:
+                    capture.end(call_id, results, exception)
                 _execute_end_callbacks(instance, fn, call_id, results, exception, callbacks)
 
         return sync_wrapper

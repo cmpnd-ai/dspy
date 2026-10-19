@@ -49,31 +49,361 @@ system establishes a requirement for DSPy to own persistence or in-flight agent 
    late workers rewriting a finished record. Parse failures now retain the exact failing sibling
    and its inputs when execution capture is enabled, instead of inferring identity from signature.
 
-The final design deliberately keeps the two contracts separate:
-
-```python
-def metric(example_or_inputs, prediction, *, metric_context): ...
-
-with dspy.capture_execution(program) as capture:
-    prediction = program(question="...")
-execution = capture.trace
-root = execution.spans[0]  # This example has one root; consumers must not assume that generally.
-feedback = execution.annotate(
-    "Support this claim", span_id=root["span_id"], output_path="/answer",
-)
-assert execution.resolve(feedback.target) == execution.span(root["span_id"])["outputs"]["answer"]
-```
-
-`MetricContext` says what answer the caller needs (`score`, `accept`, or `feedback`) and supplies
-evidence it already has. `ExecutionTrace` records observations; `ExecutionRef` addresses evidence;
-`Feedback` pairs a reference with content. Feedback is not a universal metric return type.
-Results remain caller-specific. No exporter, History API, universal verdict, or database is added.
-
 **Migration policy:** preserving legacy metric signatures is no longer a design constraint.
 The [migrating-dspy-metrics skill](.agents/skills/migrating-dspy-metrics/SKILL.md) guides application
 agents to the context-only contract, including direct callers, wrappers, and behavioral checks.
 The current implementation still contains the compatibility bridge; it is transitional code, not
 a requirement of the target API. Removing it is separate from testing execution capture.
+
+## What the implemented objects actually are
+
+There are two separate contracts: **observe an execution** and **ask a metric a question**.
+The metric can receive an execution record as evidence; it is not the owner of that record.
+The implementation lives in [`execution.py`](dspy/utils/execution.py) and
+[`metric_context.py`](dspy/evaluate/metric_context.py).
+
+| Object | Actual representation and lifetime | What consumers do with it |
+| --- | --- | --- |
+| `capture_execution(program=None)` | Context manager yielding a private `_Capture`: mutable span dictionary, lock, weak component-name map, and trace ID. Stored in DSPy's existing scoped settings while active. | Run work inside the scope; read `capture.trace`. Do not use the private recorder methods as an API. |
+| `ExecutionTrace` | Frozen dataclass holding a JSON string. Every `capture.trace` read makes a new detached snapshot. `to_dict()`, `spans`, and `span(id)` return fresh values. | Inspect, serialize, or hand evidence to another consumer without retaining live program objects. It is not a live subscription. |
+| A span | A plain dictionary inside that JSON record, not a new `Invocation` class. One observed call to an instrumented boundary. | Follow `parent_span_id`, inspect inputs/outputs/error, or select by kind/component. |
+| `ExecutionRef` | Frozen dataclass: `trace_id`, optional `span_id`, optional `output_path`. Contains no record or program object. | Address the whole record, one invocation, or a JSON Pointer into that invocation's output. Resolve against an explicitly supplied record. |
+| `MetricContext` | Frozen request dataclass: purpose plus optional tuple trace, target index/component name, usage, and execution snapshot. Tuple membership is frozen; tuple payloads and usage are not deeply immutable. | Decide whether to score, accept demonstrations, or produce feedback; use whatever evidence this caller supplies. `target_ref` derives a reference for the selected predictor occurrence. |
+| `Feedback` | Frozen dataclass containing only `target: ExecutionRef` and `content: str`. Created and validated by `execution.annotate(...)`. | Carry an annotation separately from execution and metric results. No implicit storage, dispatch, channel, author, or revision behavior. |
+
+There is no public `ExecutionContext` or `TraceExecution` type in this revision. The active owner is
+the capture handle; the readable value is `ExecutionTrace`; the metric request is `MetricContext`.
+`Feedback` does not replace a metric's `Prediction(score=..., feedback=...)` return value.
+
+An **execution scope** is whatever code ran inside one capture context. It can contain several
+roots. A **span** is one invocation, not one module definition, signature, agent turn, or provider
+request. Calling one predictor twice creates two spans. A predictor using a cached LM can still
+create predictor/LM-boundary observations without a new provider request. Arbitrary Python helper
+functions do not become spans; they need an existing instrumented DSPy boundary.
+
+The record shape is currently this, with IDs and times shortened for illustration:
+
+```json
+{
+  "trace_id": "execution-A",
+  "closed": true,
+  "spans": [{
+    "span_id": "call-B",
+    "parent_span_id": null,
+    "kind": "module",
+    "name": "Answer",
+    "component_name": "self",
+    "start_time": 100.0,
+    "end_time": 100.1,
+    "inputs": {"args": [], "kwargs": {"question": "evidence"}},
+    "outputs": {"answer": "EVIDENCE"},
+    "error": null
+  }]
+}
+```
+
+Kinds come from callback dispatch: module, predict, lm, tool, adapter format/parse, interpreter
+operations, evaluate, and compile. Names are class names except tools, which retain their declared
+name. Component paths identify known module ownership, not occurrence identity. Inputs follow
+the decorated method's bound arguments, so their shape varies by boundary. Times are wall-clock
+seconds. Failure is an error type/message; an unfinished span has `end_time=None`.
+
+`closed=True` means the **scope is sealed**, not that every worker succeeded or finished. A snapshot
+taken while running never updates itself. Nested capture scopes are isolated; they are not merged
+into the outer record. These are implemented semantics, not a proposed persistence/OTel schema.
+
+## The call stack records once and notifies callbacks separately
+
+For a normal `program(...)` call, [`with_callbacks`](dspy/utils/callback.py) already surrounds
+`Module.__call__`. The added recorder uses that boundary and its call ID:
+
+```text
+with capture_execution(program) as capture
+  program(question=...)
+    with_callbacks wrapper                         allocate call_id
+      capture.start(call_id, ...)                   record parent and input snapshot
+      callback.on_module_start(call_id, ...)        existing observers; raw objects
+      set ACTIVE_CALL_ID = call_id
+      Module.__call__
+        program.forward
+          predictor(...) / tool(...) / child(...)  same boundary for each child
+      restore parent's ACTIVE_CALL_ID              also when the call raises
+      capture.end(call_id, output, exception, kwargs)  record output/error snapshot
+      callback.on_module_end(call_id, ...)          same ID; existing observer protocol
+  scope exit                                       seal recorder, clear weak name map
+execution = capture.trace                          detached JSON-backed value
+```
+
+The async wrapper follows the same order around `await`. Existing DSPy worker propagation carries
+scoped settings and active call identity into joined workers; the recorder locks its shared state.
+`Parallel` is an executor, not an extra recorded module, so its children parent to the calling module.
+Arbitrary user-created threads do not get a new propagation guarantee.
+
+Callbacks are still synchronous lifecycle hooks, not a stream read back from `ExecutionTrace`.
+They work without capture, and capture works without callbacks. Disabling optional observers does
+not erase requested execution evidence. There is no generic event bus or replay of callbacks from
+a saved record. Code inside the capture scope is observed regardless of whether it is called a
+"candidate", "judge", or "tool"; boundaries, not metric purpose, determine inclusion.
+
+## Candidate collection closes before the outer metric runs
+
+[`bootstrap_trace_data`](dspy/teleprompt/bootstrap_trace.py) owns a candidate boundary per example.
+It wraps the program instead of changing its `forward` method:
+
+```text
+bootstrap_trace_data(program, dataset, metric=metric)
+  Evaluate(CapturedProgram(), wrapped_metric)
+    for each example (possibly in DSPy workers)
+      CapturedProgram.forward
+        collect
+          enter trace=[]; optional usage tracker; execution capture
+          program(**example.inputs())              candidate root and descendants
+          collect prediction, tuple trace, usage
+          exit contexts                            execution now sealed
+        return prediction, tuples, usage, execution snapshot
+      wrapped_metric
+        call_metric(metric, gold, pred, MetricContext("score", evidence...))
+          metric(gold, pred, metric_context=...)    OUTSIDE candidate capture
+    return rows containing prediction, trace, execution, optional usage/score
+```
+
+The evaluation wrapper itself starts outside the candidate capture. A separate outer callback SDK
+may observe evaluation and judging as well; that does not put them in this candidate's record.
+Returned row `trace` is still live predictor-tuple evidence; row `execution` is detached JSON.
+Callers that retain the entire row still retain tuple objects, even though the record itself does not.
+On a predictor failure, the boundary attaches the occurrence reference and original keyword inputs
+to the exception. Collection uses those typed inputs for the failed tuple, not the JSON record's
+copy: a `History` must remain a `History` when a training consumer calls the adapter again.
+
+| Entry point | What this draft actually supplies |
+| --- | --- |
+| Explicit `with capture_execution(...)` | Records instrumented work inside the scope; does not construct a `MetricContext` or enable token accounting. |
+| Plain `Evaluate` | `MetricContext("score")`; does not automatically capture/attach execution evidence. An ambient capture can observe the evaluation but is not injected into this context. |
+| `BootstrapFewShot` | Existing tuple evidence and explicit purpose; no automatic execution record. |
+| `bootstrap_trace_data` | Records when the metric declares `metric_context`, `capture_usage=True`, or `capture_execution=True`. |
+| Ordinary GEPA | Its trace-retaining evaluation uses the helper above; ordinary non-retaining evaluation uses `Evaluate`. Contextual component feedback receives the retained record and exact target. |
+| Contextual Flex evaluation | Collects execution and usage even when `capture_traces=False`; that flag controls returned trajectories, not evidence available to the metric. |
+| `BestOfN` / `Refine` reward | Tuple evidence plus a snapshot of an already-active capture, if any; does not itself enable capture. |
+
+## Consumer examples use the same observations for different decisions
+
+The Python blocks below run in order. They use deterministic tools and `DummyLM`, so the DSPy
+examples need no provider credentials. The ProAct block needs that optional external package.
+
+### An application captures and inspects a completed execution
+
+```python
+import json
+from dataclasses import asdict
+import dspy
+
+class Answer(dspy.Module):
+    def forward(self, question):
+        answer = dspy.Tool(lambda text: text.upper(), name="uppercase")(text=question)
+        return dspy.Prediction(answer=answer)
+
+program = Answer()
+with dspy.capture_execution(program) as capture:
+    prediction = program(question="evidence")
+execution = capture.trace
+root, = [span for span in execution.spans if span["parent_span_id"] is None]
+tool, = [span for span in execution.spans if span["kind"] == "tool"]
+assert tool["name"] == "uppercase" and tool["outputs"] == "EVIDENCE"
+assert tool["parent_span_id"] == root["span_id"]
+restored = dspy.ExecutionTrace.from_dict(json.loads(json.dumps(execution.to_dict())))
+assert restored.span(root["span_id"])["outputs"] == {"answer": "EVIDENCE"}
+```
+
+The single-root assertion belongs to this example, not the general API. No `Signature` was needed
+to observe this deterministic module. JSON inspection is useful even when there are zero predictor
+tuples; it does not imply the record contains enough environment state to rerun the program.
+
+### A metric receives a request, not a different kind of execution
+
+```python
+from dspy.teleprompt.bootstrap_trace import bootstrap_trace_data
+
+def metric(gold, pred, *, metric_context):
+    score = float(gold.answer == pred.answer)
+    if metric_context.purpose == "accept":
+        return score == 1.0
+    return score
+
+gold = dspy.Example(question="evidence", answer="EVIDENCE").with_inputs("question")
+rows = bootstrap_trace_data(program, [gold], metric=metric, num_threads=1)
+assert rows[0]["score"] == 1.0
+assert rows[0]["trace"] == []                  # No predictors, but real execution.
+assert len(rows[0]["execution"].spans) == 2
+assert rows[0]["execution"].to_dict()["closed"]
+```
+
+This metric ignores evidence it does not need. A cost-sensitive Flex metric can read
+`metric_context.usage`; it should not count spans to infer provider charges. A metric with its own
+LM judge runs after this candidate scope closes. Return values are still owned by each caller:
+numeric fitness, acceptance boolean, or GEPA's existing score/feedback object.
+
+### GEPA feedback addresses an occurrence, not an equal signature
+
+The actual feedback path is:
+
+```text
+DspyAdapter.make_reflective_dataset
+  decode each record once; group tuple occurrences by recorded component path
+  choose an occurrence (failure first; otherwise the existing sampling policy)
+  MetricContext("feedback", component_name=..., target=tuple_index, execution=...)
+  GEPA feedback_fn -> call_metric -> user's metric
+  use returned feedback text; retain program fitness as the score
+```
+
+Here is a runnable demonstration of that request using a real retained execution. The explicit
+`target=1` below stands in for GEPA's selection, not a new selection policy:
+
+```python
+from dspy.utils.dummies import DummyLM
+
+class Twice(dspy.Module):
+    def __init__(self):
+        self.solve = dspy.Predict("question -> answer")
+
+    def forward(self, question):
+        self.solve(question="first")
+        return self.solve(question=question)
+
+def critique(gold, pred, *, metric_context):
+    score = float(gold.answer == pred.answer)
+    if metric_context.purpose != "feedback":
+        return score
+    selected = metric_context.execution.resolve(metric_context.target_ref)
+    return dspy.Prediction(score=score, feedback=f"Review {selected['component_name']}: {selected['outputs']}")
+
+with dspy.context(lm=DummyLM([{"answer": "draft"}, {"answer": "EVIDENCE"}])):
+    row, = bootstrap_trace_data(Twice(), [gold], metric=critique, num_threads=1)
+context = dspy.MetricContext(
+    "feedback", trace=row["trace"], target=1, component_name="solve", execution=row["execution"],
+)
+selected = context.execution.resolve(context.target_ref)
+assert selected["inputs"]["kwargs"]["question"] == "evidence"
+assert selected["outputs"] == {"answer": "EVIDENCE"}
+assert "EVIDENCE" in critique(gold, row["prediction"], metric_context=context).feedback
+```
+
+That example records this topology (names at the left, span kinds at the right):
+
+```text
+Twice                                      module
+  solve, first invocation                  predict
+    ChatAdapter.format                     adapter_format
+    DummyLM call                           lm
+    ChatAdapter.parse                      adapter_parse
+  solve, second invocation                 predict
+    ChatAdapter.format                     adapter_format
+    DummyLM call                           lm
+    ChatAdapter.parse                      adapter_parse
+```
+
+The two `solve` calls share a predictor and signature, but not a span ID. Format, LM, and parse are
+children of each predictor call, not separate turns. This is one concrete adapter path; other
+adapters and fallback parsing can produce different children without changing the record model.
+Predictor component paths use the optimizer's `named_predictors()` spelling, including quoted
+dictionary keys such as `steps['answer']`; copied attempts inherit that same path.
+
+`target` is local to the selected tuple list; `target_ref` is the invocation address. Internally,
+Predict attaches a private `_execution_ref` to its Prediction, and `target_ref` reads that link.
+Consumers should use the context property, not depend on the private attribute. If no corresponding
+record was supplied, `target_ref` is `None`; this critique deliberately requires GEPA's evidence.
+
+### A future optimizer can collect evidence without defining a metric
+
+```python
+observations = bootstrap_trace_data(program, [gold], capture_execution=True, num_threads=1)
+record = observations[0]["execution"]
+operations = [
+    (span["name"], span["inputs"], span["outputs"], span["error"])
+    for span in record.spans if span["kind"] == "tool"
+]
+assert operations[0][0] == "uppercase"
+assert operations[0][2] == "EVIDENCE"
+```
+
+This is an implemented collection API, **not an implemented research optimizer**. That optimizer
+would own candidate IDs, experiment comparisons, storage/search, and deciding which operation to
+retry. It can retain only `record.to_dict()` to avoid holding the predictor objects in the row.
+
+### A delayed reviewer annotates output; ProAct owns learning state
+
+```python
+feedback = execution.annotate("Cite evidence", span_id=root["span_id"], output_path="/answer")
+wire = json.loads(json.dumps(asdict(feedback)))
+later = dspy.Feedback(dspy.ExecutionRef(**wire["target"]), wire["content"])
+assert restored.resolve(later.target) == "EVIDENCE"
+```
+
+`annotate` returns a value; it does not append feedback to the record or send it anywhere. The
+application must retain the matching record to resolve the reference later. A foreign execution,
+missing span, or invalid output pointer is rejected. `execution.annotate("Overall review")` targets
+the whole record; supplying only `span_id` targets the invocation rather than one output field.
+
+This small, explicit adapter preserves the target in ProAct's string feedback channel:
+
+```python
+from proact import FeedbackChannel, Ledger
+
+ledger = Ledger({"review": FeedbackChannel(description="Groundedness")})
+case = ledger.add_case({"question": "evidence"}, dict(prediction), producer="candidate-v1")
+event = ledger.add_feedback(case.id, "review", json.dumps(asdict(feedback)))
+payload = json.loads(event.content)
+assert restored.resolve(dspy.ExecutionRef(**payload["target"])) == "EVIDENCE"
+```
+
+This adapter is exercised against ProAct, not shipped inside DSPy. Case IDs, channels, record lookup,
+reviewer identity, and training policy remain external. ProAct currently rejects a second feedback
+entry for the same case/channel; this abstraction does not solve revision semantics for it.
+
+### An observer consumes lifecycle hooks, not the completed record
+
+```python
+from dspy.utils.callback import BaseCallback
+
+events = []
+class Observer(BaseCallback):
+    def on_tool_end(self, call_id, outputs, exception):
+        events.append((call_id, outputs))
+
+with dspy.context(callbacks=[Observer()]), dspy.capture_execution(program) as observed:
+    program(question="callbacks")
+call_id, output = events[0]
+assert observed.trace.span(call_id)["outputs"] == output == "CALLBACKS"
+```
+
+The observer sees the live output object; the record stores its converted snapshot. An observability
+provider can export start/end events without retaining this DSPy record. Conversely an offline
+consumer can use the record without running that provider. CMPND does not ingest `ExecutionTrace`
+directly: its independently allocated IDs need mapping (see the adapter findings below).
+
+## Retry stacks show why recorded work and selected demonstrations differ
+
+With an ambient capture, the existing BestOfN control flow looks like this:
+
+```text
+BestOfN.forward
+  copy candidate; transfer known component paths into capture's weak name map
+  attempt 1: candidate(...) -> predictor occurrence A -> prediction A + tuples A
+  reward(inputs, prediction A, context)              snapshot taken BEFORE this reward
+  attempt 2: candidate(...) -> predictor occurrence B -> prediction B + tuples B
+  reward(inputs, prediction B, context)              snapshot taken BEFORE this reward
+  select winner; append only winner's tuples to outer demonstration trace
+scope exit -> execution retains both attempts and any observed internal reward work
+```
+
+Both copied predictors may have the same `component_name`; their span IDs differ. The winner's
+tuple keeps its exact occurrence reference. Refine likewise transfers copy provenance; its advice
+generation can also be observed inside the scope.
+
+**Important boundary distinction:** the outer evaluation metric is excluded by candidate scope
+closure. A BestOfN reward or Refine advice call is *inside* the candidate and can be recorded. A
+reward's pre-call snapshot excludes that reward's upcoming work, but may contain earlier rewards
+and attempts; it is not an isolated per-attempt record. Usage collected around the whole candidate
+likewise includes internal work. No generic "judge filtering" policy is implemented.
 
 ## Start from the decisions, not the signatures
 

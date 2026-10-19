@@ -1,28 +1,21 @@
 """Bridge canonical events to DSPy's existing streaming listeners."""
 
 import json
-from dataclasses import asdict
 
 from dspy.clients.call_result import AttributeDict, attributes
-from dspy.dsp.utils.settings import settings
 
 
 class EngineChunk(AttributeDict):
     """Listener-facing chunk. Canonical assembly uses the original event."""
 
     def json(self):
-        data = dict(self)
-        if data.get("invocation") is not None:
-            data["invocation"] = asdict(data["invocation"])
-        return json.dumps(data)
+        return json.dumps(self)
 
 
 class ListenerBridge:
     def __init__(self, model, predict_id=None):
         self.model = model
         self.predict_id = predict_id
-        # Predict captured this before entering adapters/LMs or background producers.
-        self.invocation = settings.get("caller_predict_invocation") if predict_id is not None else None
         self.id = None
         self.tools = {}
 
@@ -65,8 +58,5 @@ class ListenerBridge:
         else:
             return None
         delta.setdefault("content", None)
-        chunk = EngineChunk(id=self.id, model=self.model, predict_id=self.predict_id,
-                            choices=[attributes({"index": 0, "delta": delta, "finish_reason": finish})])
-        if self.invocation is not None:
-            chunk["invocation"] = self.invocation
-        return chunk
+        return EngineChunk(id=self.id, model=self.model, predict_id=self.predict_id,
+                           choices=[attributes({"index": 0, "delta": delta, "finish_reason": finish})])

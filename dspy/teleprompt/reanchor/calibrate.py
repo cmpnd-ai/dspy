@@ -42,6 +42,7 @@ import dspy
 from dspy.adapters.decision import record_evidence
 from dspy.adapters.decision_state import DecisionState
 from dspy.adapters.types.decision import Choice, Noul, decision_type
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Predict
 from dspy.utils.parallelizer import ParallelExecutor
 
@@ -82,7 +83,7 @@ def effective(predict: Predict, field: str) -> dict:
 
 def metric_value(metric: Callable, example, pred) -> float:
     """The metric's score as a float, from a number or from a prediction carrying `score`."""
-    verdict = metric(example, pred)
+    verdict = call_metric(metric, example, pred, MetricContext("score"))
     return verdict.score if hasattr(verdict, "score") else float(verdict)
 
 

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from tqdm import tqdm
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.avatar import ActionOutput
 from dspy.teleprompt.teleprompt import Teleprompter
 
@@ -95,7 +96,7 @@ class AvatarOptimizer(Teleprompter):
 
         try:
             prediction = actor(**example.inputs().toDict())
-            score = self.metric(example, prediction)
+            score = call_metric(self.metric, example, prediction, MetricContext("score"))
 
             if return_outputs:
                 return example, prediction, score

@@ -19,7 +19,6 @@ from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import Signature, ensure_signature
 from dspy.utils.callback import BaseCallback
 from dspy.utils.constants import IS_TYPE_UNDEFINED
-from dspy.utils.tracing import current_invocation, record_prediction
 
 logger = logging.getLogger(__name__)
 
@@ -246,8 +245,11 @@ class Predict(Module, Parameter):
 
     def _forward_postprocess(self, completions, signature, **kwargs):
         pred = Prediction.from_completions(completions, signature=signature)
-        if kwargs.pop("_trace", True):
-            record_prediction(self, kwargs, pred)
+        if kwargs.pop("_trace", True) and settings.trace is not None and settings.max_trace_size > 0:
+            trace = settings.trace
+            if len(trace) >= settings.max_trace_size:
+                trace.pop(0)
+            trace.append((self, {**kwargs}, pred))
         return pred
 
     def _should_stream(self):
@@ -264,8 +266,7 @@ class Predict(Module, Parameter):
         adapter = resolve_adapter(lm, settings.adapter or ChatAdapter(), signature, self.fields, self.signature)
 
         if self._should_stream():
-            invocation = current_invocation()
-            with settings.context(caller_predict=self, caller_predict_invocation=invocation.ref if invocation else None):
+            with settings.context(caller_predict=self):
                 completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
         else:
             with settings.context(send_stream=None):
@@ -278,8 +279,7 @@ class Predict(Module, Parameter):
 
         adapter = resolve_adapter(lm, settings.adapter or ChatAdapter(), signature, self.fields, self.signature)
         if self._should_stream():
-            invocation = current_invocation()
-            with settings.context(caller_predict=self, caller_predict_invocation=invocation.ref if invocation else None):
+            with settings.context(caller_predict=self):
                 completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
         else:
             with settings.context(send_stream=None):

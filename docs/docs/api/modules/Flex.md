@@ -67,23 +67,18 @@ The `metric` returns a `dspy.Prediction(score=..., feedback=...)` — a scalar p
 
 ### Rewarding leaner programs with a trace-aware metric
 
-A common goal with `Flex` is to push work out of the LM and into deterministic code. Declare a keyword-only `metric_context` parameter to inspect candidate execution through the same `MetricContext` used by other DSPy metrics. During Flex scoring, `metric_context.purpose` is `"score"` and `metric_context.execution` is available even when GEPA does not retain trajectories for reflection. Metric/judge calls are outside that candidate execution.
+A common goal with `Flex` is to push work out of the LM and into deterministic code. Declare `metric_context` to receive candidate predictor tuples and reported token usage at scoring time, even when trajectories are not retained:
 
 ```python
-LM_INVOCATION_PENALTY = 0.15
-
 def metric(gold, pred, *, metric_context):
     correct = getattr(pred, "total_cents", None) == gold.total_cents
-    execution = metric_context.execution
-    n_calls = sum(i.operation == "lm" for i in execution.invocations)
-    score = max(0.0, float(correct) - LM_INVOCATION_PENALTY * n_calls)
-    fb = f"{'Correct' if correct else 'Wrong'} — {n_calls} LM invocation(s). Settle clear cases in Python."
+    tokens = sum(usage.get("total_tokens", 0) for usage in metric_context.usage.values())
+    score = max(0.0, float(correct) - tokens / 100000)
+    fb = f"{'Correct' if correct else 'Wrong'} — {tokens} reported tokens. Settle clear cases in Python."
     return dspy.Prediction(score=score, feedback=fb)
 ```
 
-This counts LM invocations, including cached and failed calls—not provider requests or billed cost. For a usage-based penalty, inspect `execution.usage()` (reported non-cached usage by model) and each invocation's `lm` evidence; absent usage is unknown, not zero. Keep the penalty small relative to correctness.
-
-**Experimental API migration:** replace Flex's `program_trace` parameter with `metric_context` and inspect `metric_context.execution`. It is an `ExecutionTrace`, not a predictor-tuple list; `len(program_trace)` should not become the length of all invocations, which also include modules, adapters, and tools. Metrics still declaring only the removed extension raise a migration error before candidate execution. Ordinary legacy metrics remain supported, with `trace=None` during scoring. History and Flex's interpreter/budget APIs are unchanged.
+This replaces the experimental `program_trace` parameter. Ordinary legacy metrics remain supported. `metric_context.purpose` is `"score"`; `trace` contains `(predictor, inputs, prediction)` tuples, not provider requests. Cached predictions still produce tuples. `usage` contains existing UsageTracker totals by model, excluding cached calls and the metric's own judge work; it is not an invoice or a guarantee that every provider reports usage. Keep the penalty small relative to correctness. These evidence guarantees apply to Flex evaluation, not every metric caller; see [metric contexts](../../learn/evaluation/metrics.md#experimental-explicit-metric-requests).
 
 ## Interpreter Execution
 

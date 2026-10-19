@@ -90,17 +90,13 @@ async def test_default_status_streaming():
         output = program("sky")
 
         status_messages = []
-        with dspy.capture_trace() as execution:
-            async for value in output:
-                if isinstance(value, StatusMessage):
-                    status_messages.append(value)
+        async for value in output:
+            if isinstance(value, StatusMessage):
+                status_messages.append(value)
 
     assert len(status_messages) == 2
     assert status_messages[0].message == "Calling tool generate_question..."
     assert status_messages[1].message == "Tool calling finished! Querying the LLM with tool calling results..."
-    tool_call, = [i for i in execution.invocations if i.operation == "tool"]
-    assert status_messages[0].call_id == status_messages[1].call_id == tool_call.call_id
-    assert status_messages[0].invocation == status_messages[1].invocation == tool_call.ref
 
 
 @pytest.mark.anyio
@@ -2221,71 +2217,3 @@ def test_streamify_keeps_a_group_of_several_failures():
     assert _single_failure(group_class("two", [ValueError("a"), ValueError("b")])) is None
     assert isinstance(_single_failure(group_class("outer", [group_class("inner", [KeyError("k")])])), KeyError)
     assert _single_failure(ValueError("plain")) is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_program", [False, True])
-@pytest.mark.parametrize("native_engine", [False, True])
-@pytest.mark.parametrize("listeners", [False, True])
-async def test_stream_invocation_identity_joins_capture(async_program, native_engine, listeners):
-    from dspy import lm15
-
-    # The final '[' is intentionally buffered and flushed only at Prediction delivery.
-    tokens = ["[[ ##", " answer ## ]]\n", "hello", " ["]
-
-    async def completion(*args, **kwargs):
-        for token in tokens:
-            yield ModelResponseStream(choices=[StreamingChoices(delta=Delta(content=token))])
-
-    class Engine:
-        def complete(self, request):
-            raise AssertionError("expected streaming")
-
-        def stream(self, request):
-            yield lm15.StreamStartEvent()
-            for token in tokens:
-                yield lm15.StreamDeltaEvent(lm15.TextDelta(token))
-            yield lm15.StreamEndEvent()
-
-    class AsyncEngine:
-        async def complete(self, request):
-            raise AssertionError("expected streaming")
-
-        async def stream(self, request):
-            for event in Engine().stream(request):
-                yield event
-
-    predict = dspy.Predict("question -> answer")
-    stream = dspy.streamify(
-        predict,
-        stream_listeners=[dspy.streaming.StreamListener("answer", allow_reuse=True)] if listeners else None,
-        is_async_program=async_program,
-    )
-    lm = dspy.LM(
-        "openai/gpt-4o-mini", engine=Engine() if native_engine else "litellm",
-        async_engine=AsyncEngine() if native_engine else None, cache=False,
-    )
-    with mock.patch("litellm.acompletion", side_effect=completion), dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
-        with dspy.capture_trace() as capture:
-            batches = []
-            for i in range(2):
-                batches.append([value async for value in stream(question=str(i))])
-        invocations = [i for i in capture.invocations if i.component is predict]
-        assert len(invocations) == 2
-        assert invocations[0].ref != invocations[1].ref
-        for batch, invocation in zip(batches, invocations, strict=True):
-            chunks = [v for v in batch if not isinstance(v, (dspy.Prediction, StatusMessage))]
-            assert chunks and all(v.invocation == invocation.ref for v in chunks)
-            if listeners:
-                assert chunks[-1].is_last_chunk
-                assert chunks[-1].chunk == " ["
-                assert "".join(v.chunk for v in chunks) == batch[-1].answer
-            elif native_engine:
-                import json
-
-                assert json.loads(chunks[0].json())["invocation"]["span_id"] == invocation.ref.span_id
-
-        # Reusing the same wrapper without capture must not leak the previous identity.
-        values = [v async for v in stream(question="untraced")]
-        chunks = [v for v in values if not isinstance(v, (dspy.Prediction, StatusMessage))]
-        assert chunks and all(getattr(v, "invocation", None) is None for v in chunks)

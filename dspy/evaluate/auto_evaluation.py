@@ -1,4 +1,3 @@
-from dspy.evaluate.metric_context import MetricContext
 from dspy.predict.chain_of_thought import ChainOfThought
 from dspy.primitives import Module
 from dspy.primitives.prediction import Prediction
@@ -56,12 +55,11 @@ class SemanticF1(Module):
         else:
             self.module = ChainOfThought(SemanticRecallPrecision)
 
-    def forward(self, example, pred, trace=None, *, metric_context: MetricContext | None = None):
+    def forward(self, example, pred, trace=None):
         scores = self.module(question=example.question, ground_truth=example.response, system_response=pred.response)
         score = f1_score(scores.precision, scores.recall)
 
-        bootstrap = metric_context.purpose == "bootstrap" if metric_context is not None else trace is not None
-        return Prediction(score=score >= self.threshold if bootstrap else score)
+        return Prediction(score=score if trace is None else score >= self.threshold)
 
 
 ###########
@@ -113,7 +111,7 @@ class CompleteAndGrounded(Module):
         self.completeness_module = ChainOfThought(AnswerCompleteness)
         self.groundedness_module = ChainOfThought(AnswerGroundedness)
 
-    def forward(self, example, pred, trace=None, *, metric_context: MetricContext | None = None):
+    def forward(self, example, pred, trace=None):
         completeness = self.completeness_module(
             question=example.question, ground_truth=example.response, system_response=pred.response
         )
@@ -122,5 +120,4 @@ class CompleteAndGrounded(Module):
         )
         score = f1_score(groundedness.groundedness, completeness.completeness)
 
-        bootstrap = metric_context.purpose == "bootstrap" if metric_context is not None else trace is not None
-        return Prediction(score=score >= self.threshold if bootstrap else score)
+        return Prediction(score=score if trace is None else score >= self.threshold)

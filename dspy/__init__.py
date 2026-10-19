@@ -9,6 +9,7 @@ from dspy.teleprompt import *
 from dspy.predict.flex import Flex
 
 from dspy.evaluate import Evaluate  # isort: skip
+from dspy.evaluate.metric_context import MetricContext  # isort: skip
 from dspy.clients import *  # isort: skip
 from dspy.adapters import Adapter, ChatAdapter, JSONAdapter, XMLAdapter, TwoStepAdapter, Image, Audio, File, History, Type, Tool, ToolCalls, ToolCallResults, Code, Reasoning  # isort: skip
 from dspy.primitives.sandbox_serializable import SandboxSerializable  # isort: skip
@@ -41,10 +42,6 @@ from dspy.utils.syncify import syncify
 from dspy.utils.saving import load
 from dspy.streaming.streamify import streamify
 from dspy.utils.usage_tracker import track_usage
-from dspy.utils.tracing import (
-    ExecutionObserver, ExecutionSelection, ExecutionTrace, Invocation, InvocationRef, capture_trace, record_event,
-)
-from dspy.evaluate.metric_context import MetricContext
 
 from dspy.dsp.utils.settings import settings
 from dspy.dsp.colbertv2 import ColBERTv2

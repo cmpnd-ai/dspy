@@ -202,10 +202,7 @@ def _metric_scoring_kwargs(metric_fn) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     if "program_trace" in declared:
-        raise TypeError(
-            "Flex metrics no longer receive program_trace. Declare metric_context instead "
-            "and use metric_context.execution to inspect candidate execution."
-        )
+        raise TypeError("Flex program_trace metrics must migrate to metric_context.trace and metric_context.usage.")
     values = {"trace": None, "pred_name": None, "pred_trace": None}
     return {name: value for name, value in values.items() if name in declared}
 
@@ -222,10 +219,11 @@ def evaluate_with_trace(
 ) -> EvaluationBatch:
     """Trace-capturing evaluation used when a flex submodule is present.
 
-    Context metrics always receive candidate execution at scoring time; ``capture_traces``
-    only controls retention in the returned batch. Legacy metrics keep eval-mode arguments.
+    Context metrics receive candidate tuple evidence and reported usage even when
+    trajectories are not retained. Legacy metrics keep eval-mode arguments.
     """
-    legacy_kwargs = {} if accepts_metric_context(metric_fn) else _metric_scoring_kwargs(metric_fn)
+    contextual = accepts_metric_context(metric_fn)
+    legacy_kwargs = {} if contextual else _metric_scoring_kwargs(metric_fn)
     trajs = bootstrap_trace_module.bootstrap_trace_data(
         program=program,
         dataset=batch,
@@ -237,7 +235,7 @@ def evaluate_with_trace(
         failure_score=failure_score,
         format_failure_score=failure_score,
         callback_metadata=callback_metadata,
-        capture_execution=True,
+        capture_usage=contextual,
     )
     outputs: list[Any] = [None] * len(batch)
     scores: list[float] = [failure_score] * len(batch)
@@ -250,8 +248,8 @@ def evaluate_with_trace(
         else:
             try:
                 result = call_metric(
-                    metric_fn, t["example"], pred, MetricContext("score", t["execution"]),
-                    legacy_kwargs=legacy_kwargs,
+                    metric_fn, t["example"], pred,
+                    MetricContext("score", trace=t["trace"], usage=t.get("usage")), legacy_kwargs=legacy_kwargs,
                 )
             except Exception as e:
                 logger.warning(

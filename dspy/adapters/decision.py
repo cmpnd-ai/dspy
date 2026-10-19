@@ -13,7 +13,6 @@ from dspy.adapters.decision_state import DecisionState
 from dspy.adapters.types.decision import Choice, Noul, Probability, Score
 from dspy.dsp.utils.settings import settings
 from dspy.lm15 import Config, DataPart, Message, Request, choice, score, yes_no
-from dspy.utils.tracing import record_event
 
 
 @contextmanager
@@ -147,7 +146,6 @@ class DecisionAdapter:
                         raise ValueError(f"Invalid Score distribution for {name!r}.")
                     answer["probabilities"] = {int(k): v for k, v in answer["probabilities"].items()}
                 answers[name] = answer
-            record_event("decision_evidence", answers)
             recorder = settings.get("_decision_evidence")
             if recorder is not None:
                 log, lock = recorder

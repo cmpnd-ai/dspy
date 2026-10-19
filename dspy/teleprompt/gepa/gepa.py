@@ -42,10 +42,7 @@ class GEPAFeedbackMetric(Protocol):
         pred_trace: Optional["DSPyTrace"],
     ) -> Union[float, "ScoreWithFeedback"]:
         """
-        Legacy metric contract. Context metrics instead declare
-        ``metric(gold, pred, *, metric_context)`` and receive a ``MetricContext``.
-
-        This legacy function is called with the following arguments:
+        This function is called with the following arguments:
         - gold: The gold example.
         - pred: The predicted output.
         - trace: Optional. The trace of the program's execution.
@@ -202,12 +199,7 @@ class GEPA(Teleprompter):
     can be provided at the granularity of individual predictors, or at the level of the entire system's
     execution.
 
-    Context metrics declare ``metric(gold, pred, *, metric_context)``. The context supplies
-    explicit scoring/feedback purpose and candidate execution evidence. Flex scoring always
-    supplies that execution, independently of trajectory retention. Flex's experimental
-    ``program_trace`` parameter is replaced by ``metric_context.execution``.
-
-    The legacy feedback metric contract remains supported:
+    To provide feedback to the GEPA optimizer, implement a metric as follows:
     ```
     def metric(
         gold: Example,
@@ -441,7 +433,7 @@ class GEPA(Teleprompter):
                 inspect.signature(metric).bind(None, None, None, None, None)
         except TypeError as e:
             raise TypeError(
-                "GEPA metric must accept (gold, pred, *, metric_context) or the legacy five arguments: "
+                "GEPA metric must accept (gold, pred, *, metric_context) or the legacy five arguments "
                 "(gold, pred, trace, pred_name, pred_trace). "
                 "See https://dspy.ai/api/optimizers/GEPA for details."
             ) from e
@@ -619,10 +611,8 @@ class GEPA(Teleprompter):
             ) -> "ScoreWithFeedback":
                 trace_for_pred = [(predictor, predictor_inputs, predictor_output)]
                 o = call_metric(
-                    self.metric_fn,
-                    module_inputs,
-                    module_outputs,
-                    metric_context or MetricContext("feedback", component_name=pred_name),
+                    self.metric_fn, module_inputs, module_outputs,
+                    metric_context or MetricContext("feedback", trace=captured_trace, component_name=pred_name),
                     legacy_args=(captured_trace, pred_name, trace_for_pred),
                 )
                 if hasattr(o, "feedback"):

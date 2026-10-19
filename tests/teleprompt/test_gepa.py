@@ -158,20 +158,26 @@ def test_gepa_adapter_forwards_sparse_objective_scores():
     assert evaluation.objective_scores == [{"quality": 1.0, "cost": 0.5}, {}]
 
 
-def test_gepa_flex_evaluation_forwards_metric_objective_scores():
+def test_gepa_flex_evaluation_forwards_metric_objective_scores(monkeypatch):
     from dspy.teleprompt.gepa import gepa_flex_utils
 
-    example = Example(input="question", output="answer").with_inputs("input")
-    with dspy.context(lm=DummyLM([{"output": "answer"}])):
-        evaluation = gepa_flex_utils.evaluate_with_trace(
-            program=SimpleModule("input -> output"),
-            batch=[example],
-            metric_fn=multi_objective_metric,
-            num_threads=1,
-            failure_score=0.0,
-            callback_metadata={},
-            capture_traces=True,
-        )
+    example = Example(input="question", output="answer")
+    prediction = dspy.Prediction(output="answer")
+    monkeypatch.setattr(
+        gepa_flex_utils.bootstrap_trace_module,
+        "bootstrap_trace_data",
+        lambda **kwargs: [{"example_ind": 0, "example": example, "prediction": prediction, "trace": []}],
+    )
+
+    evaluation = gepa_flex_utils.evaluate_with_trace(
+        program=SimpleModule("input -> output"),
+        batch=[example],
+        metric_fn=multi_objective_metric,
+        num_threads=1,
+        failure_score=0.0,
+        callback_metadata={},
+        capture_traces=True,
+    )
 
     assert evaluation.scores == [1.0]
     assert evaluation.objective_scores == [{"correctness": 1.0, "incorrectness": 0.0}]
@@ -186,8 +192,7 @@ def mock_mlflow():
 
 
 @pytest.mark.parametrize("use_mlflow", [True, False])
-@pytest.mark.parametrize("explicit_context", [True, False])
-def test_basic_workflow(use_mlflow, mock_mlflow, explicit_context):
+def test_basic_workflow(use_mlflow, mock_mlflow):
     """Test to ensure the basic compile flow runs without errors."""
     student = SimpleModule("input -> output")
 
@@ -200,20 +205,8 @@ def test_basic_workflow(use_mlflow, mock_mlflow, explicit_context):
     dspy.configure(lm=lm_main)
     reflection_lm = DictDummyLM(reflection_lm_history)
 
-    purposes = set()
-
-    def context_metric(example, prediction, *, metric_context):
-        purposes.add(metric_context.purpose)
-        assert metric_context.execution is not None
-        if metric_context.purpose == "feedback":
-            assert metric_context.component_name == "predictor"
-            assert metric_context.invocation_id in {
-                i.call_id for i in metric_context.execution.predictor_invocations()
-            }
-        return simple_metric(example, prediction)
-
     optimizer = dspy.GEPA(
-        metric=context_metric if explicit_context else simple_metric,
+        metric=simple_metric,
         reflection_lm=reflection_lm,
         max_metric_calls=5,
         use_mlflow=use_mlflow
@@ -231,8 +224,6 @@ def test_basic_workflow(use_mlflow, mock_mlflow, explicit_context):
         assert mock_mlflow.start_run.call_count == 1
     else:
         assert mock_mlflow.start_run.call_count == 0
-    if explicit_context:
-        assert purposes == {"score", "feedback"}
 
 def test_workflow_with_custom_instruction_proposer_and_component_selector():
     """Test to ensure the basic compile flow runs without errors when using a custom instruction proposer and component selector."""
@@ -850,39 +841,3 @@ def test_batch_evaluate_is_parallel_and_preserves_context():
     assert trace_modes == [True, True, False, False, False, False]
     assert sorted(thread_budgets[-3:]) == [2, 3, 3]
     assert sum(thread_budgets[-3:]) == 8
-
-
-def test_reflection_uses_component_identity_when_predictors_share_a_signature():
-    from dspy.teleprompt.gepa.gepa_utils import DspyAdapter
-
-    class Two(dspy.Module):
-        def __init__(self):
-            self.left = dspy.Predict("input -> output")
-            self.right = dspy.Predict("input -> output")
-
-        def forward(self, input):
-            self.left(input="left branch")
-            return self.right(input="right branch")
-
-    contexts = []
-
-    def metric(example, prediction, *, metric_context):
-        contexts.append(metric_context)
-        return 0.5
-
-    def feedback(**kwargs):
-        return {"score": 0.5, "feedback": kwargs["predictor_inputs"]["input"]}
-
-    student = Two()
-    adapter = DspyAdapter(student, metric, {"left": feedback, "right": feedback}, num_threads=1)
-    candidate = {name: predictor.signature.instructions for name, predictor in student.named_predictors()}
-    with dspy.context(lm=DummyLM({"left branch": {"output": "LEFT"}, "right branch": {"output": "RIGHT"}})):
-        batch = adapter.evaluate([dspy.Example(input="test").with_inputs("input")], candidate, capture_traces=True)
-        records = adapter.make_reflective_dataset(candidate, batch, ["left", "right"])
-
-    assert records["left"][0]["Generated Outputs"]["output"] == "LEFT"
-    assert records["right"][0]["Generated Outputs"]["output"] == "RIGHT"
-    assert records["left"][0]["Feedback"] == "left branch"
-    assert records["right"][0]["Feedback"] == "right branch"
-    assert contexts[0].purpose == "score"
-    assert len(contexts[0].execution.predictor_trace()) == 2

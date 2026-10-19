@@ -1,5 +1,3 @@
-import pytest
-
 import dspy
 from dspy.evaluate.auto_evaluation import CompleteAndGrounded, SemanticF1
 from dspy.primitives.prediction import Prediction
@@ -34,9 +32,7 @@ def test_semantic_f1_returns_prediction_without_trace():
     assert isinstance(result.score, (int, float, bool))
 
 
-@pytest.mark.parametrize("purpose", [None, "score", "bootstrap", "feedback"])
-@pytest.mark.parametrize("trace", [None, [], False, True])
-def test_semantic_f1_uses_purpose_not_trace_availability(purpose, trace):
+def test_semantic_f1_returns_prediction_with_trace():
     # Configure with a dummy LM
     dspy.configure(
         lm=DummyLM(
@@ -56,16 +52,11 @@ def test_semantic_f1_uses_purpose_not_trace_availability(purpose, trace):
 
     # Test SemanticF1 with trace
     metric = SemanticF1(threshold=0.5)
-    if purpose is None:
-        result = metric(example, pred, trace)
-    else:
-        result = metric(example, pred, trace=trace, metric_context=dspy.MetricContext(purpose))
+    result = metric(example, pred, trace=True)
 
     assert isinstance(result, Prediction)
     assert hasattr(result, "score")
-    bootstrap = purpose == "bootstrap" if purpose is not None else trace is not None
-    assert type(result.score) is (bool if bootstrap else float)
-    assert result.score == 1.0
+    assert isinstance(result.score, bool)
 
 
 def test_semantic_f1_score_value():
@@ -130,9 +121,7 @@ def test_complete_and_grounded_returns_prediction_without_trace():
     assert isinstance(result.score, (int, float, bool))
 
 
-@pytest.mark.parametrize("purpose", [None, "score", "bootstrap", "feedback"])
-@pytest.mark.parametrize("trace", [None, [], False, True])
-def test_complete_and_grounded_uses_purpose_not_trace_availability(purpose, trace):
+def test_complete_and_grounded_returns_prediction_with_trace():
     # Configure with a dummy LM
     dspy.configure(
         lm=DummyLM(
@@ -159,20 +148,12 @@ def test_complete_and_grounded_uses_purpose_not_trace_availability(purpose, trac
     pred = dspy.Prediction(response="2", context="context")
 
     # Test CompleteAndGrounded with trace
-    metric = CompleteAndGrounded(threshold=0.9)
-    if purpose is None:
-        result = metric(example, pred, trace)
-    else:
-        result = metric(example, pred, trace=trace, metric_context=dspy.MetricContext(purpose))
+    metric = CompleteAndGrounded(threshold=0.7)
+    result = metric(example, pred, trace=True)
 
     assert isinstance(result, Prediction)
     assert hasattr(result, "score")
-    bootstrap = purpose == "bootstrap" if purpose is not None else trace is not None
-    assert type(result.score) is (bool if bootstrap else float)
-    if bootstrap:
-        assert result.score is False
-    else:
-        assert result.score == pytest.approx(1.44 / 1.7)
+    assert isinstance(result.score, bool)
 
 
 def test_semantic_f1_prediction_can_be_compared():

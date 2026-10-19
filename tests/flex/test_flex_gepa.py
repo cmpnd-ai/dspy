@@ -151,50 +151,43 @@ def test_build_program_rebinds_flex_code() -> None:
 
 @deno_required
 @pytest.mark.parametrize("capture_traces", [False, True])
-def test_flex_metric_context_scores_candidate_execution_without_judge_calls(capture_traces) -> None:
-    """Candidate evidence drives scoring even without trajectory retention or an outer capture."""
-    seen = []
-    judge = dspy.Predict("q -> a")
+def test_selection_eval_supplies_candidate_evidence(capture_traces) -> None:
+    """Evidence is independent of retention and excludes the metric's own judge."""
+    seen: dict[str, object] = {}
 
     def trace_aware_metric(gold, pred, *, metric_context):
-        execution = metric_context.execution
-        assert metric_context.purpose == "score"
-        assert execution.complete
-        judge(q=gold.q)
-        calls = [i for i in execution.invocations if i.operation == "lm"]
-        assert all(i.lm is not None for i in calls)
-        seen.append(execution)
-        return float(pred.a == gold.a) - 0.25 * len(calls)
+        seen["context"] = metric_context
+        dspy.Predict("q -> a")(q="judge")
+        return 0.75 if metric_context.purpose == "score" and len(metric_context.trace) == 1 else 0.0
 
     student = dspy.Flex(Echo)  # a flex submodule is present
     adapter = DspyAdapter(student_module=student, metric_fn=trace_aware_metric, feedback_map={})
+    candidate = {"self": SIMPLE_MODULE}
     ex = dspy.Example(q="hi", a="hi").with_inputs("q")
 
-    dspy.configure(lm=DummyLM([{"a": "hi"}] * 3))
-    for source, expected_score in [(SIMPLE_MODULE, 0.75), (CRASHY_MODULE, 1.0)]:
-        result = adapter.evaluate([ex], {"self": source}, capture_traces=capture_traces)
-        assert result.scores == [expected_score]
-        if capture_traces:
-            assert result.trajectories[0]["execution"] is seen[-1]
-        else:
-            assert result.trajectories is None
-    assert len(seen) == 2
+    dspy.configure(lm=DummyLM([{"a": "hi"}, {"a": "judged"}]))
+    batch = adapter.evaluate([ex], candidate, capture_traces=capture_traces)
 
-
-def test_flex_program_trace_metric_requires_explicit_migration() -> None:
-    def old_metric(gold, pred, trace=None, pred_name=None, pred_trace=None, program_trace=None):
-        return 1.0 - 0.25 * len(program_trace or [])
-
-    adapter = DspyAdapter(student_module=dspy.Flex(Echo), metric_fn=old_metric, feedback_map={})
-    example = dspy.Example(q="hi", a="hi").with_inputs("q")
-    # Reject before execution, rather than silently treating missing evidence as zero LM calls.
-    with pytest.raises(TypeError, match=r"program_trace.*metric_context"):
-        adapter.evaluate([example], {"self": SIMPLE_MODULE}, capture_traces=False)
+    assert batch.scores == [0.75]
+    assert len(seen["context"].trace) == 1
+    assert seen["context"].trace[0][1] == {"q": "hi"}
+    assert seen["context"].usage is not None
+    assert (batch.trajectories is not None) == capture_traces
 
 
 @deno_required
-@pytest.mark.parametrize("two_arguments", [False, True])
-def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric(two_arguments) -> None:
+def test_program_trace_extension_requires_explicit_migration():
+    def metric(gold, pred, program_trace=None):
+        return 1.0
+
+    adapter = DspyAdapter(student_module=dspy.Flex(Echo), metric_fn=metric, feedback_map={})
+    ex = dspy.Example(q="hi", a="hi").with_inputs("q")
+    with pytest.raises(TypeError, match="must migrate to metric_context"):
+        adapter.evaluate([ex], {"self": SIMPLE_MODULE}, capture_traces=False)
+
+
+@deno_required
+def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric() -> None:
     seen: dict[str, object] = {}
 
     def legacy_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
@@ -203,9 +196,8 @@ def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric(two_arguments)
             return getattr(pred, "a", None) == gold.a  # bootstrapping mode: strict bool
         return 0.75  # eval mode: continuous score
 
-    metric = (lambda gold, pred: legacy_metric(gold, pred)) if two_arguments else legacy_metric
     student = dspy.Flex(Echo)
-    adapter = DspyAdapter(student_module=student, metric_fn=metric, feedback_map={})
+    adapter = DspyAdapter(student_module=student, metric_fn=legacy_metric, feedback_map={})
     candidate = {"self": SIMPLE_MODULE}
     ex = dspy.Example(q="hi", a="hi").with_inputs("q")
 

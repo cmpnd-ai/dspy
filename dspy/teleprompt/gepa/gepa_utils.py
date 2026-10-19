@@ -244,8 +244,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
             else {"disable_logging": True}
         )
 
-        # Flex metrics can inspect candidate execution through MetricContext even when
-        # trajectories are not retained for reflection.
+        # Flex supplies candidate evidence during scoring, independently of retention.
         if self._flex_paths:
             return evaluate_with_trace(
                 program,
@@ -372,23 +371,22 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                 if hasattr(module_score, "score"):
                     module_score = module_score["score"]
 
-                execution = data.get("execution")
-                if execution is not None:
+                if accepts_metric_context(self.metric_fn):
                     trace_instances = [
-                        i.prediction for i in execution.predictor_invocations()
-                        if execution.component_name(i) == pred_name
+                        (index, step) for index, (step, name) in enumerate(zip(trace, data.get("trace_names", [])))
+                        if name == pred_name
                     ]
                 else:
-                    # Compatibility with previously captured tuple-only trajectories.
-                    trace_instances = [t for t in trace if t[0].signature.equals(module.signature)]
+                    # Preserve legacy matching until callers explicitly migrate.
+                    trace_instances = [(index, t) for index, t in enumerate(trace) if t[0].signature.equals(module.signature)]
                 if not self.add_format_failure_as_feedback:
-                    trace_instances = [t for t in trace_instances if not isinstance(t[2], FailedPrediction)]
+                    trace_instances = [t for t in trace_instances if not isinstance(t[1][2], FailedPrediction)]
                 if len(trace_instances) == 0:
                     continue
 
                 selected = None
                 for t in trace_instances:
-                    if isinstance(t[2], FailedPrediction):
+                    if isinstance(t[1][2], FailedPrediction):
                         selected = t
                         break
 
@@ -397,6 +395,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                         continue
                     selected = self.rng.choice(trace_instances)
 
+                target, selected = selected
                 inputs = selected[1]
                 outputs = selected[2]
 
@@ -449,13 +448,10 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     # d['score'] = self.failure_score
                 else:
                     feedback_fn = self.feedback_map[pred_name]
-                    feedback_kwargs = {}
+                    context_kwargs = {}
                     if accepts_metric_context(feedback_fn):
-                        invocation_id = next(
-                            (i.call_id for i in execution.predictor_invocations() if i.prediction is selected), None
-                        ) if execution is not None else None
-                        feedback_kwargs["metric_context"] = MetricContext(
-                            "feedback", execution, pred_name, invocation_id
+                        context_kwargs["metric_context"] = MetricContext(
+                            "feedback", trace=trace, component_name=pred_name, target=target, usage=data.get("usage"),
                         )
                     fb = feedback_fn(
                         predictor_output=outputs,
@@ -463,7 +459,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                         module_inputs=example,
                         module_outputs=prediction,
                         captured_trace=trace,
-                        **feedback_kwargs,
+                        **context_kwargs,
                     )
                     d["Feedback"] = fb["feedback"]
                     if fb["score"] != module_score:

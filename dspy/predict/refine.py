@@ -6,9 +6,9 @@ import orjson
 
 import dspy
 from dspy.adapters.utils import get_field_description_string
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Prediction
 from dspy.signatures import InputField, OutputField, Signature
-from dspy.utils.tracing import capture_trace, tracing_enabled
 
 from .predict import Module
 
@@ -86,7 +86,8 @@ class Refine(Module):
             ```
         """
         self.module = module
-        self.reward_fn = lambda *args: reward_fn(*args)  # to prevent this from becoming a parameter
+        # Keep module-valued rewards out of the program's optimizable parameters.
+        self.reward_fn = lambda inputs, pred, context=None: call_metric(reward_fn, inputs, pred, context or MetricContext())
         self.threshold = threshold
         self.N = N
         self.fail_count = fail_count or N  # default to N if fail_count is not provided
@@ -101,7 +102,6 @@ class Refine(Module):
         start = lm.kwargs.get("rollout_id", 0)
         rollout_ids = [start + i for i in range(self.N)]
         best_pred, best_trace, best_reward = None, None, -float("inf")
-        best_execution = None
         advice = None
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
 
@@ -116,36 +116,30 @@ class Refine(Module):
 
             try:
                 with dspy.context(trace=[]):
-                    with capture_trace(mod, origin=self.module, enabled=tracing_enabled()) as attempt:
-                        if not advice:
+                    if not advice:
+                        outputs = mod(**kwargs)
+                    else:
+
+                        class WrapperAdapter(adapter.__class__):
+                            def __call__(self, lm, lm_kwargs, signature, demos, inputs):
+                                inputs["hint_"] = advice.get(signature2name.get(signature), "N/A")  # noqa: B023
+                                signature = signature.append(
+                                    "hint_", InputField(desc="A hint to the module from an earlier run")
+                                )
+                                return adapter(lm, lm_kwargs, signature, demos, inputs)
+
+                        with dspy.context(adapter=WrapperAdapter()):
                             outputs = mod(**kwargs)
-                        else:
 
-                            class WrapperAdapter(adapter.__class__):
-                                def __call__(self, lm, lm_kwargs, signature, demos, inputs):
-                                    inputs["hint_"] = advice.get(signature2name.get(signature), "N/A")  # noqa: B023
-                                    signature = signature.append(
-                                        "hint_", InputField(desc="A hint to the module from an earlier run")
-                                    )
-                                    return adapter(lm, lm_kwargs, signature, demos, inputs)
-
-                            with dspy.context(adapter=WrapperAdapter()):
-                                outputs = mod(**kwargs)
-
-                    trace = list(dspy.settings.trace)
+                    trace = dspy.settings.trace.copy()
 
                     # TODO: Remove the hint from the trace, if it's there.
 
-                    with capture_trace(optimization=False, enabled=tracing_enabled()):
-                        reward = self.reward_fn(kwargs, outputs)
+                    # NOTE: Not including the trace of reward_fn.
+                    reward = self.reward_fn(kwargs, outputs, MetricContext("score", trace=trace))
 
                 if reward > best_reward:
-                    if best_execution is not None:
-                        best_execution.discard()
-                    best_execution = attempt
                     best_reward, best_pred, best_trace = reward, outputs, trace
-                elif attempt is not None:
-                    attempt.discard()
 
                 if self.threshold is not None and reward >= self.threshold:
                     break
@@ -172,19 +166,15 @@ class Refine(Module):
                     k: v if isinstance(v, str) else orjson.dumps(recursive_mask(v), option=orjson.OPT_INDENT_2).decode()
                     for k, v in advise_kwargs.items()
                 }
-                with capture_trace(optimization=False, enabled=tracing_enabled()):
-                    advice = dspy.Predict(OfferFeedback)(**advise_kwargs).advice
+                advice = dspy.Predict(OfferFeedback)(**advise_kwargs).advice
                 # print(f"Advice for each module: {advice}")
 
             except Exception as e:
-                # Advice generation can fail after this attempt has already become the winner.
-                if attempt is not None and attempt is not best_execution:
-                    attempt.discard()
                 print(f"Refine: Attempt failed with rollout id {rid}: {e}")
                 if idx > self.fail_count:
                     raise e
                 self.fail_count -= 1
-        if best_trace and dspy.settings.trace is not None:
+        if best_trace:
             dspy.settings.trace.extend(best_trace)
         return best_pred
 

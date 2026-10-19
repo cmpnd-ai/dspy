@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 from dspy.dsp.utils.settings import settings
 from dspy.utils.callback import BaseCallback
 from dspy.utils.lazy_import import require
-from dspy.utils.tracing import InvocationRef
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -28,24 +27,13 @@ class StreamResponse:
     signature_field_name: str
     chunk: str
     is_last_chunk: bool
-    invocation: InvocationRef | None = None
 
 
 @dataclass
 class StatusMessage:
-    """A status message with optional execution identity.
-
-    The callback boundary supplies correlation separately from active execution,
-    since legacy start/end hooks run in the parent's context.
-    """
+    """Dataclass that wraps a status message for status streaming."""
 
     message: str
-    call_id: str | None = None
-    invocation: InvocationRef | None = None
-
-    def __post_init__(self):
-        if self.call_id is not None and self.invocation is None:
-            self.invocation = settings.get("execution_callback_ref")
 
 
 def sync_send_to_stream(stream, message):
@@ -135,7 +123,7 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.tool_start_status_message(instance, inputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))
 
     def on_tool_end(
         self,
@@ -149,7 +137,7 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.tool_end_status_message(outputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))
 
     def on_lm_start(
         self,
@@ -163,7 +151,7 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.lm_start_status_message(instance, inputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))
 
     def on_lm_end(
         self,
@@ -177,7 +165,7 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.lm_end_status_message(outputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))
 
     def on_module_start(
         self,
@@ -191,7 +179,7 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.module_start_status_message(instance, inputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))
 
     def on_module_end(
         self,
@@ -205,4 +193,4 @@ class StatusStreamingCallback(BaseCallback):
 
         status_message = self.status_message_provider.module_end_status_message(outputs)
         if status_message:
-            sync_send_to_stream(stream, StatusMessage(status_message, call_id))
+            sync_send_to_stream(stream, StatusMessage(status_message))

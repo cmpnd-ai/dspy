@@ -5,9 +5,8 @@ import threading
 import tqdm
 
 import dspy
-from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.teleprompt.teleprompt import Teleprompter
-from dspy.utils.tracing import capture_trace, tracing_enabled
 
 from .vanilla import LabeledFewShot
 
@@ -198,8 +197,7 @@ class BootstrapFewShot(Teleprompter):
                         predictor_cache[name] = predictor.demos
                         predictor.demos = [x for x in predictor.demos if x != example]
 
-                    with capture_trace(teacher, enabled=tracing_enabled() or accepts_metric_context(self.metric)) as execution:
-                        prediction = teacher(**example.inputs())
+                    prediction = teacher(**example.inputs())
                     trace = dspy.settings.trace
 
                     for name, predictor in teacher.named_predictors():
@@ -207,7 +205,9 @@ class BootstrapFewShot(Teleprompter):
 
                 if self.metric:
                     metric_val = call_metric(
-                        self.metric, example, prediction, MetricContext("bootstrap", execution), legacy_args=(trace,)
+                        self.metric, example, prediction,
+                        MetricContext("score" if self.metric_threshold else "accept", trace=trace),
+                        legacy_args=(trace,),
                     )
                     if self.metric_threshold:
                         success = metric_val >= self.metric_threshold

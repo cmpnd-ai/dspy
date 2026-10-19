@@ -22,14 +22,12 @@ Getting this right on the first try is unlikely, but you should start with somet
 
 A DSPy metric is just a function in Python that takes `example` (e.g., from your training or dev set) and the output `pred` from your DSPy program, and outputs a `float` (or `int` or `bool`) score.
 
-Your metric should accept an optional third argument called `trace`. Existing metrics and direct calls using this argument remain supported; no migration is required before a major release.
-
-The local tracing prototype additionally supports a keyword-only `metric_context`. Its `purpose` is `"score"`, `"bootstrap"`, or `"feedback"`; its optional `execution` contains captured program calls. When context is supplied, purpose—not trace availability—determines behavior. A compatibility adapter preserves the previous calling convention for metrics that do not opt into context.
+Your metric should also accept an optional third argument called `trace`. You can ignore this for a moment, but it will enable some powerful tricks if you want to use your metric for optimization.
 
 Here's a simple example of a metric that's comparing `example.answer` and `pred.answer`. This particular metric will return a `bool`.
 
 ```python
-def validate_answer(example, pred, trace=None, *, metric_context=None):
+def validate_answer(example, pred, trace=None):
     return example.answer.lower() == pred.answer.lower()
 ```
 
@@ -38,25 +36,21 @@ Some people find these utilities (built-in) convenient:
 - `dspy.evaluate.metrics.answer_exact_match`
 - `dspy.evaluate.metrics.answer_passage_match`
 
-Your metrics could be more complex, e.g. check for multiple properties. The dual-version pattern below returns a numeric score for evaluation and a boolean acceptance decision when bootstrapping demonstrations. Without context, it preserves the legacy rule: `trace is None` returns a score; any non-`None` trace (even an empty list) requests a boolean. With explicit context, both purposes can have a captured execution.
+Your metrics could be more complex, e.g. check for multiple properties. The metric below will return a `float` if `trace is None` (i.e., if it's used for evaluation or optimization), and will return a `bool` otherwise (i.e., if it's used to bootstrap demonstrations).
 
 ```python
-def validate_context_and_answer(example, pred, trace=None, *, metric_context=None):
+def validate_context_and_answer(example, pred, trace=None):
     # check the gold label and the predicted answer are the same
     answer_match = example.answer.lower() == pred.answer.lower()
 
     # check the predicted answer comes from one of the retrieved contexts
     context_match = any((pred.answer.lower() in c) for c in pred.context)
 
-    bootstrap = metric_context.purpose == "bootstrap" if metric_context is not None else trace is not None
-    if bootstrap:
+    if trace is None: # if we're doing evaluation or optimization
+        return (answer_match + context_match) / 2.0
+    else: # if we're doing bootstrapping, i.e. self-generating good demonstrations of each step
         return answer_match and context_match
-    return (answer_match + context_match) / 2.0
 ```
-
-Keep `trace=None` and this fallback while supporting existing DSPy versions and direct callers. `SemanticF1` and `CompleteAndGrounded` follow the same rule, returning a `Prediction` whose `score` is numeric or boolean. Explicit `"score"` or `"feedback"` returns a numeric score even with a trace; explicit `"bootstrap"` returns a threshold decision even without one.
-
-For prospective DSPy 4.0, removal of the legacy trace calling convention is a **planned major-version change**, not current behavior. Once your minimum supported version and callers use context, migration is straightforward: remove the `trace` parameter and fallback, and use `metric_context.purpose` directly. Do not make that breaking change while supporting older callers.
 
 Defining a good metric is an iterative process, so doing some initial evaluations and looking at your data and outputs is key.
 
@@ -105,7 +99,7 @@ class Assess(dspy.Signature):
 For example, below is a simple metric that checks a generated tweet (1) answers a given question correctly and (2) whether it's also engaging. We also check that (3) `len(tweet) <= 280` characters.
 
 ```python
-def metric(gold, pred, trace=None, *, metric_context=None):
+def metric(gold, pred, trace=None):
     question, answer, tweet = gold.question, gold.answer, pred.output
 
     engaging = "Does the assessed text make for a self-contained, engaging tweet?"
@@ -117,13 +111,11 @@ def metric(gold, pred, trace=None, *, metric_context=None):
     correct, engaging = [m.assessment_answer for m in [correct, engaging]]
     score = (correct + engaging) if correct and (len(tweet) <= 280) else 0
 
-    bootstrap = metric_context.purpose == "bootstrap" if metric_context is not None else trace is not None
-    if bootstrap:
-        return score >= 2
+    if trace is not None: return score >= 2
     return score / 2.0
 ```
 
-When selecting demonstrations, `metric_context.purpose == "bootstrap"`, so we accept only when `score >= 2`. Candidate scoring during optimization still uses `"score"` and returns `score / 2.0`. Without context, the original `trace is not None` strict-judging behavior is retained.
+When compiling, `trace is not None`, and we want to be strict about judging things, so we will only return `True` if `score >= 2`. Otherwise, we return a score out of 1.0 (i.e., `score / 2.0`).
 
 
 ## Advanced: Using a DSPy program as your metric
@@ -132,19 +124,15 @@ If your metric is itself a DSPy program, one of the most powerful ways to iterat
 
 
 
-### Advanced: Accessing the `trace` and execution
+### Advanced: Accessing the `trace`
 
-In the legacy calling convention, evaluation does not pass a program trace to the metric; bootstrapping passes predictor input/output tuples so you can validate intermediate steps. In the prototype, evaluation and optimization both capture program execution, available through explicit context. The metric runs outside the program's captured scope, so an LM judge does not add its own steps to the execution it is judging.
+When your metric is used during evaluation runs, DSPy will not try to track the steps of your program.
 
-`metric_context.execution.predictor_trace()` projects the selected predictor inputs and outputs into the familiar tuple shape. `execution.invocations` also includes module, tool, and LM boundaries, errors, and discarded attempts. It is not correct to count predictor tuples as provider requests: retries, cache hits, and multiple completions have different accounting semantics.
+But during compiling (optimization), DSPy will trace your LM calls. The trace will contain inputs/outputs to each DSPy predictor and you can leverage that to validate intermediate steps for optimization.
 
 
 ```python
-def validate_hops(example, pred, trace=None, *, metric_context=None):
-    if metric_context is not None:
-        execution = metric_context.execution
-        trace = execution.predictor_trace() if execution is not None else []
-    trace = trace if trace is not None else []
+def validate_hops(example, pred, trace=None):
     hops = [example.question] + [outputs.query for *_, outputs in trace if 'query' in outputs]
 
     if max([len(h) for h in hops]) > 100: return False
@@ -152,3 +140,43 @@ def validate_hops(example, pred, trace=None, *, metric_context=None):
 
     return True
 ```
+
+## Experimental: explicit metric requests
+
+Existing metrics keep their calling conventions. New metrics can explicitly declare
+`metric_context` to separate the question being asked from available trace evidence:
+
+```python
+def metric(gold, pred, trace=None, *, metric_context=None):
+    score = float(gold.answer == pred.answer)
+    # Legacy direct callers can still use trace as their mode switch.
+    accept = metric_context.purpose == "accept" if metric_context else trace is not None
+    return score >= 0.8 if accept else score
+```
+
+`dspy.MetricContext` contains:
+
+- `purpose`: `"score"` for fitness/ranking, `"accept"` for demonstration admission,
+  or `"feedback"` for GEPA's component critique. Thresholded bootstrapping asks for
+  a score; unthresholded bootstrapping and fine-tuning filtering ask for acceptance.
+- `trace`: optional existing `(predictor, inputs, prediction)` tuples. `None` means
+  unavailable; an empty tuple means no steps recorded. Membership is snapshotted,
+  but predictor/input/output objects remain shared. Treat evidence as read-only.
+- `component_name` and `target`: optional GEPA component name and occurrence index
+  into `trace`. Use `metric_context.trace[metric_context.target]` for that step.
+- `usage`: optional reported non-cached token totals by model, not invoice accounting.
+
+Evidence availability never determines purpose. Evaluate does not capture a trace for
+this API; existing bootstrap/ranking collectors supply tuples. Flex additionally supplies
+usage even when trajectories are not retained. Predictor tuples are not provider requests.
+
+Only a declared parameter opts in; `**kwargs` alone does not. Module metrics declare it
+on `forward`. For a fully migrated metric, remove the legacy `trace` argument and require
+`metric_context`. BestOfN and Refine pass an inputs dict rather than a gold Example.
+
+**Results remain caller-specific:** return a numeric fitness for scoring, a boolean for
+acceptance, or the existing `Prediction(score=..., feedback=...)` for GEPA feedback.
+The bridge does not coerce results, apply thresholds, or retry exceptions. Legacy
+truthiness is unchanged: notably, `Prediction(score=False)` is truthy. Built-in metrics
+are not silently migrated. Context-only metrics can support a future major-release
+migration without requiring existing users to change now.

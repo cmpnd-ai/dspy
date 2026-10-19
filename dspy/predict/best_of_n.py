@@ -1,8 +1,8 @@
 from typing import Callable
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Module, Prediction
-from dspy.utils.tracing import capture_trace, tracing_enabled
 
 
 class BestOfN(Module):
@@ -43,7 +43,8 @@ class BestOfN(Module):
         fail_count: int | None = None,
     ):
         self.module = module
-        self.reward_fn = lambda *args: reward_fn(*args)  # to prevent this from becoming a parameter
+        # Keep module-valued rewards out of the program's optimizable parameters.
+        self.reward_fn = lambda inputs, pred, context=None: call_metric(reward_fn, inputs, pred, context or MetricContext())
         self.threshold = threshold
         self.N = N
         self.fail_count = fail_count or N  # default to N if fail_count is not provided
@@ -53,7 +54,6 @@ class BestOfN(Module):
         start = lm.kwargs.get("rollout_id", 0)
         rollout_ids = [start + i for i in range(self.N)]
         best_pred, best_trace, best_reward = None, None, -float("inf")
-        best_execution = None
 
         for idx, rid in enumerate(rollout_ids):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
@@ -62,32 +62,24 @@ class BestOfN(Module):
 
             try:
                 with dspy.context(trace=[]):
-                    with capture_trace(mod, origin=self.module, enabled=tracing_enabled()) as attempt:
-                        pred = mod(**kwargs)
-                    trace = list(dspy.settings.trace)
+                    pred = mod(**kwargs)
+                    trace = dspy.settings.trace.copy()
 
-                    with capture_trace(optimization=False, enabled=tracing_enabled()):
-                        reward = self.reward_fn(kwargs, pred)
+                    # NOTE: Not including the trace of reward_fn.
+                    reward = self.reward_fn(kwargs, pred, MetricContext("score", trace=trace))
 
                 if reward > best_reward:
-                    if best_execution is not None:
-                        best_execution.discard()
-                    best_execution = attempt
                     best_reward, best_pred, best_trace = reward, pred, trace
-                elif attempt is not None:
-                    attempt.discard()
 
                 if reward >= self.threshold:
                     break
 
             except Exception as e:
-                if attempt is not None:
-                    attempt.discard()
                 print(f"BestOfN: Attempt {idx + 1} failed with rollout id {rid}: {e}")
                 if idx > self.fail_count:
                     raise e
                 self.fail_count -= 1
 
-        if best_trace and dspy.settings.trace is not None:
+        if best_trace:
             dspy.settings.trace.extend(best_trace)
         return best_pred

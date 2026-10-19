@@ -57,7 +57,6 @@ class StreamListener:
         self.stream_end = False
         self.cache_hit = False
         self.allow_reuse = allow_reuse
-        self._invocation = None
 
         self.json_adapter_state = {"field_accumulated_messages": ""}
         self.value_started = False
@@ -136,15 +135,6 @@ class StreamListener:
                 break
 
     def receive(self, chunk: ModelResponseStream):
-        # Identity belongs to the producer, not this consumer's ambient context.
-        if not self.stream_end or self.allow_reuse:
-            self._invocation = getattr(chunk, "invocation", None)
-        response = self._receive(chunk)
-        if response is not None:
-            response.invocation = self._invocation
-        return response
-
-    def _receive(self, chunk: ModelResponseStream):
         adapter_name = settings.adapter.__class__.__name__ if settings.adapter else "ChatAdapter"
         if adapter_name not in self.adapter_identifiers:
             raise ValueError(
@@ -406,7 +396,6 @@ class StreamListener:
                     self.signature_field_name,
                     token,
                     is_last_chunk=True,
-                    invocation=self._invocation,
                 )
         return None
 

@@ -40,20 +40,18 @@ class GEPAFeedbackMetric(Protocol):
         trace: Optional["DSPyTrace"],
         pred_name: str | None,
         pred_trace: Optional["DSPyTrace"],
-        program_trace: Optional["DSPyTrace"] = None,
     ) -> Union[float, "ScoreWithFeedback"]:
         """
-        This function is called with the following arguments:
+        Legacy metric contract. Context metrics instead declare
+        ``metric(gold, pred, *, metric_context)`` and receive a ``MetricContext``.
+
+        This legacy function is called with the following arguments:
         - gold: The gold example.
         - pred: The predicted output.
         - trace: Optional. The trace of the program's execution.
         - pred_name: Optional. The name of the target predictor currently being optimized by GEPA, for which
             the feedback is being requested.
         - pred_trace: Optional. The trace of the target predictor's execution GEPA is seeking feedback for.
-        - program_trace: Optional. The full execution trace of the program, supplied at scoring time when a
-            `dspy.Flex` submodule is being optimized. Declare this parameter to score against how an answer was
-            produced (e.g. `len(program_trace)` as an LM-call count), rather than only whether it was correct.
-            Unlike `trace`, it is populated during candidate *scoring*.
 
         Note the `pred_name` and `pred_trace` arguments. During optimization, GEPA will call the metric to obtain
         feedback for individual predictors being optimized. GEPA provides the name of the predictor in `pred_name`
@@ -204,7 +202,12 @@ class GEPA(Teleprompter):
     can be provided at the granularity of individual predictors, or at the level of the entire system's
     execution.
 
-    To provide feedback to the GEPA optimizer, implement a metric as follows:
+    Context metrics declare ``metric(gold, pred, *, metric_context)``. The context supplies
+    explicit scoring/feedback purpose and candidate execution evidence. Flex scoring always
+    supplies that execution, independently of trajectory retention. Flex's experimental
+    ``program_trace`` parameter is replaced by ``metric_context.execution``.
+
+    The legacy feedback metric contract remains supported:
     ```
     def metric(
         gold: Example,
@@ -212,7 +215,6 @@ class GEPA(Teleprompter):
         trace: Optional[DSPyTrace] = None,
         pred_name: Optional[str] = None,
         pred_trace: Optional[DSPyTrace] = None,
-        program_trace: Optional[DSPyTrace] = None,
     ) -> float | ScoreWithFeedback:
         \"""
         This function is called with the following arguments:
@@ -222,9 +224,6 @@ class GEPA(Teleprompter):
         - pred_name: Optional. The name of the target predictor currently being optimized by GEPA, for which
             the feedback is being requested.
         - pred_trace: Optional. The trace of the target predictor's execution GEPA is seeking feedback for.
-        - program_trace: Optional. The program's execution trace, supplied at scoring time when a `dspy.Flex`
-            submodule is being optimized. Declare it to score against how the answer was produced (e.g. an
-            LM-call penalty). Defaults to None.
 
         Note the `pred_name` and `pred_trace` arguments. During optimization, GEPA will call the metric to obtain
         feedback for individual predictors being optimized. GEPA provides the name of the predictor in `pred_name`

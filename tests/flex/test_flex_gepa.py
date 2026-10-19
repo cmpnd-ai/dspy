@@ -150,31 +150,51 @@ def test_build_program_rebinds_flex_code() -> None:
 
 
 @deno_required
-def test_selection_eval_passes_program_trace_to_declaring_metric() -> None:
-    """The selection eval (capture_traces=False) must pass the execution trace to a metric that
-    declares `program_trace`, so a trace-dependent score (e.g. an LLM-call penalty that rewards
-    deterministic code) actually drives candidate selection."""
-    seen: dict[str, object] = {}
+@pytest.mark.parametrize("capture_traces", [False, True])
+def test_flex_metric_context_scores_candidate_execution_without_judge_calls(capture_traces) -> None:
+    """Candidate evidence drives scoring even without trajectory retention or an outer capture."""
+    seen = []
+    judge = dspy.Predict("q -> a")
 
-    def trace_aware_metric(gold, pred, trace=None, pred_name=None, pred_trace=None, program_trace=None):
-        seen["trace"] = trace
-        seen["n_calls"] = len(program_trace) if program_trace is not None else None
-        return 1.0
+    def trace_aware_metric(gold, pred, *, metric_context):
+        execution = metric_context.execution
+        assert metric_context.purpose == "score"
+        assert execution.complete
+        judge(q=gold.q)
+        calls = [i for i in execution.invocations if i.operation == "lm"]
+        assert all(i.lm is not None for i in calls)
+        seen.append(execution)
+        return float(pred.a == gold.a) - 0.25 * len(calls)
 
     student = dspy.Flex(Echo)  # a flex submodule is present
     adapter = DspyAdapter(student_module=student, metric_fn=trace_aware_metric, feedback_map={})
-    candidate = {"self": SIMPLE_MODULE}  # one dspy.Predict -> one traced call
     ex = dspy.Example(q="hi", a="hi").with_inputs("q")
 
-    dspy.configure(lm=DummyLM([{"a": "hi"}]))
-    adapter.evaluate([ex], candidate, capture_traces=False)  # the selection path
+    dspy.configure(lm=DummyLM([{"a": "hi"}] * 3))
+    for source, expected_score in [(SIMPLE_MODULE, 0.75), (CRASHY_MODULE, 1.0)]:
+        result = adapter.evaluate([ex], {"self": source}, capture_traces=capture_traces)
+        assert result.scores == [expected_score]
+        if capture_traces:
+            assert result.trajectories[0]["execution"] is seen[-1]
+        else:
+            assert result.trajectories is None
+    assert len(seen) == 2
 
-    assert seen.get("n_calls") == 1  # the metric received the trace, with the one call
-    assert seen.get("trace") is None  # eval-mode semantics of the `trace` argument are preserved
+
+def test_flex_program_trace_metric_requires_explicit_migration() -> None:
+    def old_metric(gold, pred, trace=None, pred_name=None, pred_trace=None, program_trace=None):
+        return 1.0 - 0.25 * len(program_trace or [])
+
+    adapter = DspyAdapter(student_module=dspy.Flex(Echo), metric_fn=old_metric, feedback_map={})
+    example = dspy.Example(q="hi", a="hi").with_inputs("q")
+    # Reject before execution, rather than silently treating missing evidence as zero LM calls.
+    with pytest.raises(TypeError, match=r"program_trace.*metric_context"):
+        adapter.evaluate([example], {"self": SIMPLE_MODULE}, capture_traces=False)
 
 
 @deno_required
-def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric() -> None:
+@pytest.mark.parametrize("two_arguments", [False, True])
+def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric(two_arguments) -> None:
     seen: dict[str, object] = {}
 
     def legacy_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
@@ -183,8 +203,9 @@ def test_selection_eval_keeps_vanilla_semantics_for_legacy_metric() -> None:
             return getattr(pred, "a", None) == gold.a  # bootstrapping mode: strict bool
         return 0.75  # eval mode: continuous score
 
+    metric = (lambda gold, pred: legacy_metric(gold, pred)) if two_arguments else legacy_metric
     student = dspy.Flex(Echo)
-    adapter = DspyAdapter(student_module=student, metric_fn=legacy_metric, feedback_map={})
+    adapter = DspyAdapter(student_module=student, metric_fn=metric, feedback_map={})
     candidate = {"self": SIMPLE_MODULE}
     ex = dspy.Example(q="hi", a="hi").with_inputs("q")
 
@@ -202,11 +223,10 @@ def test_selection_eval_binds_metric_with_required_contract_params() -> None:
     declared parameters as None rather than dropping them, so the metric doesn't raise TypeError."""
     seen: dict[str, object] = {}
 
-    def strict_metric(gold, pred, trace, pred_name, pred_trace, program_trace=None):
+    def strict_metric(gold, pred, trace, pred_name, pred_trace):
         seen["trace"] = trace
         seen["pred_name"] = pred_name
         seen["pred_trace"] = pred_trace
-        seen["n_calls"] = len(program_trace) if program_trace is not None else None
         return 1.0
 
     student = dspy.Flex(Echo)
@@ -219,7 +239,6 @@ def test_selection_eval_binds_metric_with_required_contract_params() -> None:
 
     assert batch.scores == [1.0]  # bound and scored instead of raising TypeError
     assert seen.get("trace") is None and seen.get("pred_name") is None and seen.get("pred_trace") is None
-    assert seen.get("n_calls") == 1  # program_trace still delivered to a metric that declares it
 
 
 # --- adapter: scores stay aligned to the batch when examples crash ------------

@@ -7,7 +7,7 @@ from typing import Any
 from gepa import EvaluationBatch
 
 import dspy
-from dspy.evaluate.metric_context import MetricContext, call_metric
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.predict.flex import Flex
 from dspy.predict.flex.ctx import _strip_code_fences
 from dspy.predict.flex.primitives_doc import PRIMITIVES_CATALOG
@@ -195,13 +195,18 @@ def code_reflective_records(eval_batch) -> list[dict[str, Any]]:
     return records
 
 
-def _metric_scoring_kwargs(metric_fn, program_trace) -> dict[str, Any]:
+def _metric_scoring_kwargs(metric_fn) -> dict[str, Any]:
     """Keyword args for the optional GEPA-contract params ``metric_fn`` declares."""
     try:
         declared = inspect.signature(metric_fn).parameters.keys()
     except (TypeError, ValueError):
         return {}
-    values = {"trace": None, "pred_name": None, "pred_trace": None, "program_trace": program_trace}
+    if "program_trace" in declared:
+        raise TypeError(
+            "Flex metrics no longer receive program_trace. Declare metric_context instead "
+            "and use metric_context.execution to inspect candidate execution."
+        )
+    values = {"trace": None, "pred_name": None, "pred_trace": None}
     return {name: value for name, value in values.items() if name in declared}
 
 
@@ -217,10 +222,10 @@ def evaluate_with_trace(
 ) -> EvaluationBatch:
     """Trace-capturing evaluation used when a flex submodule is present.
 
-    A metric that declares a ``program_trace`` parameter receives the execution trace at
-    scoring time (e.g. to penalize LM calls and reward deterministic code); its ``trace``
-    argument stays None, preserving the eval-mode semantics of non-Flex GEPA scoring.
+    Context metrics always receive candidate execution at scoring time; ``capture_traces``
+    only controls retention in the returned batch. Legacy metrics keep eval-mode arguments.
     """
+    legacy_kwargs = {} if accepts_metric_context(metric_fn) else _metric_scoring_kwargs(metric_fn)
     trajs = bootstrap_trace_module.bootstrap_trace_data(
         program=program,
         dataset=batch,
@@ -232,6 +237,7 @@ def evaluate_with_trace(
         failure_score=failure_score,
         format_failure_score=failure_score,
         callback_metadata=callback_metadata,
+        capture_execution=True,
     )
     outputs: list[Any] = [None] * len(batch)
     scores: list[float] = [failure_score] * len(batch)
@@ -244,8 +250,8 @@ def evaluate_with_trace(
         else:
             try:
                 result = call_metric(
-                    metric_fn, t["example"], pred, MetricContext("score", t.get("execution")),
-                    legacy_kwargs=_metric_scoring_kwargs(metric_fn, t["trace"]),
+                    metric_fn, t["example"], pred, MetricContext("score", t["execution"]),
+                    legacy_kwargs=legacy_kwargs,
                 )
             except Exception as e:
                 logger.warning(

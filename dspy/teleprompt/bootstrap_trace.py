@@ -41,10 +41,11 @@ def bootstrap_trace_data(
     log_format_failures: bool = False,
     callback_metadata: dict[str, Any] | None = None,
     capture_crashes: bool = False,
+    capture_execution: bool = False,
 ) -> list[TraceData]:
     # Return a list of dicts with the following keys: example_ind, example, prediction, trace, and score
     # (if metric != None)
-    capture = tracing_enabled() or accepts_metric_context(metric)
+    capture = capture_execution or tracing_enabled() or accepts_metric_context(metric)
     evaluator = Evaluate(
         devset=dataset,
         num_threads=num_threads,

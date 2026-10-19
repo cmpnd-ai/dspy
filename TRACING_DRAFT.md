@@ -6,6 +6,8 @@ This local design document describes the implemented working-tree prototype, not
 
 **DSPy 3.x changes must be additive and opt-in.** Keep callback signatures and registration, legacy predictor tuples (`settings.trace`, `_trace`), history, usage tracking, existing metric calling conventions, and default Evaluate results compatible. A prospective 4.0 removal or breaking redesign requires a separate, explicitly authorized change. New records do not automatically replace every old accumulator.
 
+**Explicit experimental exception:** Flex's `program_trace` metric extension is replaced now by `MetricContext.execution`, so Flex does not carry a separate trace-aware metric API into 4.0. Ordinary legacy metrics remain supported. This exception does not authorize other removals.
+
 The delivered core separates:
 
 - **Identity:** `InvocationRef(trace_id, span_id)` identifies an execution occurrence. Legacy callback `call_id` is a separate opaque compatibility ID, not the span ID.
@@ -169,7 +171,9 @@ def legacy_gepa_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
     return score
 ```
 
-The ordinary scoring bridge preserves its previous call convention (including `trace=None` where applicable); component feedback supplies the captured full tuple trace, component name, and a one-step predictor tuple list. It does not replace the legacy third argument with an `ExecutionTrace`. Context metrics instead receive purpose `feedback`, candidate execution when available, component name, and a target identifying the selected captured call. Repeated calls are distinguished by occurrence, not only signature. Tuple-only trajectories retain the legacy signature-based matching fallback. GEPA Flex uses the scoring adapter but its legacy `program_trace` bridge remains; reliable target identity for rewritten/dynamic Flex programs is not a settled contract.
+The ordinary scoring bridge preserves its previous call convention (including `trace=None` where applicable); component feedback supplies the captured full tuple trace, component name, and a one-step predictor tuple list. It does not replace the legacy third argument with an `ExecutionTrace`. Context metrics instead receive purpose `feedback`, candidate execution when available, component name, and a target identifying the selected captured call. Repeated calls are distinguished by occurrence, not only signature. Tuple-only trajectories retain the legacy signature-based matching fallback.
+
+GEPA Flex now uses `metric(gold, pred, *, metric_context)` instead of its experimental `program_trace` extension. Candidate execution is always available during Flex scoring, even with `capture_traces=False`; that flag controls returned trajectory retention, not metric evidence. Candidate capture closes before scoring, excluding the metric's own judge calls. `bootstrap_trace_data(capture_execution=True)` explicitly requests that evidence when capture and scoring are separate steps. Legacy two-argument and GEPA metrics still work; metrics depending only on the removed `program_trace` extension raise a migration error before candidate execution rather than silently scoring without evidence. Reliable target identity across rewritten/dynamic Flex programs is still not a settled contract. History and sandbox/budget controls remain separate.
 
 ## Delivered integration scope
 
@@ -180,6 +184,7 @@ The ordinary scoring bridge preserves its previous call convention (including `t
 | `bootstrap_trace_data` | Structured execution alongside tuple training view when enabled; failed-parse capture can force it | Fine-tuning/GRPO keep tuple consumers; format-failure support is a special capture path |
 | SIMBA | Scoring context and optional structured capture | Demonstration/reflection tuples stay |
 | GEPA | Context scoring/feedback and occurrence-aware component matching when captured | Five-argument and tuple-only paths stay |
+| GEPA Flex | Candidate execution in context during scoring, independently of trajectory retention | Experimental `program_trace` extension removed; ordinary legacy metrics stay |
 | BestOfN / Refine | Capture attempts when tracing is enabled, separate winner eligibility from observed work | Winning legacy tuples still propagate; reward/advice work excluded from optimization selection |
 | Decision evidence / usage | Attach facts at their producer as well as existing accumulators | Existing collectors retain their distinct nesting semantics |
 | Streaming | Status and token chunks carry optional invocation refs; buffered final chunks retain producer identity | Existing fields remain; untraced calls have no canonical ref and cached predictions do not become token streams |

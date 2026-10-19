@@ -158,26 +158,20 @@ def test_gepa_adapter_forwards_sparse_objective_scores():
     assert evaluation.objective_scores == [{"quality": 1.0, "cost": 0.5}, {}]
 
 
-def test_gepa_flex_evaluation_forwards_metric_objective_scores(monkeypatch):
+def test_gepa_flex_evaluation_forwards_metric_objective_scores():
     from dspy.teleprompt.gepa import gepa_flex_utils
 
-    example = Example(input="question", output="answer")
-    prediction = dspy.Prediction(output="answer")
-    monkeypatch.setattr(
-        gepa_flex_utils.bootstrap_trace_module,
-        "bootstrap_trace_data",
-        lambda **kwargs: [{"example_ind": 0, "example": example, "prediction": prediction, "trace": []}],
-    )
-
-    evaluation = gepa_flex_utils.evaluate_with_trace(
-        program=SimpleModule("input -> output"),
-        batch=[example],
-        metric_fn=multi_objective_metric,
-        num_threads=1,
-        failure_score=0.0,
-        callback_metadata={},
-        capture_traces=True,
-    )
+    example = Example(input="question", output="answer").with_inputs("input")
+    with dspy.context(lm=DummyLM([{"output": "answer"}])):
+        evaluation = gepa_flex_utils.evaluate_with_trace(
+            program=SimpleModule("input -> output"),
+            batch=[example],
+            metric_fn=multi_objective_metric,
+            num_threads=1,
+            failure_score=0.0,
+            callback_metadata={},
+            capture_traces=True,
+        )
 
     assert evaluation.scores == [1.0]
     assert evaluation.objective_scores == [{"correctness": 1.0, "incorrectness": 0.0}]

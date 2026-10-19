@@ -244,9 +244,8 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
             else {"disable_logging": True}
         )
 
-        # When a dspy.Flex submodule is present, capture the execution trace at scoring time so a
-        # metric that declares a `program_trace` parameter can score against it (e.g. an LM-call
-        # penalty).
+        # Flex metrics can inspect candidate execution through MetricContext even when
+        # trajectories are not retained for reflection.
         if self._flex_paths:
             return evaluate_with_trace(
                 program,

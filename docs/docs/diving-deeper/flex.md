@@ -69,8 +69,8 @@ Compiling a program that contains one or more `Flex` submodules optimizes each `
 **The metric's `feedback`**
 As with any GEPA metric, the feedback string goes into the prompt handed to the proposer — here, the *code* proposer. Feedback that diagnoses *why* an output was wrong and hints at structure steers rewrites far better than a bare score.
 
-**Trace-aware metrics (`program_trace`)**
-Add `program_trace=None` as a sixth parameter to your metric and GEPA passes the execution trace at scoring time, so you can score against how the answer was produced. For instance, you may use `len(program_trace)` as an LM-call count to fold a small per-call penalty into the score.
+**Trace-aware metrics (`MetricContext`)**
+Declare `metric(gold, pred, *, metric_context)` to inspect candidate execution during scoring. `metric_context.execution` is an `ExecutionTrace` even when GEPA does not retain trajectories; `metric_context.purpose` is `"score"`. Judge work is excluded from the candidate evidence. This replaces Flex's experimental `program_trace` extension, while ordinary legacy metrics remain supported. Count LM invocations explicitly or inspect reported usage; the number of predictor tuples is not a provider-request or billing count. See the [migration and example](../api/modules/Flex.md#rewarding-leaner-programs-with-a-trace-aware-metric).
 
 ### Tools and sandboxing
 

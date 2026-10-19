@@ -176,6 +176,52 @@ def test_selection_eval_supplies_candidate_evidence(capture_traces) -> None:
 
 
 @deno_required
+@pytest.mark.parametrize("capture_traces", [False, True])
+@pytest.mark.parametrize("num_threads", [1, 2])
+def test_candidate_usage_includes_batch_workers(monkeypatch, capture_traces, num_threads):
+    litellm = pytest.importorskip("litellm")
+
+    def completion(**kwargs):
+        query = kwargs["messages"][-1]["content"]
+        tokens = next(value for label, value in (("seed", 5), ("three", 3), ("seven", 7), ("judge", 100), ("hi", 11))
+                      if label in query)
+        return litellm.ModelResponse(
+            choices=[{"message": {"role": "assistant", "content": "[[ ## a ## ]]\nhi\n[[ ## completed ## ]]"},
+                      "finish_reason": "stop"}],
+            usage={"prompt_tokens": tokens - 1, "completion_tokens": 1, "total_tokens": tokens},
+        )
+
+    monkeypatch.setattr(litellm, "completion", completion)
+
+    class Program(dspy.Module):
+        def __init__(self):
+            self.flex = dspy.Flex(Echo)
+            self.predict = dspy.Predict("q -> a")
+
+        def forward(self, q):
+            self.predict(q="seed")
+            self.predict.batch(
+                [dspy.Example(q=q).with_inputs("q") for q in ("three", "seven")],
+                num_threads=num_threads, disable_progress_bar=True,
+            )
+            return self.flex(q=q)
+
+    seen = []
+
+    def metric(gold, pred, *, metric_context):
+        seen.append(metric_context)
+        dspy.Predict("q -> a")(q="judge")
+        return 1 - metric_context.usage["openai/test"]["total_tokens"] / 100
+
+    adapter = DspyAdapter(student_module=Program(), metric_fn=metric, feedback_map={}, num_threads=2)
+    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=False)):
+        batch = adapter.evaluate([dspy.Example(q="hi").with_inputs("q")], {"flex": SIMPLE_MODULE}, capture_traces)
+    assert seen, batch.outputs
+    assert batch.scores == [0.74]  # 5 sequential + 3 and 7 in workers + 11 in Flex; never the 100-token judge
+    assert seen[0].usage["openai/test"]["total_tokens"] == 26
+
+
+@deno_required
 def test_program_trace_extension_requires_explicit_migration():
     def metric(gold, pred, program_trace=None):
         return 1.0

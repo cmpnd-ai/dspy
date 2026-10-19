@@ -68,9 +68,15 @@ def bootstrap_trace_data(
     # Use `object.__getattribute__` to bypass the custom hook `Module.__getattribute__` so that we avoid
     # the warning that `forward` is not accessed through `__call__`.
     original_forward = object.__getattribute__(program, "forward")
+    capture_settings = {}
+    if accepts_metric_context(metric) or capture_usage:
+        capture_settings["_metric_predictor_names"] = {p: name for name, p in program.named_predictors()}
+    if capture_usage:
+        # Candidate totals include joined DSPy workers, not independent per-worker snapshots.
+        capture_settings["_share_usage_tracker"] = True
 
     def patched_forward(program_to_use: Module, **kwargs):
-        with dspy.context(trace=[]), track_usage() if capture_usage else nullcontext() as usage:
+        with dspy.context(trace=[], **capture_settings), track_usage() if capture_usage else nullcontext() as usage:
             try:
                 prediction = original_forward(**kwargs)
                 return prediction, dspy.settings.trace.copy(), usage.get_total_tokens() if usage else None
@@ -141,7 +147,7 @@ def bootstrap_trace_data(
         program.forward = original_forward
 
     data = []
-    predictor_names = {id(p): name for name, p in program.named_predictors()}
+    predictor_names = capture_settings.get("_metric_predictor_names")
     for example_ind, (example, prediction, score) in enumerate(results):
         try:
             prediction, trace, usage = prediction
@@ -159,8 +165,8 @@ def bootstrap_trace_data(
             else:
                 continue
         data_dict = {"example": example, "prediction": prediction, "trace": trace, "example_ind": example_ind}
-        if accepts_metric_context(metric) or capture_usage:
-            data_dict["trace_names"] = [predictor_names.get(id(step[0])) for step in trace]
+        if predictor_names is not None:
+            data_dict["trace_names"] = [predictor_names.get(step[0]) for step in trace]
         if capture_usage:
             data_dict["usage"] = usage
         if metric:

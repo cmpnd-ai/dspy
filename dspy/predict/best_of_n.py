@@ -59,6 +59,10 @@ class BestOfN(Module):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
             mod = self.module.deepcopy()
             mod.set_lm(lm_)
+            names = dspy.settings.get("_metric_predictor_names")
+            if names is not None:
+                originals = dict(self.module.named_predictors())
+                names.update((p, names.get(originals[name])) for name, p in mod.named_predictors())
 
             try:
                 with dspy.context(trace=[]):

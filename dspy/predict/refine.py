@@ -109,6 +109,10 @@ class Refine(Module):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
             mod = self.module.deepcopy()
             mod.set_lm(lm_)
+            names = dspy.settings.get("_metric_predictor_names")
+            if names is not None:
+                originals = dict(self.module.named_predictors())
+                names.update((p, names.get(originals[name])) for name, p in mod.named_predictors())
 
             predictor2name = {predictor: name for name, predictor in mod.named_predictors()}
             signature2name = {predictor.signature: name for name, predictor in mod.named_predictors()}

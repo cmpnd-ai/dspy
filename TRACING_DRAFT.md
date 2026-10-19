@@ -75,7 +75,11 @@ produce tuples; direct LM calls and failures need not produce them.
 
 GEPA records predictor names alongside existing tuples only for migrated metrics (or Flex usage
 capture). Migrated feedback matches the name and selects an occurrence. Legacy metrics keep their
-signature-based matching. Dynamic unnamed predictors, aliases, and arbitrary user-created threads
+signature-based matching. BestOfN/Refine copy names from the original predictor paths into a scoped
+lookup; they do not infer names from signatures or change the legacy tuples. Candidate usage opts
+into sharing its existing tracker with DSPy workers; legacy per-worker isolation stays unchanged.
+Totals cover completed/joined work, not detached or abandoned workers. These are private capture
+details, not new public settings or an identity API. Dynamic unnamed predictors, aliases, and arbitrary user-created threads
 are not given stronger identity guarantees. Evidence cannot be required at every boundary without
 expanding this design into a different project.
 
@@ -139,6 +143,9 @@ The differential harness executes identical bytes against the baseline and revis
 separate processes: 611 cases, zero differences. Coercing returns to bool changes 182 cases,
 including BestOfN incorrectly selecting 0.2 over 0.8. Cases cover ABIs, raw results, exceptions,
 thresholds, bootstrap, ranking, trace collection, and GEPA score/feedback interpretation.
+Additional mutations substitute purpose, empty evidence, a same-signature sibling, or a different
+occurrence; each fails the migrated public-boundary checks. Review regressions exercise copied
+BestOfN/Refine targets and sequential versus parallel token capture, including a distinct judge.
 
 Real Azure + Deno + cmpnd callback checks compare independent provider requests with candidate
 evidence: cached and uncached two-step candidates have two tuples but one versus two requests;

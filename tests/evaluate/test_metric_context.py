@@ -128,7 +128,8 @@ def test_reward_uses_inputs_and_excludes_judge(strategy):
 
 
 @pytest.mark.parametrize("seed,target", [(0, 2), (1, 0)])
-def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, seed, target):
+@pytest.mark.parametrize("strategy", [None, dspy.BestOfN, dspy.Refine])
+def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, seed, target, strategy):
     import gepa
 
     class Program(dspy.Module):
@@ -142,12 +143,13 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
             return self.first(q="last call")
 
     feedback_results = []
+    component_name = "module.first" if strategy else "first"
 
     def metric(gold, pred, *, metric_context):
         if metric_context.purpose == "score":
             return dspy.Prediction(score=0.25, objective_scores={"cost": -2})
         assert metric_context.purpose == "feedback"
-        assert metric_context.component_name == "first"
+        assert metric_context.component_name == component_name
         assert metric_context.target == target
         assert len(metric_context.trace) == 3
         step = metric_context.trace[metric_context.target]
@@ -163,15 +165,18 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
         batch = adapter.evaluate(trainset, seed_candidate, capture_traces=True)
         assert batch.scores == [0.25]
         assert batch.objective_scores == [{"cost": -2}]
-        records = adapter.make_reflective_dataset(seed_candidate, batch, ["first"])
-        assert records["first"][0]["Feedback"] == ("Improve last call" if target == 2 else "Improve first call")
+        records = adapter.make_reflective_dataset(seed_candidate, batch, [component_name])
+        assert records[component_name][0]["Feedback"] == ("Improve last call" if target == 2 else "Improve first call")
         # Existing GEPA interpretation: component feedback cannot replace program fitness.
         assert feedback_results[0].score == 0.25
         raise Finished
 
     monkeypatch.setattr(gepa, "optimize", optimize)  # external optimizer boundary
     with dspy.context(lm=DummyLM([{"a": "first"}, {"a": "sibling"}, {"a": "last"}])):
+        student = Program()
+        if strategy:
+            student = strategy(student, N=1, reward_fn=lambda inputs, pred: 1.0, threshold=0.5)
         with pytest.raises(Finished):
             dspy.GEPA(metric=metric, max_metric_calls=4, reflection_lm=DummyLM([]), seed=seed).compile(
-                Program(), trainset=[example()],
+                student, trainset=[example()],
             )

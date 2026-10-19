@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from types import MethodType
 from typing import Any, Callable, TypedDict
+from weakref import WeakKeyDictionary
 
 import dspy
 from dspy.evaluate.evaluate import Evaluate
@@ -70,7 +71,7 @@ def bootstrap_trace_data(
     original_forward = object.__getattribute__(program, "forward")
     capture_settings = {}
     if accepts_metric_context(metric) or capture_usage:
-        capture_settings["_metric_predictor_names"] = {p: name for name, p in program.named_predictors()}
+        capture_settings["_metric_predictor_names"] = WeakKeyDictionary({p: name for name, p in program.named_predictors()})
     if capture_usage:
         # Candidate totals include joined DSPy workers, not independent per-worker snapshots.
         capture_settings["_share_usage_tracker"] = True

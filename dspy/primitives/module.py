@@ -9,8 +9,8 @@ from dspy.primitives.example import Example
 from dspy.primitives.prediction import Prediction
 from dspy.utils import magicattr
 from dspy.utils.callback import with_callbacks
+from dspy.utils.callback_context import ACTIVE_INVOCATION
 from dspy.utils.inspect_history import pretty_print_history
-from dspy.utils.usage_tracker import track_usage
 
 logger = logging.getLogger(__name__)
 
@@ -92,41 +92,27 @@ class Module(BaseModule, metaclass=ProgramMeta):
 
     @with_callbacks
     def __call__(self, *args, **kwargs) -> Prediction:
-        from dspy.dsp.utils.settings import thread_local_overrides
-
         caller_modules = settings.caller_modules or []
         caller_modules = list(caller_modules)
         caller_modules.append(self)
 
         with settings.context(caller_modules=caller_modules):
-            if settings.track_usage and thread_local_overrides.get().get("usage_tracker") is None:
-                with track_usage() as usage_tracker:
-                    output = self.forward(*args, **kwargs)
-                tokens = usage_tracker.get_total_tokens()
-                self._set_lm_usage(tokens, output)
-
-                return output
-
-            return self.forward(*args, **kwargs)
+            output = self.forward(*args, **kwargs)
+            if settings.track_usage and settings.usage_tracker is None:
+                self._set_lm_usage(ACTIVE_INVOCATION.get().usage, output)
+            return output
 
     @with_callbacks
     async def acall(self, *args, **kwargs) -> Prediction:
-        from dspy.dsp.utils.settings import thread_local_overrides
-
         caller_modules = settings.caller_modules or []
         caller_modules = list(caller_modules)
         caller_modules.append(self)
 
         with settings.context(caller_modules=caller_modules):
-            if settings.track_usage and thread_local_overrides.get().get("usage_tracker") is None:
-                with track_usage() as usage_tracker:
-                    output = await self.aforward(*args, **kwargs)
-                    tokens = usage_tracker.get_total_tokens()
-                    self._set_lm_usage(tokens, output)
-
-                    return output
-
-            return await self.aforward(*args, **kwargs)
+            output = await self.aforward(*args, **kwargs)
+            if settings.track_usage and settings.usage_tracker is None:
+                self._set_lm_usage(ACTIVE_INVOCATION.get().usage, output)
+            return output
 
     def named_predictors(self):
         """Return all named Predict modules in this module.

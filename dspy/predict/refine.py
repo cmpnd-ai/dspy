@@ -9,6 +9,7 @@ from dspy.adapters.utils import get_field_description_string
 from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Prediction
 from dspy.signatures import InputField, OutputField, Signature
+from dspy.utils.execution import capture_invocation
 
 from .predict import Module
 
@@ -119,29 +120,28 @@ class Refine(Module):
 
             try:
                 with dspy.context(trace=[]):
-                    if not advice:
-                        outputs = mod(**kwargs)
-                    else:
-
-                        class WrapperAdapter(adapter.__class__):
-                            def __call__(self, lm, lm_kwargs, signature, demos, inputs):
-                                inputs["hint_"] = advice.get(signature2name.get(signature), "N/A")  # noqa: B023
-                                signature = signature.append(
-                                    "hint_", InputField(desc="A hint to the module from an earlier run")
-                                )
-                                return adapter(lm, lm_kwargs, signature, demos, inputs)
-
-                        with dspy.context(adapter=WrapperAdapter()):
+                    with capture_invocation() as attempt:
+                        if not advice:
                             outputs = mod(**kwargs)
+                        else:
+
+                            class WrapperAdapter(adapter.__class__):
+                                def __call__(self, lm, lm_kwargs, signature, demos, inputs):
+                                    inputs["hint_"] = advice.get(signature2name.get(signature), "N/A")  # noqa: B023
+                                    signature = signature.append(
+                                        "hint_", InputField(desc="A hint to the module from an earlier run")
+                                    )
+                                    return adapter(lm, lm_kwargs, signature, demos, inputs)
+
+                            with dspy.context(adapter=WrapperAdapter()):
+                                outputs = mod(**kwargs)
 
                     trace = dspy.settings.trace.copy()
 
                     # TODO: Remove the hint from the trace, if it's there.
 
                     # NOTE: Not including the trace of reward_fn.
-                    reward = self.reward_fn(kwargs, outputs, MetricContext(
-                        "score", trace=trace, execution=capture.trace if capture is not None and capture.recording else None,
-                    ))
+                    reward = self.reward_fn(kwargs, outputs, MetricContext(invocation=attempt.invocation))
 
                 if reward > best_reward:
                     best_reward, best_pred, best_trace = reward, outputs, trace

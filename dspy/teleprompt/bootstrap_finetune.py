@@ -74,7 +74,7 @@ class BootstrapFinetune(FinetuneTeleprompter):
         num_threads = self.num_threads or dspy.settings.num_threads
         for t in teachers:
             trace_data += bootstrap_trace_data(
-                program=t, dataset=trainset, metric=self.metric, num_threads=num_threads, metric_purpose="accept",
+                program=t, dataset=trainset, metric=self.metric, num_threads=num_threads,
             )
 
         logger.info("Preparing the train data...")

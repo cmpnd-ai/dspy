@@ -4,39 +4,22 @@ import inspect
 from dataclasses import dataclass
 from typing import Literal
 
-from dspy.utils.execution import ExecutionRef, ExecutionTrace, Invocation
+from dspy.utils.execution import Invocation
 
 
 @dataclass(frozen=True)
 class MetricContext:
-    """Why a metric is called and the evidence its caller already has.
+    """The question a metric answers, with its candidate execution and feedback target.
 
-    Trace membership is snapshotted, not the predictor/input/output objects. A target
-    is an occurrence index in that trace, not a component or global execution ID.
-    None means evidence is unavailable; an empty trace/usage means none was recorded.
-    Usage contains reported non-cached totals by model, not an invoice.
+    Results remain caller-specific. Bootstrap requests a score and applies its own
+    admission policy; GEPA requests feedback about one exact predictor occurrence.
+    Evidence lives on the invocation, not in a second bundle of trace/usage fields.
+    None means no candidate was captured. Treat retained calls as read-only.
     """
 
-    purpose: Literal["score", "accept", "feedback"] = "score"
-    trace: tuple[Invocation, ...] | None = None
-    component_name: str | None = None
-    target: int | None = None
-    usage: dict | None = None
-    execution: ExecutionTrace | None = None
-
-    def __post_init__(self):
-        if self.trace is not None:
-            object.__setattr__(self, "trace", tuple(self.trace))
-
-    @property
-    def target_ref(self) -> ExecutionRef | None:
-        """Durable identity of the selected predictor occurrence, when recorded."""
-        if self.execution is None or self.trace is None or self.target is None:
-            return None
-        ref = self.trace[self.target].ref
-        if ref is not None and ref.trace_id == self.execution.trace_id:
-            return ref
-        return None
+    purpose: Literal["score", "feedback"] = "score"
+    invocation: Invocation | None = None
+    target: Invocation | None = None
 
 
 def accepts_metric_context(metric):

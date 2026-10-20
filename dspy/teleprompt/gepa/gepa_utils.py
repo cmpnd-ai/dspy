@@ -443,8 +443,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
                     context_kwargs = {}
                     if accepts_metric_context(feedback_fn):
                         context_kwargs["metric_context"] = MetricContext(
-                            "feedback", trace=trace, component_name=pred_name, target=target, usage=data.get("usage"),
-                            execution=data.get("execution"),
+                            "feedback", invocation=data.get("invocation"), target=trace[target],
                         )
                     fb = feedback_fn(
                         predictor_output=outputs,

@@ -612,7 +612,7 @@ class GEPA(Teleprompter):
                 trace_for_pred = [(predictor, predictor_inputs, predictor_output)]
                 o = call_metric(
                     self.metric_fn, module_inputs, module_outputs,
-                    metric_context or MetricContext("feedback", trace=captured_trace, component_name=pred_name),
+                    metric_context or MetricContext("feedback"),
                     legacy_args=(captured_trace, pred_name, trace_for_pred),
                 )
                 if hasattr(o, "feedback"):

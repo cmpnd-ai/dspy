@@ -1,12 +1,14 @@
 import logging
 import random
 import threading
+from contextlib import nullcontext
 
 import tqdm
 
 import dspy
-from dspy.evaluate.metric_context import MetricContext, call_metric
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.teleprompt.teleprompt import Teleprompter
+from dspy.utils.execution import capture_invocation
 
 from .vanilla import LabeledFewShot
 
@@ -183,7 +185,8 @@ class BootstrapFewShot(Teleprompter):
                         predictor_cache[name] = predictor.demos
                         predictor.demos = [x for x in predictor.demos if x != example]
 
-                    prediction = teacher(**example.inputs())
+                    with capture_invocation(teacher) if accepts_metric_context(self.metric) else nullcontext() as capture:
+                        prediction = teacher(**example.inputs())
                     trace = dspy.settings.trace
 
                     for name, predictor in teacher.named_predictors():
@@ -192,7 +195,7 @@ class BootstrapFewShot(Teleprompter):
                 if self.metric:
                     metric_val = call_metric(
                         self.metric, example, prediction,
-                        MetricContext("score" if self.metric_threshold else "accept", trace=trace),
+                        MetricContext(invocation=capture.invocation if capture else None),
                         legacy_args=(trace,),
                     )
                     if self.metric_threshold:

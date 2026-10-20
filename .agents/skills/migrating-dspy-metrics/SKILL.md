@@ -1,155 +1,132 @@
 ---
 name: migrating-dspy-metrics
-description: Migrates DSPy metrics and their callers to the explicit MetricContext contract, separating scoring, demonstration acceptance, and feedback from trace availability. Use when upgrading metric APIs or replacing trace, pred_name, pred_trace, or program_trace metric arguments.
+description: Migrates DSPy metrics, wrappers, and direct callers to invocation-backed MetricContext requests while preserving caller-owned scoring and acceptance policies. Use when replacing trace, pred_name, pred_trace, or program_trace metric arguments.
 ---
 
 # Migrating DSPy metrics
 
-Migrate to one calling convention, not a compatibility wrapper:
+Migrate to one explicit calling convention, not an application compatibility adapter:
 
 ```python
 def metric(example_or_inputs, prediction, *, metric_context): ...
 ```
 
-This skill targets DSPy's MetricContext contract. Verify it exists in the user's target checkout
-or installed package; do not assume a particular released version has it. Do not upgrade or
-replace their DSPy dependency without authorization. If the target lacks the API, identify that
-blocker before editing working metrics to require it.
+## 1. Verify the target and inventory consumers
 
-## 1. Inventory consumers before editing definitions
+Inspect the pinned checkout or installed package before editing. Confirm MetricContext has
+`purpose` (`"score"` or `"feedback"`), `invocation` (candidate root or None), and `target`
+(exact Invocation or None). There is no acceptance purpose or context trace/usage/execution field.
+Do not assume a released version supplies this API, upgrade dependencies without authorization,
+or patch site-packages. Report a missing API as a blocker. Reconcile target-version differences.
 
-Find metrics passed to Evaluate, optimizers, BestOfN/Refine rewards, and application-owned loops.
-Follow aliases, partials, decorators, callable objects, Module.forward, factories, and direct calls.
-Read what each consumer does with the result: sum, compare, test truthiness, or read feedback.
-Do not rewrite unrelated callbacks or functions just because they accept an argument named trace.
+Find metrics passed to Evaluate, optimizers, BestOfN/Refine rewards, and application loops.
+Follow aliases, partials, decorators, factories, callable objects, Module.forward, wrappers,
+and direct calls. Record each caller's result interpretation and exception policy. Check native
+library metrics for context support; do not claim context-only migration while relying on their
+legacy bridge. Leave unrelated functions named trace alone.
 
-For each metric, record its callers, purpose, available evidence, return shape, and exception policy.
-When working outside the DSPy repository, inspect the pinned target's implementation or documentation.
-The contract below is the migration target; reconcile changes in that target before proceeding.
-For library-supplied metrics, check the target class rather than patching site-packages. Report any
-missing native context support as remaining library migration work; do not claim the application
-is context-only while it still depends on DSPy's legacy bridge.
+| Caller | Request and interpretation |
+| --- | --- |
+| Evaluate, Avatar, ReAnchor | Score; explicitly contextual metrics receive captured candidates. Aggregation/coercion/errors remain caller-specific. |
+| BootstrapFewShot | Score; truthy metric_threshold triggers numerical comparison, otherwise result truthiness. Zero threshold means absent. |
+| BootstrapFinetune | Score via bootstrap_trace_data; filters stored score truthiness. |
+| GRPO / bootstrap_trace_data; SIMBA | Score with captured candidates; preserve ranking, metadata, and failure policies. SIMBA can supply prediction=None. |
+| BestOfN / Refine | Score per captured attempt; first argument is an inputs dict, not gold labels. |
+| GEPA | Score for program fitness/objectives; feedback for one exact occurrence. Component score does not replace program fitness. |
+| Flex | Score with candidate evidence even without returned trajectories; preserve scoring-result feedback used by code reflection. |
 
-| Caller | Purpose | Evidence / decision |
-| --- | --- | --- |
-| Evaluate; Avatar; ReAnchor | score | Evidence may be unavailable; fitness and aggregation remain caller-owned. |
-| BootstrapFewShot with a truthy metric_threshold | score | Caller compares fitness against its threshold. |
-| BootstrapFewShot without a truthy metric_threshold | accept | Caller admits demonstrations by truthiness. A zero threshold currently means absent, not a zero cutoff. |
-| BootstrapFinetune | accept | Caller filters training data by truthiness. |
-| GRPO / bootstrap_trace_data default; SIMBA | score | Captured predictor evidence does not imply acceptance. SIMBA can call the metric with prediction=None after failure. |
-| BestOfN / Refine reward | score | First argument is an inputs dict, not gold labels; reward ranks attempts. Refine advice is separate. |
-| GEPA candidate evaluation | score | Program fitness and optional objective scores. |
-| GEPA component critique | feedback | Named component and selected occurrence; feedback score does not replace program fitness. |
-| Flex candidate evaluation | score | Candidate trace and reported usage, including when returned trajectories are not retained. |
+## 2. Freeze behavior and resolve acceptance policy
 
-## 2. Freeze behavior and identify intentional changes
+Record old scores, selected attempts, accepted demonstrations/training rows, feedback targets,
+metadata, and exceptions through actual callers. Use asymmetric scores, cutoff boundaries,
+empty/unavailable evidence, and repeated predictor calls. If the old environment is unavailable,
+use recorded expectations and limit the claim; never fabricate a baseline.
 
-Before editing, run representative old metrics through their real callers. Record scores, selected
-attempts, accepted demonstrations/training rows, feedback text/target, metadata, and exceptions.
-Use asymmetric scores, threshold boundaries, empty evidence, and repeated predictor occurrences.
-Record what cannot be reproduced; do not fabricate a baseline.
+Both bootstrap and finetune request ordinary scores. Do not infer acceptance from purpose,
+trace presence, usage, a target, or the optimizer's identity. Replace old trace-dependent mode
+switches with numeric scoring and an explicit caller policy. A signature migration can otherwise
+silently turn an old cutoff into admission of every nonzero partial score.
 
-Distinguish a signature migration from a policy change:
+- Preserve ranges, objective_scores, feedback, and Prediction metadata unless intentionally changed.
+- `Prediction(score=False)` is truthy. Returning False instead changes admission, not just syntax.
+- Preserve the caller's truthy-threshold/zero-threshold semantics unless a change is authorized.
+- If finetune requires a boolean cutoff, use a caller-specific metric wrapper. Do not invent an
+  acceptance purpose, caller IDs, evidence heuristics, or a universal verdict object.
+- Demonstrate intentional policy changes with old/new admission results below, at, and above
+  the actual cutoff; report them separately from compatibility-preserving changes.
 
-- A metric using trace presence as a mode switch should use purpose instead. But old fine-tuning
-  could pass trace=None while asking for acceptance. Do not assume its old behavior matched
-  few-shot acceptance just because both now request accept.
-- Prediction(score=False) is truthy. Replacing it with False changes actual admission behavior.
-  Report that discrepancy and settle the intended policy, rather than silently fixing or preserving it.
-- Preserve numeric ranges, thresholds, objective_scores, feedback, and other result metadata unless
-  the requested migration explicitly changes them. Do not turn every result into float or bool.
-- If different callers require different acceptance policies that one metric cannot express, make
-  those policies explicit in caller-specific metrics or obtain a policy decision. Do not add caller
-  IDs, infer the optimizer from evidence, or invent a universal result object to conceal the conflict.
+## 3. Migrate definitions, wrappers, and direct calls
 
-Compatibility with old signatures is not required by default. Ask about supporting both versions
-only when the project explicitly needs it; do not add fallback arguments or runtime signature sniffing.
+Require keyword-only metric_context, including Module.forward. Transitional DSPy dispatch opts in
+by explicit declaration, not **kwargs alone; the runtime compatibility bridge remains. Forward
+the keyword through every owned wrapper and supply requests at direct calls. Never catch TypeError
+and retry a different signature: a judge could run twice. Do not add dual signatures by default.
 
-## 3. Rewrite the metric and all owned call sites
-
-Declare required keyword-only metric_context, including on a Module's forward. An explicit declaration
-also works with transitional DSPy callers; **kwargs alone is not opt-in on those versions. Update
-wrappers to forward the keyword, and update direct calls to supply an explicit request. Do not catch
-TypeError and retry on another signature: an LM judge could run twice.
-
-### Plain and acceptance-aware metrics
-
-Pure scoring functions can ignore the context when their answer is valid for their consumers:
+This runnable example keeps scoring separate from a deliberate finetune cutoff:
 
 ```python
-def exact(gold, pred, *, metric_context):
-    return gold.answer == pred.answer
+import dspy
 
-# Formerly: return score >= 0.8 if trace is not None else score
 def quality(gold, pred, *, metric_context):
-    score = compare_answers(gold.answer, pred.answer)
-    return score >= 0.8 if metric_context.purpose == "accept" else score
+    return pred.quality  # Substitute the application's existing numeric grader.
 
-score = quality(gold, pred, metric_context=dspy.MetricContext("score"))
-accepted = quality(gold, pred, metric_context=dspy.MetricContext("accept", trace=()))
+def finetune_metric(gold, pred, *, metric_context):
+    return quality(gold, pred, metric_context=metric_context) >= 0.8
+
+context = dspy.MetricContext("score")  # Direct calls may have no captured candidate.
+gold = dspy.Example(answer="expected")
+for value, expected in [(0.79, False), (0.8, True), (0.81, True)]:
+    pred = dspy.Prediction(quality=value)
+    assert quality(gold, pred, metric_context=context) == value
+    assert finetune_metric(gold, pred, metric_context=context) is expected
+    assert bool(value)  # Legacy finetune truthiness would admit all three.
 ```
 
-Use the metric's existing acceptance threshold, not 0.8 blindly. Thresholded bootstrap requests
-score; let the caller apply its threshold once. For metrics returning Prediction metadata, preserve
-that object for scoring. Return an actual acceptance decision only after resolving the truthiness
-policy above. Never treat presence of trace, usage, component_name, or target as the purpose.
+Use the application's actual threshold, not 0.8 blindly. Keep numeric quality for ranking,
+evaluation, and thresholded bootstrap; a boolean wrapper is not a universal replacement. If the
+grader returns Prediction, preserve it for scoring and explicitly select `.score` in a policy
+wrapper only after settling the intended truthiness behavior.
 
-### GEPA's five-argument metrics
+### GEPA feedback targets
 
-Replace pred_name with metric_context.component_name. The selected old pred_trace step becomes
-metric_context.trace[metric_context.target]; target is an index, including valid index zero.
-Do not index by component name, search by signature, or choose the first/last call yourself.
+Replace pred_name with metric_context.target.component_name and pred_trace with the selected
+Invocation itself, not an index into a second trace. GEPA selects the occurrence; never search by
+signature, component name alone, or first/last call. Preserve result normalization and existing
+whole-program feedback/objective metadata. Do not migrate the internal PredictorFeedbackFn ABI
+as though it were the user metric API.
 
 ```python
-def metric(gold, pred, *, metric_context):
-    score = grade(gold, pred)
+def critique(gold, pred, *, metric_context):
+    score = float(gold.answer == pred.answer)
     if metric_context.purpose == "feedback":
-        trace, target = metric_context.trace, metric_context.target
-        if trace is None or target is None:
-            raise ValueError("Component feedback requires its selected trace occurrence")
-        call = trace[target]
-        text = critique(call.component_name, call.inputs, call.outputs)
-        return dspy.Prediction(score=score, feedback=text)
+        call = metric_context.target
+        if call is None:
+            raise ValueError("Component feedback needs an exact occurrence")
+        return dspy.Prediction(score=score, feedback=f"Review {call.component_name}: {call.outputs}")
     return score
 ```
 
-Preserve existing whole-program feedback during score requests if a caller consumes it. In
-particular, Flex code reflection uses the scoring result's feedback; do not blindly move all
-feedback generation into the component-feedback branch. Keep program fitness and objective scores
-separate from a component-specific critique. Do not migrate DSPy's internal PredictorFeedbackFn
-callback ABI as though it were the user metric's five-argument API.
+### Evidence and usage
 
-### Typed predictor evidence
+Read selected predictor calls from `metric_context.invocation.trace`, aggregate usage from
+`.usage`, immediate calls from `.children`, and traversal from `.descendants()`. Check the root
+for None first. Traversal raises when a subtree was not retained; None evidence is not empty
+evidence. Do not silently use `or {}`/`or []` and treat unavailable work as free execution.
 
-In this prototype, trace entries are `dspy.Invocation` objects, not JSON spans. Use
-`call.instance`, `call.inputs`, `call.outputs`, `call.component_name`, and `call.ref`.
-Tuple unpacking/indexing remains a transitional view; do not rebuild tuples and lose identity.
-`component_name` identifies an optimizable component; `call_id`/`ref` identify one occurrence.
-Equal signatures, repeated invocations, and copied retry attempts are not interchangeable.
-Names are relative to the collecting optimizer's program. Dynamically constructed, unowned
-predictors can have no component name; never guess one from their signature or ordinal.
-
-Use prepared `call.inputs` for metrics/training, not bound `call.arguments` (which can contain
-LM/config overrides). Treat calls as read-only. They retain live Python objects and are not a
-portable persistence format. A failed parse can have a caller-owned `FailedPrediction` in
-`call.outputs` while retaining its exception and occurrence reference.
-
-### Flex and evidence-dependent metrics
-
-Replace experimental program_trace with metric_context.trace, not with a new execution recorder.
-For the former tracing prototype, replace execution.predictor_trace() with trace and execution.usage()
-with usage only after checking the fields/units actually consumed. If the target version supplies
-`metric_context.execution`, it is a separate detached record; `target_ref` links the selected call
-to that record. Check availability rather than requiring a JSON record to inspect typed evidence.
-Provider-request counts still cannot be inferred from predictor calls or span counts.
+Calls expose instance, prepared inputs, outputs, exception, component_name, call_id/parent_id,
+times, and optional ref. `.arguments` contains bound arguments, potentially LM/config overrides.
+`.own_usage` is directly observed usage; `.usage` aggregates noncached reported model totals;
+`.cache_hit` records observed LM cache status. Treat calls as read-only live objects. Tuple access
+is transitional. Failed parses may have caller-owned FailedPrediction output views. Repeated
+calls/copies and equal signatures are not interchangeable; unowned predictors can be unnamed.
 
 ```python
 def token_budget(gold, pred, *, metric_context):
-    usage = metric_context.usage
-    if usage is None:
-        raise ValueError("This metric needs candidate usage, as supplied by Flex evaluation")
+    root = metric_context.invocation
+    if root is None or root.usage is None:
+        raise ValueError("Candidate usage is required")
     tokens = 0
-    for counts in usage.values():
+    for counts in root.usage.values():
         total = counts.get("total_tokens")
         if total is None:
             total = counts["prompt_tokens"] + counts["completion_tokens"]
@@ -157,41 +134,49 @@ def token_budget(gold, pred, *, metric_context):
     return float(gold.answer == pred.answer) - tokens / 100000
 ```
 
-None means unavailable; empty trace/usage means nothing was recorded. Do not use `or {}` or `or []`
-to turn unavailable evidence into free execution. The example accepts a reported total (including
-zero) or both component counts; incomplete counts fail rather than defaulting to zero.
-Reported usage is not an invoice or proof every
-provider reported tokens. Tuple length counts predictor steps, not LM requests: cache hits still
-produce steps. Preserve a deliberate predictor-step penalty; changing it to a token penalty changes
-units and requires an explicit policy. Never relabel tuple length as a request count.
+Keep reported zero totals; missing component counts should fail rather than default to zero.
+Reported tokens are not an invoice or proof all providers reported. Predictor counts are not
+LM request counts (cache hits still produce predictor calls). Changing a step penalty to a token
+penalty changes units and requires an explicit policy decision.
 
-Candidate evidence excludes judge work and is independent of trajectory retention. Do not reconstruct
-it from global LM history or callbacks. Trace membership is snapshotted but payloads are shared;
-treat them as read-only. Context is not History, a durable trace, or an observability SDK contract.
+Replace experimental program_trace or obsolete context evidence fields with the invocation
+members actually needed. Typed evidence needs no JSON. Public capture_execution exposes roots
+and detached `.trace` JSON; request bootstrap_trace_data JSON explicitly with capture_execution=True.
+Its row invocation is the root; trace/usage keys are compatibility projections. Do not reconstruct
+evidence from global LM history or add another tracker/recorder. Usage producers call record_usage
+on active LM invocations; callback completion propagates totals and feeds UsageTracker scopes.
+Automatic `track_usage=True` attaches each module's invocation total to its Prediction without
+opening a separate tracker. This includes joined workers and may expose nested-module totals
+previously unavailable. Explicit `track_usage()` scopes keep their existing semantics.
 
-## 4. Prove the migration, not just that it imports
+Evaluate/bootstrap/Avatar/ReAnchor capture for explicitly contextual metrics; SIMBA and
+bootstrap_trace_data capture candidates, BestOfN/Refine capture each attempt before reward.
+Evaluate supplies no candidate invocation for uninstrumented callables; their child predictor
+calls are not a complete execution of the callable. Handle unavailable evidence explicitly.
+Attempt evidence excludes its own reward. Whole-candidate usage includes internal rewards,
+advice, and discarded attempts but excludes the outer judge. Do not promise generic judge
+exclusion. Internal capture_invocation forwards to existing recorders; nested public JSON capture
+scopes remain isolated. Invocation refs do not imply a retained JSON record. Context is not History,
+persistence, or an observability SDK contract.
 
-Run the same examples through the target callers. Compare old and migrated outputs/decisions,
-listing intentional differences separately. When the old environment is unavailable, use recorded
-expectations and explicitly limit the compatibility claim.
+## 4. Demonstrate behavior through real consumers
 
-Exercise applicable cases, not an indiscriminate Cartesian product:
+Compare old and migrated decisions; list intentional changes separately. Exercise applicable cases:
 
-- Score with a nonempty trace; accept with an empty trace; score with no evidence.
-- Scores below, at, and above the relevant cutoff; zero/negative scores; threshold-zero policy.
-- Raw bool/float and Prediction with metadata; errors remain errors with the same caller policy.
-- GEPA same-signature siblings, repeated calls, target zero, and whole-program versus component score.
-- Flex retained/unretained trajectories, deterministic work, cache hits, and judge usage exclusion.
-- Module metrics, wrappers, and direct calls; inputs dictionaries for inference-time rewards.
+- Score with populated, empty, and unavailable evidence; numeric ranges and raw result metadata.
+- Below/at/above cutoff; zero/negative scores, threshold zero, Prediction truthiness, finetune rows.
+- GEPA repeated/same-signature siblings, exact selected object, program versus component score.
+- Retained/unretained trajectories, deterministic work, cache hits, outer judge exclusion,
+  per-attempt reward exclusion versus whole-candidate internal reward/advice accounting.
+- Module metrics, wrappers, direct calls, inputs-dict rewards, and existing exception policies.
 
-Introduce temporary negative controls: swap purpose, erase supplied evidence, select a sibling or
-another occurrence, and coerce the result. Confirm the relevant checks fail for the intended reason,
-then remove the mutations. A passing test that ignores purpose or never reaches the metric proves little.
-Keep only regression tests of behavior the application relies on; do not commit the mutation harness
-merely as a record. Prefer deterministic fixtures first; use real judges when the contract depends on them.
+Use temporary negative controls (erase evidence, select a sibling, coerce a score, drop a wrapper
+keyword) and ensure relevant checks fail, then remove mutations. Keep only caller-facing regression
+tests, not a committed scratch harness. Prefer deterministic fixtures; use real judges only where
+needed. Historical DSPy verification is not proof of a new application's migration.
 
-Finally search for remaining legacy metric arguments, mode tests, wrappers, direct calls, and stale
-examples. Leave unrelated trace collection, History, callbacks, OTel, persistence, and optimizer
-algorithms alone. Report the target revision, migrated entry points, intentional policy changes,
-commands/results, and unresolved evidence or caller-policy requirements. Do not claim that migrating
-an application removed DSPy's own compatibility bridge or changed a published release.
+Search for stale arguments, evidence fields, mode switches, wrappers, direct calls, and examples.
+Leave unrelated callbacks, History, export/storage, and optimizer algorithms alone. Report target
+revision, entry points, intentional acceptance changes with evidence, commands/results, and
+unresolved requirements. Do not claim application migration removed DSPy's compatibility bridge
+or changed a published release.

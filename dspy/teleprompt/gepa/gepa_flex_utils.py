@@ -202,7 +202,7 @@ def _metric_scoring_kwargs(metric_fn) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     if "program_trace" in declared:
-        raise TypeError("Flex program_trace metrics must migrate to metric_context.trace and metric_context.usage.")
+        raise TypeError("Flex program_trace metrics must migrate to metric_context.invocation.")
     values = {"trace": None, "pred_name": None, "pred_trace": None}
     return {name: value for name, value in values.items() if name in declared}
 
@@ -219,7 +219,7 @@ def evaluate_with_trace(
 ) -> EvaluationBatch:
     """Trace-capturing evaluation used when a flex submodule is present.
 
-    Context metrics receive candidate tuple evidence and reported usage even when
+    Context metrics receive the candidate invocation and its reported usage even when
     trajectories are not retained. Legacy metrics keep eval-mode arguments.
     """
     contextual = accepts_metric_context(metric_fn)
@@ -249,7 +249,7 @@ def evaluate_with_trace(
             try:
                 result = call_metric(
                     metric_fn, t["example"], pred,
-                    MetricContext("score", trace=t["trace"], usage=t.get("usage"), execution=t.get("execution")),
+                    MetricContext(invocation=t["invocation"]),
                     legacy_kwargs=legacy_kwargs,
                 )
             except Exception as e:

@@ -151,8 +151,9 @@ class BaseLM:
         return self._record_response(response, prompt, messages, outputs, kwargs)
 
     def _record_response(self, response, prompt, messages, outputs, kwargs, request=None):
-        if not getattr(response, "cache_hit", False) and settings.usage_tracker:
-            settings.usage_tracker.add_usage(self.model, dict(getattr(response, "usage", {}) or {}))
+        from dspy.utils.execution import record_usage
+
+        record_usage(self.model, dict(getattr(response, "usage", {}) or {}), cache_hit=getattr(response, "cache_hit", False))
 
         if settings.disable_history:
             return outputs

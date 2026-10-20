@@ -38,6 +38,11 @@ def test_capture_shares_callback_ids_but_not_callback_configuration_or_payload_r
     assert tool["name"] == "increment"
     assert tool["outputs"] == 4
     assert root["outputs"] == {"values": ["before"]}
+    invocation, = capture.roots
+    assert invocation.outputs is result
+    assert invocation.children[0].outputs == 4
+    assert tuple(invocation.descendants()) == invocation.children
+    assert invocation.ref.span_id == root["span_id"]
     detached = record.to_dict()
     detached["spans"][0]["outputs"]["values"].append("external mutation")
     assert record.span(root["span_id"])["outputs"] == {"values": ["before"]}
@@ -101,8 +106,9 @@ async def test_predictor_views_share_the_completed_outcome_and_typed_inputs(asyn
     assert spans[0]["outputs"] == {"answer": "DRAFT"}
     assert spans[1]["outputs"] is None
     assert spans[1]["error"] == {"type": "RuntimeError", "message": str(failure)}
-    context = dspy.MetricContext("feedback", trace=trace, target=0, execution=capture.trace)
-    assert context.target_ref.span_id == started[0]
+    context = dspy.MetricContext("feedback", invocation=capture.roots[0], target=trace[0])
+    assert context.target is capture.roots[0]
+    assert context.target.ref.span_id == started[0]
 
 
 @pytest.mark.asyncio
@@ -194,32 +200,113 @@ def test_all_attempts_are_observed_but_only_winner_is_a_demonstration(record):
     if record:
         calls = [s for s in capture.trace.spans if s["component_name"] == "module.answer"]
         assert [call.call_id for call in observed] == [s["span_id"] for s in calls]
-        context = dspy.MetricContext("feedback", trace=[chosen], target=0, execution=capture.trace)
-        assert context.target_ref.span_id == calls[0]["span_id"]
+        root, = capture.roots
+        assert root.trace == (chosen,)
+        assert [call.call_id for call in root.descendants() if call.kind == "predict"] == [
+            call.call_id for call in observed
+        ]
+        context = dspy.MetricContext("feedback", invocation=root, target=chosen)
+        assert context.target is observed[0]
+        assert context.target.ref.span_id == calls[0]["span_id"]
 
 
-def test_candidate_records_survive_for_optimizer_research_but_exclude_outer_judge():
+@pytest.mark.parametrize("record", [False, True])
+def test_candidate_records_survive_for_optimizer_research_but_exclude_outer_judge(record):
     class Candidate(dspy.Module):
         def forward(self, q):
             value = dspy.Tool(lambda text: text.upper(), name="uppercase")(text=q)
             return dspy.Prediction(a=value)
 
+    seen = []
+
     def metric(gold, pred, *, metric_context):
+        seen.append(metric_context.invocation)
         assert metric_context.purpose == "score"
-        assert metric_context.trace == ()  # Deterministic work is not absence of execution.
-        assert len(metric_context.execution.spans) == 2
+        assert metric_context.invocation.trace == ()  # Deterministic work is still execution.
+        assert len(tuple(metric_context.invocation.descendants())) == 1
         dspy.Tool(lambda: "judge work", name="judge")()
         return dspy.Prediction(score=0.25, feedback="retain metadata")
 
     program = Candidate()
     forward = program.forward
-    data = bootstrap_trace_data(
-        program, [dspy.Example(q="hello").with_inputs("q")], metric=metric, num_threads=1,
-    )
+
+    class Observer(BaseCallback):
+        def on_start(self, call):
+            if call.instance is program:
+                dspy.Tool(lambda: "observer work", name="observer")()
+
+    with dspy.context(callbacks=[Observer()]):
+        data = bootstrap_trace_data(
+            program, [dspy.Example(q="hello").with_inputs("q")], metric=metric, num_threads=1,
+            capture_execution=record,
+        )
     assert program.forward == forward
     assert data[0]["score"].feedback == "retain metadata"
-    assert data[0]["execution"].to_dict()["closed"]
-    assert [s["outputs"] for s in data[0]["execution"].spans] == [{"a": "HELLO"}, "HELLO"]
+    assert data[0]["invocation"] is seen[0]
+    assert [call.outputs for call in seen[0].descendants()] == ["HELLO"]
+    if record:
+        assert data[0]["execution"].to_dict()["closed"]
+        assert [s["outputs"] for s in data[0]["execution"].spans] == [{"a": "HELLO"}, "observer work", "HELLO"]
+    else:
+        assert "execution" not in data[0]
+
+
+def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(monkeypatch):
+    litellm = pytest.importorskip("litellm")
+    from dspy.clients.cache import Cache
+
+    monkeypatch.setattr(dspy, "cache", Cache(False, True, None))
+    requests = []
+
+    def completion(**kwargs):
+        requests.append(kwargs)
+        return litellm.ModelResponse(
+            choices=[{"message": {"role": "assistant", "content": "[[ ## a ## ]]\nanswer\n[[ ## completed ## ]]"},
+                      "finish_reason": "stop"}],
+            usage={"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+        )
+
+    monkeypatch.setattr(litellm, "completion", completion)
+
+    class Candidate(dspy.Module):
+        def __init__(self):
+            self.answer = dspy.Predict("q -> a")
+
+        def forward(self, q):
+            self.answer(q=q)
+            result = self.answer(q=q)  # A cache hit still has a selected predictor occurrence.
+            dspy.settings.lm("candidate work outside predictors")
+            return result
+
+    seen = []
+
+    def metric(gold, pred, *, metric_context):
+        seen.append(metric_context.invocation)
+        dspy.settings.lm("judge work")
+        return 0.75
+
+    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=True)), dspy.capture_execution() as capture:
+        row, = bootstrap_trace_data(
+            Candidate(), [dspy.Example(q="repeat").with_inputs("q")], metric=metric, num_threads=1,
+            capture_usage=True, capture_execution=True,
+        )
+    root = row["invocation"]
+    assert root is seen[0]
+    assert len(root.trace) == 2
+    assert root.trace[0] is not root.trace[1]
+    calls = [call for call in root.descendants() if call.kind == "lm"]
+    assert [call.cache_hit for call in calls] == [False, True, False]
+    assert calls[1].own_usage == {}
+    assert calls[0].own_usage["openai/test"]["total_tokens"] == 5
+    assert root.own_usage == {}
+    assert root.usage["openai/test"]["total_tokens"] == 10
+    assert row["usage"] == root.usage
+    assert len(requests) == 3  # Two candidate requests and the excluded judge.
+    live_calls = [call for outer in capture.roots for call in (outer, *outer.descendants())]
+    assert any(call is root for call in live_calls)  # Internal capture shares the outer recorder.
+    assert row["execution"].span(root.ref.span_id)["outputs"] == dict(root.outputs)
+    root.usage["openai/test"]["total_tokens"] = 999
+    assert capture.trace.span(root.call_id)["usage"]["openai/test"]["total_tokens"] == 10
 
 
 def test_delayed_feedback_resolves_exact_output_after_serialization():
@@ -325,9 +412,12 @@ def test_parse_failure_is_attributed_to_the_failing_sibling(record):
     inputs = call.inputs
     assert inputs == {"q": "second", "history": history}
     assert inputs["history"] is history
+    context = dspy.MetricContext("feedback", invocation=data["invocation"], target=call)
+    assert context.target is context.invocation.trace[1]
+    assert context.target.component_name == "second"
+    assert context.target.outputs is data["trace"][1].outputs
     if record:
-        context = dspy.MetricContext("feedback", trace=data["trace"], target=1, execution=data["execution"])
-        failed = context.execution.resolve(context.target_ref)
+        failed = data["execution"].resolve(context.target.ref)
         assert failed["component_name"] == "second"
         assert failed["error"]["type"] == "AdapterParseError"
         assert isinstance(failed["inputs"]["kwargs"]["history"], dict)

@@ -341,13 +341,14 @@ def with_callbacks(fn):
         callbacks = dspy.settings.get("callbacks", []) + getattr(instance, "callbacks", [])
         capture = dspy.settings.get("_execution_capture")
         collect_prediction = isinstance(instance, dspy.Module) and dspy.settings.trace is not None and dspy.settings.max_trace_size > 0
-        if not callbacks and not (capture and capture.recording) and not collect_prediction:
+        account_usage = dspy.settings.usage_tracker is not None or dspy.settings.track_usage
+        if not callbacks and not (capture and (capture.recording or capture.retain)) and not collect_prediction and not account_usage:
             yield None
             return
 
         # Ordinary trace collection needs component identity, not serialized spans.
         # The root scope is inherited by nested calls and DSPy workers.
-        with nullcontext(capture) if capture is not None else _Capture(recording=False) as capture:
+        with nullcontext(capture) if capture is not None else _Capture(recording=False, retain=False) as capture:
             inputs = inspect.getcallargs(fn, instance, *args, **kwargs)
             if "self" in inputs:
                 inputs.pop("self")
@@ -355,6 +356,11 @@ def with_callbacks(fn):
                 inputs.pop("instance")
             kind = _call_kind(instance, fn)
             invocation = Invocation(instance, "predict" if is_predict else kind, inputs, callback_context.ACTIVE_CALL_ID.get())
+            invocation.children = () if capture.retain else None
+            invocation.usage = {} if capture.retain or capture.recording or account_usage else None
+            if active is not None and active.children is not None:
+                with active._lock:
+                    active.children += (invocation,)
             capture.start(invocation)
             for callback in callbacks:
                 try:
@@ -378,12 +384,29 @@ def with_callbacks(fn):
                 invocation.end_time = time.time()
                 if is_predict:
                     instance._record_trace(invocation)
+                if active is not None and active.end_time is None:
+                    active._add_usage(invocation.usage or {})
+                # Compatibility accounting scopes consume the same completed LM
+                # observation as callbacks and retained execution trees.
+                tracker = dspy.settings.usage_tracker
+                accounting_error = None
+                if invocation.kind == "lm" and tracker is not None:
+                    try:
+                        for model, usage in invocation.own_usage.items():
+                            tracker.add_usage(model, usage)
+                    except Exception as error:
+                        if invocation.exception is None:
+                            invocation.exception = accounting_error = error
+                        else:
+                            invocation.exception.usage_errors = (*getattr(invocation.exception, "usage_errors", ()), error)
                 capture.end(invocation)
                 for callback in callbacks:
                     try:
                         getattr(type(callback), "on_end", BaseCallback.on_end)(callback, invocation)
                     except Exception as e:
                         logger.warning(f"Error when applying callback {callback}'s end handler on function {fn.__name__}: {e}.")
+                if accounting_error is not None:
+                    raise accounting_error
 
     if inspect.iscoroutinefunction(fn):
 

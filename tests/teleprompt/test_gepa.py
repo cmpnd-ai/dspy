@@ -166,7 +166,7 @@ def test_gepa_flex_evaluation_forwards_metric_objective_scores(monkeypatch):
     monkeypatch.setattr(
         gepa_flex_utils.bootstrap_trace_module,
         "bootstrap_trace_data",
-        lambda **kwargs: [{"example_ind": 0, "example": example, "prediction": prediction, "trace": []}],
+        lambda **kwargs: [{"example_ind": 0, "example": example, "prediction": prediction, "trace": [], "invocation": None}],
     )
 
     evaluation = gepa_flex_utils.evaluate_with_trace(

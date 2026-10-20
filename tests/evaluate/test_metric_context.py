@@ -1,5 +1,7 @@
 """Public metric requests: purpose is independent of evidence and results stay caller-owned."""
 
+from dataclasses import fields
+
 import pytest
 
 import dspy
@@ -16,20 +18,36 @@ def example():
     return dspy.Example(q="hello", a="hello").with_inputs("q")
 
 
+def test_metric_context_default_has_only_request_and_invocation_fields():
+    context = dspy.MetricContext()
+    assert context.purpose == "score"
+    assert context.invocation is None
+    assert context.target is None
+    assert {field.name for field in fields(context)} == {"purpose", "invocation", "target"}
+
+
 @pytest.mark.parametrize("as_module", [False, True])
-def test_evaluate_opt_in_preserves_result(as_module):
+@pytest.mark.parametrize("plain_callable", [False, True])
+def test_evaluate_opt_in_preserves_result(as_module, plain_callable):
     verdict = dspy.Prediction(score=0.25, feedback="keep this", objective_scores={"cost": -2})
 
     def metric(gold, pred, *, metric_context):
         assert metric_context.purpose == "score"
-        assert metric_context.trace is None
+        if plain_callable:
+            assert metric_context.invocation is None
+        else:
+            assert metric_context.invocation.instance.__class__ is Echo
+            assert metric_context.invocation.trace == ()
+        assert metric_context.target is None
         return verdict
 
     class Judge(dspy.Module):
         def forward(self, gold, pred, *, metric_context):
             return metric(gold, pred, metric_context=metric_context)
 
-    result = dspy.Evaluate(devset=[example()], metric=Judge() if as_module else metric, num_threads=1)(Echo())
+    program = Echo()
+    candidate = (lambda **inputs: program(**inputs)) if plain_callable else program
+    result = dspy.Evaluate(devset=[example()], metric=Judge() if as_module else metric, num_threads=1)(candidate)
     assert result.score == 25.0
     assert result.results[0][2] is verdict
 
@@ -52,32 +70,37 @@ def test_kwargs_is_not_opt_in_and_type_error_is_not_retried():
     assert calls == ["score"]
 
 
-@pytest.mark.parametrize("threshold,purpose", [(None, "accept"), (0, "accept"), (0.5, "score")])
+@pytest.mark.parametrize("threshold", [None, 0, 0.5])
+@pytest.mark.parametrize("verdict", [0.0, -0.25, 0.5, dspy.Prediction(score=False)])
 @pytest.mark.parametrize("predictor", [False, True])
-def test_bootstrap_purpose_does_not_follow_evidence(threshold, purpose, predictor):
+def test_bootstrap_score_leaves_admission_to_caller(threshold, verdict, predictor):
     seen = []
 
     def metric(gold, pred, *, metric_context):
         seen.append(metric_context)
-        return False if metric_context.purpose == "accept" else 0.75
+        return verdict
 
     with dspy.context(lm=DummyLM([{"a": "hello"}])):
         compiled = dspy.BootstrapFewShot(
             metric=metric, metric_threshold=threshold, max_bootstrapped_demos=1, max_labeled_demos=0,
         ).compile(dspy.Predict("q -> a") if predictor else Echo(), trainset=[example()])
     assert len(seen) == 1
-    assert seen[0].purpose == purpose
-    assert len(seen[0].trace) == int(predictor)
+    assert seen[0].purpose == "score"
+    assert len(seen[0].invocation.trace) == int(predictor)
     if predictor:
-        assert len(compiled.demos) == int(purpose == "score")
+        # Zero is an absent threshold; Prediction(score=False) is still truthy.
+        admitted = verdict >= threshold if threshold else bool(verdict)
+        assert len(compiled.demos) == int(admitted)
 
 
-def test_captured_reward_and_finetune_acceptance_are_different_requests(monkeypatch):
+@pytest.mark.parametrize("prediction_result", [False, True])
+def test_captured_reward_and_finetune_use_score_with_caller_owned_filtering(monkeypatch, prediction_result):
     seen = []
 
     def metric(gold, pred, *, metric_context):
         seen.append(metric_context)
-        return pred.a == "keep" if metric_context.purpose == "accept" else 0.25
+        score = 0.25 if pred.a == "keep" else 0.0
+        return dspy.Prediction(score=score, feedback="preserved") if prediction_result else score
 
     data = [dspy.Example(q=q, a=q).with_inputs("q") for q in ("keep", "drop")]
     lm = DummyLM({"keep": {"a": "keep"}, "drop": {"a": "drop"}})
@@ -85,9 +108,12 @@ def test_captured_reward_and_finetune_acceptance_are_different_requests(monkeypa
     student.set_lm(lm)
     # This is the trace collector used for GRPO rewards.
     rewards = bootstrap_trace_data(student, data, metric=metric, num_threads=1)
-    assert [r["score"] for r in rewards] == [0.25, 0.25]
+    assert [float(r["score"]) for r in rewards] == [0.25, 0.0]
+    if prediction_result:
+        assert all(row["score"].feedback == "preserved" for row in rewards)
     assert [c.purpose for c in seen] == ["score", "score"]
-    assert all(len(c.trace) == 1 for c in seen)
+    assert all(len(c.invocation.trace) == 1 for c in seen)
+    assert all(row["invocation"] is context.invocation for row, context in zip(rewards, seen, strict=True))
     seen.clear()
 
     class DataAdapter(dspy.ChatAdapter):
@@ -104,9 +130,10 @@ def test_captured_reward_and_finetune_acceptance_are_different_requests(monkeypa
     optimizer = dspy.BootstrapFinetune(metric=metric, adapter=DataAdapter(), num_threads=1)
     monkeypatch.setattr(optimizer, "finetune_lms", train)  # provider boundary only
     optimizer.compile(student, trainset=data)
-    assert [c.purpose for c in seen] == ["accept", "accept"]
-    assert all(len(c.trace) == 1 for c in seen)
-    assert training_data == [{"q": "keep", "a": "keep"}]
+    assert [c.purpose for c in seen] == ["score", "score"]
+    assert all(len(c.invocation.trace) == 1 for c in seen)
+    expected = ["keep", "drop"] if prediction_result else ["keep"]
+    assert training_data == [{"q": q, "a": q} for q in expected]
 
 
 @pytest.mark.parametrize("strategy", [dspy.BestOfN, dspy.Refine])
@@ -124,7 +151,8 @@ def test_reward_uses_inputs_and_excludes_judge(strategy):
         assert result.a == "hello"
         assert [step[1] for step in dspy.settings.trace] == [{"q": "hello"}]
     assert seen[0].purpose == "score"
-    assert [step[1] for step in seen[0].trace] == [{"q": "hello"}]
+    assert [step.inputs for step in seen[0].invocation.trace] == [{"q": "hello"}]
+    assert all(call.inputs != {"q": "judge"} for call in seen[0].invocation.descendants())
 
 
 @pytest.mark.parametrize("seed,target", [(0, 2), (1, 0)])
@@ -148,19 +176,17 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
         if metric_context.purpose == "score":
             return dspy.Prediction(score=0.25, objective_scores={"cost": -2})
         assert metric_context.purpose == "feedback"
-        assert metric_context.component_name == component_name
-        assert metric_context.target == target
-        assert len(metric_context.trace) == 3
-        step = metric_context.trace[metric_context.target]
-        assert step[1]["q"] == ("last call" if target == 2 else "first call")
-        selected = metric_context.execution.span(metric_context.target_ref.span_id)
-        assert selected["component_name"] == component_name
-        assert selected["outputs"] == dict(step[2])
-        result = dspy.Prediction(score=0.9, feedback=f"Improve {step[1]['q']}")
+        assert metric_context.target.component_name == component_name
+        assert len(metric_context.invocation.trace) == 3
+        step = metric_context.invocation.trace[target]
+        assert metric_context.target is step
+        assert step.inputs["q"] == ("last call" if target == 2 else "first call")
+        assert step.ref is not None
+        result = dspy.Prediction(score=0.9, feedback=f"Improve {step.inputs['q']}")
         feedback_results.append(result)
         return result
 
-    class Finished(Exception):
+    class FinishedError(Exception):
         pass
 
     def optimize(*, adapter, seed_candidate, trainset, **kwargs):
@@ -171,14 +197,14 @@ def test_gepa_feedback_identifies_named_component_and_occurrence(monkeypatch, se
         assert records[component_name][0]["Feedback"] == ("Improve last call" if target == 2 else "Improve first call")
         # Existing GEPA interpretation: component feedback cannot replace program fitness.
         assert feedback_results[0].score == 0.25
-        raise Finished
+        raise FinishedError
 
     monkeypatch.setattr(gepa, "optimize", optimize)  # external optimizer boundary
     with dspy.context(lm=DummyLM([{"a": "first"}, {"a": "sibling"}, {"a": "last"}])):
         student = Program()
         if strategy:
             student = strategy(student, N=1, reward_fn=lambda inputs, pred: 1.0, threshold=0.5)
-        with pytest.raises(Finished):
+        with pytest.raises(FinishedError):
             dspy.GEPA(metric=metric, max_metric_calls=4, reflection_lm=DummyLM([]), seed=seed).compile(
                 student, trainset=[example()],
             )

@@ -9,6 +9,7 @@ import dspy
 from dspy.adapters.utils import get_field_description_string
 from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.signatures import InputField, OutputField
+from dspy.utils.execution import capture_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def prepare_models_for_resampling(program: dspy.Module, n: int, teacher_settings
 
 def wrap_program(program: dspy.Module, metric: Callable):
     def wrapped_program(example):
-        with dspy.context(trace=[], _trace_program=program):
+        with dspy.context(trace=[], _trace_program=program), capture_invocation(program) as capture:
             prediction, trace, score = None, None, 0.0
             try:
                 prediction = program(**example.inputs())
@@ -47,7 +48,7 @@ def wrap_program(program: dspy.Module, metric: Callable):
         output_metadata = {}
 
         try:
-            output = call_metric(metric, example, prediction, MetricContext("score", trace=trace))
+            output = call_metric(metric, example, prediction, MetricContext(invocation=capture.invocation))
             if isinstance(output, (int, float)):
                 score = output
             elif isinstance(output, dspy.Prediction):

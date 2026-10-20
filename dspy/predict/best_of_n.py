@@ -3,6 +3,7 @@ from typing import Callable
 import dspy
 from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Module, Prediction
+from dspy.utils.execution import capture_invocation
 
 
 class BestOfN(Module):
@@ -65,13 +66,12 @@ class BestOfN(Module):
 
             try:
                 with dspy.context(trace=[]):
-                    pred = mod(**kwargs)
+                    with capture_invocation() as attempt:
+                        pred = mod(**kwargs)
                     trace = dspy.settings.trace.copy()
 
                     # NOTE: Not including the trace of reward_fn.
-                    reward = self.reward_fn(kwargs, pred, MetricContext(
-                        "score", trace=trace, execution=capture.trace if capture is not None and capture.recording else None,
-                    ))
+                    reward = self.reward_fn(kwargs, pred, MetricContext(invocation=attempt.invocation))
 
                 if reward > best_reward:
                     best_reward, best_pred, best_trace = reward, pred, trace

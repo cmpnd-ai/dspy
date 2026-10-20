@@ -158,7 +158,7 @@ def test_selection_eval_supplies_candidate_evidence(capture_traces) -> None:
     def trace_aware_metric(gold, pred, *, metric_context):
         seen["context"] = metric_context
         dspy.Predict("q -> a")(q="judge")
-        return 0.75 if metric_context.purpose == "score" and len(metric_context.trace) == 1 else 0.0
+        return 0.75 if metric_context.purpose == "score" and len(metric_context.invocation.trace) == 1 else 0.0
 
     student = dspy.Flex(Echo)  # a flex submodule is present
     adapter = DspyAdapter(student_module=student, metric_fn=trace_aware_metric, feedback_map={})
@@ -169,9 +169,11 @@ def test_selection_eval_supplies_candidate_evidence(capture_traces) -> None:
     batch = adapter.evaluate([ex], candidate, capture_traces=capture_traces)
 
     assert batch.scores == [0.75]
-    assert len(seen["context"].trace) == 1
-    assert seen["context"].trace[0][1] == {"q": "hi"}
-    assert seen["context"].usage is not None
+    invocation = seen["context"].invocation
+    assert len(invocation.trace) == 1
+    assert invocation.trace[0].inputs == {"q": "hi"}
+    assert invocation.usage is not None
+    assert all(call.inputs != {"q": "judge"} for call in invocation.descendants())
     assert (batch.trajectories is not None) == capture_traces
 
 
@@ -211,14 +213,21 @@ def test_candidate_usage_includes_batch_workers(monkeypatch, capture_traces, num
     def metric(gold, pred, *, metric_context):
         seen.append(metric_context)
         dspy.Predict("q -> a")(q="judge")
-        return 1 - metric_context.usage["openai/test"]["total_tokens"] / 100
+        return 1 - metric_context.invocation.usage["openai/test"]["total_tokens"] / 100
 
     adapter = DspyAdapter(student_module=Program(), metric_fn=metric, feedback_map={}, num_threads=2)
-    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=False)):
+    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=False), track_usage=True):
         batch = adapter.evaluate([dspy.Example(q="hi").with_inputs("q")], {"flex": SIMPLE_MODULE}, capture_traces)
     assert seen, batch.outputs
     assert batch.scores == [0.74]  # 5 sequential + 3 and 7 in workers + 11 in Flex; never the 100-token judge
-    assert seen[0].usage["openai/test"]["total_tokens"] == 26
+    invocation = seen[0].invocation
+    assert invocation.usage["openai/test"]["total_tokens"] == 26
+    assert batch.outputs[0].get_lm_usage() == invocation.usage
+    assert invocation.own_usage == {}
+    lm_calls = [call for call in invocation.descendants() if call.kind == "lm"]
+    assert sorted(call.own_usage["openai/test"]["total_tokens"] for call in lm_calls) == [3, 5, 7, 11]
+    assert all(call.cache_hit is False for call in lm_calls)
+    assert all(call.own_usage == {} for call in invocation.trace)
 
 
 @deno_required

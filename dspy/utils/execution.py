@@ -15,6 +15,7 @@ from weakref import WeakKeyDictionary
 
 from dspy.adapters.utils import serialize_for_json
 from dspy.dsp.utils.settings import settings
+from dspy.utils.usage_tracker import UsageTracker
 
 
 @dataclass
@@ -26,6 +27,11 @@ class Invocation:
     Component names are predictor addresses relative to the collecting program,
     not paths through every observed module or signature identities.
     Tuple access is the migration view: (instance, inputs, outputs).
+
+    Captured roots expose all observed ``children`` and a separate ``trace`` of
+    selected predictor calls. ``usage`` totals reported non-cached LM work across
+    the subtree; ``own_usage`` belongs only to this call. Neither is an invoice.
+    Ordinary tuple collection need not retain a subtree (``children=None``).
     """
 
     instance: Any
@@ -40,6 +46,26 @@ class Invocation:
     inputs: dict | None = None
     component_name: str | None = None
     ref: "ExecutionRef | None" = None
+    children: tuple["Invocation", ...] | None = None
+    trace: tuple["Invocation", ...] | None = None
+    usage: dict | None = None
+    own_usage: dict = field(default_factory=dict)
+    cache_hit: bool | None = None
+    _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    def descendants(self):
+        """Walk observed descendants, refusing to confuse uncaptured work with no work."""
+        if self.children is None:
+            raise ValueError("This invocation's subtree was not retained")
+        for child in self.children:
+            yield child
+            yield from child.descendants()
+
+    def _add_usage(self, usage):
+        with self._lock:
+            if self.usage is not None:
+                for model, counts in usage.items():
+                    self.usage[model] = UsageTracker._merge_usage_entries(self.usage.get(model), counts)
 
     def __iter__(self):
         return iter((self.instance, self.inputs, self.outputs))
@@ -145,12 +171,16 @@ class ExecutionTrace:
 
 
 class _Capture:
-    def __init__(self, program=None, *, recording=True):
-        self.trace_id = uuid.uuid4().hex
+    def __init__(self, program=None, *, recording=True, retain=True, parent=None):
+        self.trace_id = parent.trace_id if parent is not None else uuid.uuid4().hex
         self.recording = recording
+        self.retain = retain
+        self.roots = ()
+        self._active = set()
+        self._parent = parent
         self._spans = {}
-        self._names = WeakKeyDictionary()
-        self._lock = threading.RLock()
+        self._names = parent._names if parent is not None else WeakKeyDictionary()
+        self._lock = parent._lock if parent is not None else threading.RLock()
         self._closed = False
         if program is not None:
             self._register(program)
@@ -163,6 +193,11 @@ class _Capture:
     def __exit__(self, *exc):
         self.close()
         return self._context.__exit__(*exc)
+
+    @property
+    def invocation(self):
+        """The candidate starts first; observer hooks may create additional sibling roots."""
+        return self.roots[0]
 
     def _register(self, program):
         # Component names are optimizer addresses, not paths through arbitrary
@@ -185,6 +220,11 @@ class _Capture:
         with self._lock:
             if self._closed:
                 return
+            if self._parent is not None:
+                self._parent.start(invocation)
+            if self.retain and invocation.parent_id not in self._active:
+                self.roots += (invocation,)
+            self._active.add(invocation.call_id)
             # A collector declares its optimizer-relative root, even inside an
             # outer observation scope. Copies inherit these names explicitly.
             if instance is settings.get("_trace_program"):
@@ -214,6 +254,9 @@ class _Capture:
         with self._lock:
             if self._closed:
                 return
+            if self._parent is not None:
+                self._parent.end(invocation)
+            self._active.discard(call_id)
             if invocation.kind == "predict" and exception is not None:
                 failed = getattr(exception, "_execution_call", None)
                 if failed is None or failed.ref.trace_id != self.trace_id:
@@ -222,11 +265,14 @@ class _Capture:
                 return
             if hasattr(outputs, "toDict"):
                 outputs = outputs.toDict()
-            self._spans[call_id].update(
-                end_time=invocation.end_time,
-                outputs=json.loads(json.dumps(serialize_for_json(outputs))),
-                error={"type": type(exception).__name__, "message": str(exception)} if exception else None,
-            )
+            self._spans[call_id].update(json.loads(json.dumps(serialize_for_json({
+                "end_time": invocation.end_time,
+                "outputs": outputs,
+                "error": {"type": type(exception).__name__, "message": str(exception)} if exception else None,
+                "usage": invocation.usage,
+                "own_usage": invocation.own_usage,
+                "cache_hit": invocation.cache_hit,
+            }))))
 
     @property
     def trace(self):
@@ -237,8 +283,15 @@ class _Capture:
 
     def close(self):
         with self._lock:
+            for root in self.roots:
+                ids = {root.call_id, *(call.call_id for call in root.descendants())}
+                root.trace = None if settings.trace is None else tuple(
+                    call for call in settings.trace if isinstance(call, Invocation) and call.call_id in ids
+                )
             self._closed = True
-            self._names.clear()
+            self._active.clear()
+            if self._parent is None:
+                self._names.clear()
 
 
 def capture_execution(program=None):
@@ -247,5 +300,26 @@ def capture_execution(program=None):
     Nested scopes are isolated records. Work finishing after scope exit cannot
     modify the sealed record; unfinished spans remain visibly unfinished.
     Optional ``program`` supplies component paths when capture begins inside it.
+    ``roots`` retains live invocation trees; ``trace`` is the detached JSON view.
+    Retaining the handle therefore retains live inputs, outputs, and program objects.
     """
     return _Capture(program)
+
+
+def capture_invocation(program=None, *, recording=False):
+    """Internal candidate view: retain calls without hiding them from an outer recorder."""
+    return _Capture(program, recording=recording, parent=settings.get("_execution_capture"))
+
+
+def record_usage(model, usage, *, cache_hit=False):
+    """Attach provider-reported usage once, at the observed LM boundary."""
+    from dspy.utils.callback_context import ACTIVE_INVOCATION
+
+    call = ACTIVE_INVOCATION.get()
+    if call is None or call.kind != "lm":
+        return
+    call.cache_hit = cache_hit
+    if not cache_hit and usage:
+        counts = UsageTracker._flatten_usage_entry(usage)
+        call.own_usage[model] = UsageTracker._merge_usage_entries(call.own_usage.get(model), counts)
+        call._add_usage({model: counts})

@@ -24,6 +24,17 @@ Evidence lives on [`Invocation`](dspy/utils/execution.py), not on duplicate cont
 | `usage` | Aggregate noncached, reported model totals for this call and its descendants; `None` means unavailable. |
 | `own_usage` | Directly observed usage, without descendant aggregation. |
 | `cache_hit` | Observed LM cache status, or `None` when not established. |
+| `cost` | This LM invocation's estimated USD cost; zero for cache hits, `None` if unknown. Not a subtree total. |
+| `get_total_cost()` | Estimated USD cost across the retained subtree, including this call; `None` if any LM cost is unknown. |
+| `get_total_lm_calls()` | Number of observed LM invocations, including this call, cache hits and failures. |
+
+For example, a metric can read `metric_context.invocation.get_total_cost()` and
+`metric_context.invocation.get_total_lm_calls()` without accessing LM history.
+Both helpers require a retained subtree and raise `ValueError` otherwise. They include
+all observed attempts, not just selected predictor evidence. A subtree with no LM calls
+returns zero for both. Call count is at the DSPy LM boundary: provider retries and
+candidate fan-out inside one invocation do not increase it. Cost reuses existing LM
+estimates, not a new pricing system or a provider invoice; unreported work is not priced.
 
 Existing fields remain: `instance`, `kind`, bound `arguments`, prepared predictor `inputs`,
 `outputs`, `exception`, `parent_id`, `call_id`, start/end times, `component_name`, and `ref`.

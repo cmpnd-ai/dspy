@@ -153,7 +153,11 @@ class BaseLM:
     def _record_response(self, response, prompt, messages, outputs, kwargs, request=None):
         from dspy.utils.execution import record_usage
 
-        record_usage(self.model, dict(getattr(response, "usage", {}) or {}), cache_hit=getattr(response, "cache_hit", False))
+        record_usage(
+            self.model, dict(getattr(response, "usage", {}) or {}),
+            cache_hit=getattr(response, "cache_hit", False),
+            cost=getattr(response, "_hidden_params", {}).get("response_cost"),
+        )
 
         if settings.disable_history:
             return outputs

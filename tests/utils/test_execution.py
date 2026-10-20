@@ -43,10 +43,20 @@ def test_capture_shares_callback_ids_but_not_callback_configuration_or_payload_r
     assert invocation.children[0].outputs == 4
     assert tuple(invocation.descendants()) == invocation.children
     assert invocation.ref.span_id == root["span_id"]
+    assert invocation.get_total_lm_calls() == 0
+    assert invocation.get_total_cost() == 0.0
     detached = record.to_dict()
     detached["spans"][0]["outputs"]["values"].append("external mutation")
     assert record.span(root["span_id"])["outputs"] == {"values": ["before"]}
     assert dspy.ExecutionTrace.from_dict(json.loads(json.dumps(record.to_dict()))) == record
+
+
+def test_accounting_helpers_require_retained_evidence():
+    invocation = dspy.Invocation(instance=None, kind="module", arguments={}, parent_id=None)
+    with pytest.raises(ValueError, match="subtree was not retained"):
+        invocation.get_total_lm_calls()
+    with pytest.raises(ValueError, match="subtree was not retained"):
+        invocation.get_total_cost()
 
 
 @pytest.mark.asyncio
@@ -251,7 +261,8 @@ def test_candidate_records_survive_for_optimizer_research_but_exclude_outer_judg
         assert "execution" not in data[0]
 
 
-def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(monkeypatch):
+@pytest.mark.parametrize("costs, total", [((0.125, 0.375), 0.5), ((0.0, 0.0), 0.0), ((0.125, None), None)])
+def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(monkeypatch, costs, total):
     litellm = pytest.importorskip("litellm")
     from dspy.clients.cache import Cache
 
@@ -260,11 +271,13 @@ def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(mo
 
     def completion(**kwargs):
         requests.append(kwargs)
-        return litellm.ModelResponse(
+        response = litellm.ModelResponse(
             choices=[{"message": {"role": "assistant", "content": "[[ ## a ## ]]\nanswer\n[[ ## completed ## ]]"},
                       "finish_reason": "stop"}],
             usage={"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
         )
+        response._hidden_params["response_cost"] = (*costs, 99.0)[len(requests) - 1]
+        return response
 
     monkeypatch.setattr(litellm, "completion", completion)
 
@@ -285,7 +298,7 @@ def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(mo
         dspy.settings.lm("judge work")
         return 0.75
 
-    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=True)), dspy.capture_execution() as capture:
+    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=True), disable_history=True), dspy.capture_execution() as capture:
         row, = bootstrap_trace_data(
             Candidate(), [dspy.Example(q="repeat").with_inputs("q")], metric=metric, num_threads=1,
             capture_usage=True, capture_execution=True,
@@ -301,6 +314,11 @@ def test_candidate_usage_counts_uncached_subtree_not_selected_predictor_steps(mo
     assert root.own_usage == {}
     assert root.usage["openai/test"]["total_tokens"] == 10
     assert row["usage"] == root.usage
+    assert root.get_total_lm_calls() == 3  # Includes cache hits, but not the external judge.
+    assert root.get_total_cost() == total
+    assert [call.get_total_lm_calls() for call in calls] == [1, 1, 1]
+    assert [call.get_total_cost() for call in calls] == [costs[0], 0.0, costs[1]]
+    assert [capture.trace.span(call.call_id)["cost"] for call in calls] == [costs[0], 0.0, costs[1]]
     assert len(requests) == 3  # Two candidate requests and the excluded judge.
     live_calls = [call for outer in capture.roots for call in (outer, *outer.descendants())]
     assert any(call is root for call in live_calls)  # Internal capture shares the outer recorder.

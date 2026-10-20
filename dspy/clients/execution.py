@@ -557,7 +557,7 @@ def _account_failed_call(lm, results, primary):
 
     for result in results:
         try:
-            record_usage(lm.model, result.usage, cache_hit=result.cache_hit)
+            record_usage(lm.model, result.usage, cache_hit=result.cache_hit, cost=result.cost)
         except Exception as secondary:
             primary.usage_errors = (*getattr(primary, "usage_errors", ()), secondary)
 
@@ -724,7 +724,7 @@ async def aexecute(lm, call):
 def finalize(lm, call, result):
     from dspy.utils.execution import record_usage
 
-    record_usage(lm.model, result.usage, cache_hit=result.cache_hit)
+    record_usage(lm.model, result.usage, cache_hit=result.cache_hit, cost=result.cost)
     if not settings.disable_history:
         import datetime
         import uuid

@@ -51,6 +51,7 @@ class Invocation:
     usage: dict | None = None
     own_usage: dict = field(default_factory=dict)
     cache_hit: bool | None = None
+    cost: float | None = None
     _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def descendants(self):
@@ -60,6 +61,26 @@ class Invocation:
         for child in self.children:
             yield child
             yield from child.descendants()
+
+    def get_total_lm_calls(self) -> int:
+        """Count observed LM invocations, including this call, cache hits and failures.
+
+        Requires a retained subtree. Provider retries and candidate fan-out inside
+        one LM invocation are not separate calls. A running tree is only a snapshot.
+        """
+        return (self.kind == "lm") + sum(call.kind == "lm" for call in self.descendants())
+
+    def get_total_cost(self) -> float | None:
+        """Sum estimated USD cost for this call and its retained subtree.
+
+        Cache hits cost zero; any LM call with unknown cost makes the total None.
+        No LM calls means zero. Includes all observed attempts, not only selected
+        predictor evidence. A running tree is only a snapshot, not a final bill.
+        """
+        costs = [call.cost for call in self.descendants() if call.kind == "lm"]
+        if self.kind == "lm":
+            costs.append(self.cost)
+        return sum(costs, 0.0) if all(cost is not None for cost in costs) else None
 
     def _add_usage(self, usage):
         with self._lock:
@@ -272,6 +293,7 @@ class _Capture:
                 "usage": invocation.usage,
                 "own_usage": invocation.own_usage,
                 "cache_hit": invocation.cache_hit,
+                "cost": invocation.cost,
             }))))
 
     @property
@@ -311,13 +333,17 @@ def capture_invocation(program=None, *, recording=False):
     return _Capture(program, recording=recording, parent=settings.get("_execution_capture"))
 
 
-def record_usage(model, usage, *, cache_hit=False):
-    """Attach provider-reported usage once, at the observed LM boundary."""
+def record_usage(model, usage, *, cache_hit=False, cost=None):
+    """Attach reported usage and estimated USD cost at the observed LM boundary."""
     from dspy.utils.callback_context import ACTIVE_INVOCATION
 
     call = ACTIVE_INVOCATION.get()
     if call is None or call.kind != "lm":
         return
+    if call.cache_hit is None:
+        call.cost = 0.0
+    if not cache_hit:
+        call.cost = call.cost + cost if call.cost is not None and cost is not None else None
     call.cache_hit = cache_hit
     if not cache_hit and usage:
         counts = UsageTracker._flatten_usage_entry(usage)

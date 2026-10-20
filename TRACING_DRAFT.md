@@ -51,11 +51,40 @@ Nested public capture scopes have isolated JSON records. Internal `capture_invoc
 a candidate graph and forwards observations to an existing recorder instead of hiding them.
 An invocation reference is not a guarantee that a corresponding JSON record was requested.
 
+## Type-checked consumer contracts
+
+`uv run --locked --extra dev ty check` now checks execution capture, metric dispatch,
+bootstrap trace collection, and the existing callback/worker utility scope. The
+[consumer fixtures](tests/typing/execution.py) check inferred types and deliberately
+invalid calls; unused diagnostic ignores fail the check if an API degrades to Any.
+
+```python
+import dspy
+
+def candidate_cost(context: dspy.MetricContext) -> float | None:
+    invocation = context.invocation
+    if invocation is None:
+        return None  # Missing evidence is not a zero-cost execution.
+    return invocation.get_total_cost()
+```
+
+Capture roots and traversal yield `Invocation`, kinds are a literal union, and typed
+callbacks take `Invocation`. `call_metric` preserves each metric's return type rather
+than imposing a universal result. `TraceData` describes failed predictions and optional
+score/usage/JSON fields. `ExecutionRecord` and `ExecutionSpan` are TypedDict descriptions
+of the existing detached dictionaries, not additional runtime objects or validation.
+
+The limits are explicit: live outputs, argument values, and provider metadata remain
+`object` because calls are heterogeneous; narrow them before use. Signature-generated
+Prediction fields remain dynamic. Legacy metric argument dispatch, settings, duck-typed
+serialization hooks, and JSON decoding still cross dynamic boundaries. This is a scoped
+typing contract, not a claim that all optimizers or untrusted JSON are statically safe.
+
 ## One lifecycle, including accounting
 
 Typed callbacks receive the **same Invocation** retained by graph/trace consumers. They do not
 read events back from JSON. Capture works without callbacks; callbacks work without JSON capture.
-All actual LM usage producers (`base_lm`, structured execution, and typesafe clients) now call
+Both LM usage producers (`base_lm` compatibility and coordinated engine execution) call
 `record_usage` on the active LM invocation. Cache hits do not add reported usage to totals.
 Callback completion propagates totals to parents and feeds existing `UsageTracker` convenience
 scopes. Recording does not charge a second copy. Totals are reported tokens, not an invoice or
@@ -175,9 +204,10 @@ Require keyword-only `metric_context`, including `Module.forward`; migrate wrapp
 The remaining `call_metric` bridge recognizes explicit declarations, not `**kwargs` alone, and
 returns the exact result in one call. No TypeError retry, universal verdict, or acceptance mode.
 
-BootstrapFewShot compares numerically only with a truthy `metric_threshold`; otherwise it uses
-result truthiness. Threshold zero still means absent. BootstrapFinetune filters stored score
-truthiness. `Prediction(score=False)` is truthy: replacing it with `False` changes admission.
+BootstrapFewShot compares numerically when `metric_threshold is not None`, including zero;
+only None uses result truthiness. A boolean False passes a zero threshold (`False >= 0`).
+BootstrapFinetune filters stored score truthiness. `Prediction(score=False)` is truthy:
+replacing it with `False` changes truthiness-based admission.
 If finetuning needs a boolean cutoff, supply a caller-specific wrapper, not another purpose:
 
 ```python

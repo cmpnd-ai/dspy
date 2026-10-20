@@ -1,10 +1,13 @@
 """Metric requests, independent of tracing and caller-owned result interpretation."""
 
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeVar
 
 from dspy.utils.execution import Invocation
+
+ResultT = TypeVar("ResultT")
 
 
 @dataclass(frozen=True)
@@ -22,9 +25,12 @@ class MetricContext:
     target: Invocation | None = None
 
 
-def accepts_metric_context(metric):
+def accepts_metric_context(metric: object) -> bool:
     try:
-        parameter = inspect.signature(getattr(metric, "forward", metric)).parameters.get("metric_context")
+        candidate = getattr(metric, "forward", metric)
+        if not callable(candidate):
+            return False
+        parameter = inspect.signature(candidate).parameters.get("metric_context")
         return parameter is not None and parameter.kind in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
         )
@@ -32,8 +38,14 @@ def accepts_metric_context(metric):
         return False
 
 
-def call_metric(metric, example, prediction, context, *, legacy_args=(), legacy_kwargs=None):
-    """Opt in by declaration, not **kwargs; call once and return the result unchanged."""
+def call_metric(
+    metric: Callable[..., ResultT], example: object, prediction: object, context: MetricContext, *,
+    legacy_args: tuple[object, ...] = (), legacy_kwargs: dict[str, object] | None = None,
+) -> ResultT:
+    """Opt in by declaration, not **kwargs; preserve the caller's result type.
+
+    Argument dispatch remains reflective for legacy metrics with different signatures.
+    """
     if accepts_metric_context(metric):
         return metric(example, prediction, metric_context=context)
     return metric(example, prediction, *legacy_args, **(legacy_kwargs or {}))

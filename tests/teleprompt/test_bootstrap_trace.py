@@ -134,7 +134,7 @@ def test_chain_of_thought_parse_failure_is_captured(adapter, response, format_fa
     assert prediction.completion_text == lm.history[-1]["outputs"][0]
     assert prediction.format_reward == expected_score
     assert result["score"] == expected_score
-    assert result["trace"] == [(program.predict, {"question": "2+2?"}, prediction)]
+    assert [tuple(call) for call in result["trace"]] == [(program.predict, {"question": "2+2?"}, prediction)]
 
 
 def test_bootstrap_trace_data_passes_callback_metadata(monkeypatch):

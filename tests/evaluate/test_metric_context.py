@@ -88,8 +88,8 @@ def test_bootstrap_score_leaves_admission_to_caller(threshold, verdict, predicto
     assert seen[0].purpose == "score"
     assert len(seen[0].invocation.trace) == int(predictor)
     if predictor:
-        # Zero is an absent threshold; Prediction(score=False) is still truthy.
-        admitted = verdict >= threshold if threshold else bool(verdict)
+        # Zero is a numeric threshold; only None uses result truthiness.
+        admitted = verdict >= threshold if threshold is not None else bool(verdict)
         assert len(compiled.demos) == int(admitted)
 
 

@@ -1,22 +1,30 @@
+from __future__ import annotations
+
 import functools
 import inspect
 import logging
 import time
 from contextlib import contextmanager, nullcontext
-from typing import Any, Callable
+from types import FunctionType
+from typing import TYPE_CHECKING, Any, Generator, TypeVar, cast
 
 import dspy
 import dspy.utils.callback_context as callback_context
+
+if TYPE_CHECKING:
+    from dspy.utils.execution import Invocation, InvocationKind
+
+F = TypeVar("F", bound=FunctionType)
 
 ACTIVE_CALL_ID = callback_context.ACTIVE_CALL_ID
 
 logger = logging.getLogger(__name__)
 
-_INTERPRETER_OPERATIONS = {
-    "execute": "execute",
-    "invoke_tool": "tool_call",
-    "start": "startup",
-    "shutdown": "shutdown",
+_INTERPRETER_OPERATIONS: dict[str, InvocationKind] = {
+    "execute": "interpreter_execute",
+    "invoke_tool": "interpreter_tool_call",
+    "start": "interpreter_startup",
+    "shutdown": "interpreter_shutdown",
 }
 
 
@@ -306,7 +314,7 @@ class BaseCallback:
         """
         pass
 
-    def on_start(self, call):
+    def on_start(self, call: Invocation) -> None:
         """Observe one live invocation. Treat it as read-only; inputs may not yet be prepared.
 
         The default dispatches to the existing kind-specific callback API.
@@ -314,7 +322,7 @@ class BaseCallback:
         kind = "module" if call.kind == "predict" else call.kind
         getattr(self, f"on_{kind}_start")(call_id=call.call_id, instance=call.instance, inputs=call.arguments)
 
-    def on_end(self, call):
+    def on_end(self, call: Invocation) -> None:
         """Observe the completed invocation, including parent, timing, inputs and outcome.
 
         No start-event lookup is needed. The default preserves legacy callbacks.
@@ -323,11 +331,11 @@ class BaseCallback:
         getattr(self, f"on_{kind}_end")(call_id=call.call_id, outputs=call.outputs, exception=call.exception)
 
 
-def with_callbacks(fn):
+def with_callbacks(fn: F) -> F:
     """Observe a call once, projecting it into callbacks and requested collectors."""
 
     @contextmanager
-    def observe(instance, args, kwargs):
+    def observe(instance: object, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Generator[Invocation | None, None, None]:
         from dspy.utils.execution import Invocation, _Capture
 
         active = callback_context.ACTIVE_INVOCATION.get()
@@ -338,8 +346,8 @@ def with_callbacks(fn):
             yield None
             return
 
-        callbacks = dspy.settings.get("callbacks", []) + getattr(instance, "callbacks", [])
-        capture = dspy.settings.get("_execution_capture")
+        callbacks: list[BaseCallback] = dspy.settings.get("callbacks", []) + getattr(instance, "callbacks", [])
+        capture: _Capture | None = dspy.settings.get("_execution_capture")
         collect_prediction = isinstance(instance, dspy.Module) and dspy.settings.trace is not None and dspy.settings.max_trace_size > 0
         account_usage = dspy.settings.usage_tracker is not None or dspy.settings.track_usage
         if not callbacks and not (capture and (capture.recording or capture.retain)) and not collect_prediction and not account_usage:
@@ -349,7 +357,8 @@ def with_callbacks(fn):
         # Ordinary trace collection needs component identity, not serialized spans.
         # The root scope is inherited by nested calls and DSPy workers.
         with nullcontext(capture) if capture is not None else _Capture(recording=False, retain=False) as capture:
-            inputs = inspect.getcallargs(fn, instance, *args, **kwargs)
+            # Keep the existing binding semantics during the typing migration.
+            inputs = inspect.getcallargs(fn, instance, *args, **kwargs)  # ty: ignore[deprecated]
             if "self" in inputs:
                 inputs.pop("self")
             elif "instance" in inputs:
@@ -398,7 +407,8 @@ def with_callbacks(fn):
                         if invocation.exception is None:
                             invocation.exception = accounting_error = error
                         else:
-                            invocation.exception.usage_errors = (*getattr(invocation.exception, "usage_errors", ()), error)
+                            # Annotate the original exception rather than wrapping its type.
+                            invocation.exception.usage_errors = (*getattr(invocation.exception, "usage_errors", ()), error)  # ty: ignore[unresolved-attribute]
                 capture.end(invocation)
                 for callback in callbacks:
                     try:
@@ -411,29 +421,30 @@ def with_callbacks(fn):
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
-        async def async_wrapper(instance, *args, **kwargs):
+        async def async_wrapper(instance: object, *args: Any, **kwargs: Any) -> object:
             with observe(instance, args, kwargs) as invocation:
                 results = await fn(instance, *args, **kwargs)
                 if invocation is not None:
                     invocation.outputs = results
                 return results
 
-        return async_wrapper
+        # Forwarding preserves generic/overloaded signatures as well as coroutine results.
+        return cast(F, async_wrapper)
 
     else:
 
         @functools.wraps(fn)
-        def sync_wrapper(instance, *args, **kwargs):
+        def sync_wrapper(instance: object, *args: Any, **kwargs: Any) -> object:
             with observe(instance, args, kwargs) as invocation:
                 results = fn(instance, *args, **kwargs)
                 if invocation is not None:
                     invocation.outputs = results
                 return results
 
-        return sync_wrapper
+        return cast(F, sync_wrapper)
 
 
-def _call_kind(instance: Any, fn: Callable) -> str:
+def _call_kind(instance: object, fn: FunctionType) -> InvocationKind:
     """Classify the boundary once for typed records and legacy callback dispatch."""
     from dspy.teleprompt.teleprompt import Teleprompter
 
@@ -442,7 +453,7 @@ def _call_kind(instance: Any, fn: Callable) -> str:
     elif isinstance(instance, dspy.Evaluate):
         return "evaluate"
     elif isinstance(instance, dspy.CodeInterpreter):
-        return f"interpreter_{_INTERPRETER_OPERATIONS[fn.__name__]}"
+        return _INTERPRETER_OPERATIONS[fn.__name__]
     elif isinstance(instance, Teleprompter):
         return "compile"
 

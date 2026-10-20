@@ -4,18 +4,62 @@ Callbacks, predictor tuples, and JSON records project the same invocation lifecy
 Consumers still own retention and attempt selection. No exporter or storage is required.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict, cast
 from weakref import WeakKeyDictionary
+
+from typing_extensions import NotRequired
 
 from dspy.adapters.utils import serialize_for_json
 from dspy.dsp.utils.settings import settings
 from dspy.utils.usage_tracker import UsageTracker
+
+if TYPE_CHECKING:
+    from dspy.adapters.types.tool import Tool
+    from dspy.primitives.module import Module
+
+InvocationKind: TypeAlias = Literal[
+    "module", "predict", "lm", "tool", "evaluate", "compile", "adapter_format", "adapter_parse",
+    "interpreter_execute", "interpreter_tool_call", "interpreter_startup", "interpreter_shutdown",
+]
+UsageTotals: TypeAlias = dict[str, dict[str, object]]
+JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
+
+
+class ExecutionSpan(TypedDict):
+    """Detached call data. Accounting fields appear when the call finishes."""
+
+    span_id: str
+    parent_span_id: str | None
+    kind: InvocationKind
+    name: str | None
+    component_name: str | None
+    start_time: float
+    end_time: float | None
+    inputs: dict[str, JSONValue]
+    outputs: JSONValue
+    error: dict[str, str] | None
+    usage: NotRequired[dict[str, JSONValue] | None]
+    own_usage: NotRequired[dict[str, JSONValue]]
+    cache_hit: NotRequired[bool | None]
+    cost: NotRequired[float | None]
+
+
+class ExecutionRecord(TypedDict):
+    """The existing JSON envelope, not a second runtime representation."""
+
+    trace_id: str
+    closed: bool
+    spans: list[ExecutionSpan]
 
 
 @dataclass
@@ -34,27 +78,27 @@ class Invocation:
     Ordinary tuple collection need not retain a subtree (``children=None``).
     """
 
-    instance: Any
-    kind: str
-    arguments: dict
+    instance: object
+    kind: InvocationKind
+    arguments: dict[str, object]
     parent_id: str | None
     call_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     start_time: float = field(default_factory=time.time)
     end_time: float | None = None
-    outputs: Any = None
+    outputs: object = None
     exception: BaseException | None = None
-    inputs: dict | None = None
+    inputs: dict[str, object] | None = None
     component_name: str | None = None
-    ref: "ExecutionRef | None" = None
-    children: tuple["Invocation", ...] | None = None
-    trace: tuple["Invocation", ...] | None = None
-    usage: dict | None = None
-    own_usage: dict = field(default_factory=dict)
+    ref: ExecutionRef | None = None
+    children: tuple[Invocation, ...] | None = None
+    trace: tuple[Invocation, ...] | None = None
+    usage: UsageTotals | None = None
+    own_usage: UsageTotals = field(default_factory=dict)
     cache_hit: bool | None = None
     cost: float | None = None
-    _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
-    def descendants(self):
+    def descendants(self) -> Iterator[Invocation]:
         """Walk observed descendants, refusing to confuse uncaptured work with no work."""
         if self.children is None:
             raise ValueError("This invocation's subtree was not retained")
@@ -80,21 +124,26 @@ class Invocation:
         costs = [call.cost for call in self.descendants() if call.kind == "lm"]
         if self.kind == "lm":
             costs.append(self.cost)
-        return sum(costs, 0.0) if all(cost is not None for cost in costs) else None
+        total = 0.0
+        for cost in costs:
+            if cost is None:
+                return None
+            total += cost
+        return total
 
-    def _add_usage(self, usage):
+    def _add_usage(self, usage: UsageTotals) -> None:
         with self._lock:
             if self.usage is not None:
                 for model, counts in usage.items():
                     self.usage[model] = UsageTracker._merge_usage_entries(self.usage.get(model), counts)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[object]:
         return iter((self.instance, self.inputs, self.outputs))
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int | slice) -> object:
         return (self.instance, self.inputs, self.outputs)[index]
 
-    def __len__(self):
+    def __len__(self) -> Literal[3]:
         return 3
 
 
@@ -129,32 +178,33 @@ class ExecutionTrace:
     _json: str
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data: ExecutionRecord) -> ExecutionTrace:
         return cls(json.dumps(data))
 
-    def to_dict(self):
-        return json.loads(self._json)
+    def to_dict(self) -> ExecutionRecord:
+        # JSON decoding is an untyped boundary; callers supply the documented record shape.
+        return cast(ExecutionRecord, json.loads(self._json))
 
     @property
-    def trace_id(self):
+    def trace_id(self) -> str:
         return self.to_dict()["trace_id"]
 
     @property
-    def spans(self):
+    def spans(self) -> tuple[ExecutionSpan, ...]:
         return tuple(self.to_dict()["spans"])
 
-    def span(self, span_id):
+    def span(self, span_id: str) -> ExecutionSpan:
         for span in self.spans:
             if span["span_id"] == span_id:
                 return span
         raise KeyError(span_id)
 
-    def ref(self, span_id=None, *, output_path=None):
+    def ref(self, span_id: str | None = None, *, output_path: str | None = None) -> ExecutionRef:
         ref = ExecutionRef(self.trace_id, span_id, output_path)
         self.resolve(ref)
         return ref
 
-    def resolve(self, ref: ExecutionRef):
+    def resolve(self, ref: ExecutionRef) -> ExecutionRecord | ExecutionSpan | JSONValue:
         """Resolve within this record, refusing foreign IDs and invalid JSON Pointers.
 
         Output targets require an explicit completed invocation, even for roots:
@@ -187,47 +237,51 @@ class ExecutionTrace:
                 raise KeyError(path)
         return value
 
-    def annotate(self, content: str, *, span_id=None, output_path=None):
+    def annotate(self, content: str, *, span_id: str | None = None, output_path: str | None = None) -> Feedback:
         return Feedback(self.ref(span_id, output_path=output_path), content)
 
 
 class _Capture:
-    def __init__(self, program=None, *, recording=True, retain=True, parent=None):
+    def __init__(
+        self, program: Module | None = None, *, recording: bool = True, retain: bool = True, parent: _Capture | None = None,
+    ) -> None:
         self.trace_id = parent.trace_id if parent is not None else uuid.uuid4().hex
         self.recording = recording
         self.retain = retain
-        self.roots = ()
-        self._active = set()
+        self.roots: tuple[Invocation, ...] = ()
+        self._active: set[str] = set()
         self._parent = parent
-        self._spans = {}
-        self._names = parent._names if parent is not None else WeakKeyDictionary()
+        self._spans: dict[str, ExecutionSpan] = {}
+        self._names: WeakKeyDictionary[object, str | None] = parent._names if parent is not None else WeakKeyDictionary()
         self._lock = parent._lock if parent is not None else threading.RLock()
         self._closed = False
         if program is not None:
             self._register(program)
 
-    def __enter__(self):
+    def __enter__(self) -> _Capture:
         self._context = settings.context(_execution_capture=self)
         self._context.__enter__()
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None,
+    ) -> bool | None:
         self.close()
-        return self._context.__exit__(*exc)
+        return self._context.__exit__(exc_type, exc, traceback)
 
     @property
-    def invocation(self):
+    def invocation(self) -> Invocation:
         """The candidate starts first; observer hooks may create additional sibling roots."""
         return self.roots[0]
 
-    def _register(self, program):
+    def _register(self, program: Module) -> None:
         # Component names are optimizer addresses, not paths through arbitrary
         # runtime objects (notably accumulated LM history).
         self._names[program] = None
         for name, predictor in program.named_predictors():
             self._names[predictor] = name
 
-    def inherit_names(self, original, copied):
+    def inherit_names(self, original: Module, copied: Module) -> None:
         """A retry wrapper knows the provenance of its copy; a signature does not."""
         with self._lock:
             originals = dict(original.named_predictors())
@@ -236,7 +290,7 @@ class _Capture:
                 if path is not None:
                     self._names[predictor] = path
 
-    def start(self, invocation):
+    def start(self, invocation: Invocation) -> None:
         instance = invocation.instance
         with self._lock:
             if self._closed:
@@ -248,10 +302,12 @@ class _Capture:
             self._active.add(invocation.call_id)
             # A collector declares its optimizer-relative root, even inside an
             # outer observation scope. Copies inherit these names explicitly.
-            if instance is settings.get("_trace_program"):
-                self._register(instance)
+            program: Module | None = settings.get("_trace_program")
+            if instance is program and program is not None:
+                self._register(program)
             elif not self._names and hasattr(instance, "named_predictors"):
-                self._register(instance)
+                # The legacy callback API also accepts duck-typed module owners.
+                self._register(cast("Module", instance))
             invocation.component_name = self._names.get(instance) if invocation.kind == "predict" else None
             invocation.ref = ExecutionRef(self.trace_id, invocation.call_id)
             if not self.recording:
@@ -261,7 +317,7 @@ class _Capture:
                 "span_id": invocation.call_id,
                 "parent_span_id": parent if parent in self._spans else None,
                 "kind": invocation.kind,
-                "name": instance.name if invocation.kind == "tool" else type(instance).__qualname__,
+                "name": cast("Tool", instance).name if invocation.kind == "tool" else type(instance).__qualname__,
                 "component_name": invocation.component_name,
                 "start_time": invocation.start_time,
                 "end_time": None,
@@ -270,7 +326,7 @@ class _Capture:
                 "error": None,
             }
 
-    def end(self, invocation):
+    def end(self, invocation: Invocation) -> None:
         call_id, outputs, exception = invocation.call_id, invocation.outputs, invocation.exception
         with self._lock:
             if self._closed:
@@ -281,11 +337,12 @@ class _Capture:
             if invocation.kind == "predict" and exception is not None:
                 failed = getattr(exception, "_execution_call", None)
                 if failed is None or failed.ref.trace_id != self.trace_id:
-                    exception._execution_call = invocation
+                    # Preserve the original exception class, including third-party failures.
+                    exception._execution_call = invocation  # ty: ignore[unresolved-attribute]
             if call_id not in self._spans:
                 return
             if hasattr(outputs, "toDict"):
-                outputs = outputs.toDict()
+                outputs = cast(Callable[[], object], outputs.toDict)()
             self._spans[call_id].update(json.loads(json.dumps(serialize_for_json({
                 "end_time": invocation.end_time,
                 "outputs": outputs,
@@ -297,13 +354,13 @@ class _Capture:
             }))))
 
     @property
-    def trace(self):
+    def trace(self) -> ExecutionTrace:
         with self._lock:
             return ExecutionTrace.from_dict({
                 "trace_id": self.trace_id, "closed": self._closed, "spans": list(self._spans.values()),
             })
 
-    def close(self):
+    def close(self) -> None:
         with self._lock:
             for root in self.roots:
                 ids = {root.call_id, *(call.call_id for call in root.descendants())}
@@ -316,7 +373,7 @@ class _Capture:
                 self._names.clear()
 
 
-def capture_execution(program=None):
+def capture_execution(program: Module | None = None) -> _Capture:
     """Capture this scope, including joined DSPy workers, independently of callbacks.
 
     Nested scopes are isolated records. Work finishing after scope exit cannot
@@ -328,12 +385,12 @@ def capture_execution(program=None):
     return _Capture(program)
 
 
-def capture_invocation(program=None, *, recording=False):
+def capture_invocation(program: Module | None = None, *, recording: bool = False) -> _Capture:
     """Internal candidate view: retain calls without hiding them from an outer recorder."""
     return _Capture(program, recording=recording, parent=settings.get("_execution_capture"))
 
 
-def record_usage(model, usage, *, cache_hit=False, cost=None):
+def record_usage(model: str, usage: dict[str, object], *, cache_hit: bool = False, cost: float | None = None) -> None:
     """Attach reported usage and estimated USD cost at the observed LM boundary."""
     from dspy.utils.callback_context import ACTIVE_INVOCATION
 

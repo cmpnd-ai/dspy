@@ -28,7 +28,7 @@ legacy bridge. Leave unrelated functions named trace alone.
 | Caller | Request and interpretation |
 | --- | --- |
 | Evaluate, Avatar, ReAnchor | Score; explicitly contextual metrics receive captured candidates. Aggregation/coercion/errors remain caller-specific. |
-| BootstrapFewShot | Score; truthy metric_threshold triggers numerical comparison, otherwise result truthiness. Zero threshold means absent. |
+| BootstrapFewShot | Score; metric_threshold is not None triggers numerical comparison, including zero; only None uses result truthiness. False passes a zero threshold because False >= 0. |
 | BootstrapFinetune | Score via bootstrap_trace_data; filters stored score truthiness. |
 | GRPO / bootstrap_trace_data; SIMBA | Score with captured candidates; preserve ranking, metadata, and failure policies. SIMBA can supply prediction=None. |
 | BestOfN / Refine | Score per captured attempt; first argument is an inputs dict, not gold labels. |
@@ -49,7 +49,7 @@ silently turn an old cutoff into admission of every nonzero partial score.
 
 - Preserve ranges, objective_scores, feedback, and Prediction metadata unless intentionally changed.
 - `Prediction(score=False)` is truthy. Returning False instead changes admission, not just syntax.
-- Preserve the caller's truthy-threshold/zero-threshold semantics unless a change is authorized.
+- Preserve the caller's explicit-None threshold semantics: zero is a numeric cutoff, not absent.
 - If finetune requires a boolean cutoff, use a caller-specific metric wrapper. Do not invent an
   acceptance purpose, caller IDs, evidence heuristics, or a universal verdict object.
 - Demonstrate intentional policy changes with old/new admission results below, at, and above

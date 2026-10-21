@@ -23,7 +23,8 @@ class UsageTracker:
         # Providers can include arbitrary extra fields, not just token counts.
         self.usage_data: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    def _flatten_usage_entry(self, usage_entry: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _flatten_usage_entry(usage_entry: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in usage_entry.items():
             if isinstance(value, BaseModel):
@@ -43,8 +44,9 @@ class UsageTracker:
         """
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
+    @classmethod
     def _merge_usage_entries(
-        self, usage_entry1: dict[str, Any] | None, usage_entry2: dict[str, Any] | None
+        cls, usage_entry1: dict[str, Any] | None, usage_entry2: dict[str, Any] | None
     ) -> dict[str, Any]:
         if usage_entry1 is None or len(usage_entry1) == 0:
             return dict(usage_entry2 or {})
@@ -55,11 +57,11 @@ class UsageTracker:
         for k, v in usage_entry2.items():
             current_v = result.get(k)
             if isinstance(v, dict) or isinstance(current_v, dict):
-                result[k] = self._merge_usage_entries(current_v, v)
+                result[k] = cls._merge_usage_entries(current_v, v)
             elif current_v is None:
                 if v is not None:
                     result[k] = v
-            elif self._is_summable(current_v) and self._is_summable(v):
+            elif cls._is_summable(current_v) and cls._is_summable(v):
                 result[k] = current_v + v
             # Otherwise keep `current_v` as-is. `usage` is not guaranteed to hold only
             # counts: both litellm's `Usage` and dspy's `LMUsage` allow extra fields, so

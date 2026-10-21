@@ -67,20 +67,23 @@ The `metric` returns a `dspy.Prediction(score=..., feedback=...)` — a scalar p
 
 ### Rewarding leaner programs with a trace-aware metric
 
-A common goal with `Flex` is to push work out of the LM and into deterministic code. To optimize for that, your metric needs to see *how* an answer was produced, not just whether it was right. Declare a `program_trace` parameter and GEPA will pass the execution trace to the metric at scoring time, letting you penalize LM calls:
+A common goal with `Flex` is to push work out of the LM and into deterministic code. Declare `metric_context` to receive candidate predictor tuples and reported token usage at scoring time, even when trajectories are not retained:
 
 ```python
-LLM_CALL_PENALTY = 0.15
-
-def metric(gold, pred, trace=None, pred_name=None, pred_trace=None, program_trace=None):
+def metric(gold, pred, *, metric_context):
     correct = getattr(pred, "total_cents", None) == gold.total_cents
-    n_calls = len(program_trace) if program_trace else 0
-    score = max(0.0, (1.0 if correct else 0.0) - LLM_CALL_PENALTY * n_calls)
-    fb = f"{'Correct' if correct else 'Wrong'} — used {n_calls} LM call(s). Settle clear cases in Python."
+    tokens = 0
+    for counts in metric_context.usage.values():
+        total = counts.get("total_tokens")
+        if total is None:
+            total = counts["prompt_tokens"] + counts["completion_tokens"]
+        tokens += total
+    score = max(0.0, float(correct) - tokens / 100000)
+    fb = f"{'Correct' if correct else 'Wrong'} — {tokens} reported tokens. Settle clear cases in Python."
     return dspy.Prediction(score=score, feedback=fb)
 ```
 
-The `program_trace` parameter is opt-in *by declaration*: only metrics that name it receive the trace. Keep the penalty small relative to correctness, so a decomposition has to *hold* accuracy to win.
+This replaces the experimental `program_trace` parameter. Ordinary legacy metrics remain supported. `metric_context.purpose` is `"score"`; `trace` contains `(predictor, inputs, prediction)` tuples, not provider requests. Cached predictions still produce tuples. `usage` contains existing UsageTracker totals by model, excluding cached calls and the metric's own judge work; it is not an invoice or a guarantee that every provider reports usage. Keep the penalty small relative to correctness. These evidence guarantees apply to Flex evaluation, not every metric caller; see [metric contexts](../../learn/evaluation/metrics.md#experimental-explicit-metric-requests).
 
 ## Interpreter Execution
 

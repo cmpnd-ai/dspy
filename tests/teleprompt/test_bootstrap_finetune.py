@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 import dspy
 from dspy import Example
 from dspy.predict import Predict
@@ -21,18 +23,7 @@ trainset = [examples[0]]
 
 class TraceIdentityAdapter(dspy.ChatAdapter):
     def format_finetune_data(self, signature, demos, inputs, outputs):
-        return {"inputs": inputs, "outputs": outputs}
-
-
-def make_two_predictor_trace():
-    return [
-        {
-            "trace": [
-                (Predict("input -> output"), {"input": "predictor-0"}, {"output": "zero"}),
-                (Predict("input -> output"), {"input": "predictor-1"}, {"output": "one"}),
-            ]
-        }
-    ]
+        return {"inputs": inputs, "outputs": dict(outputs)}
 
 
 def test_bootstrap_finetune_initialization():
@@ -97,28 +88,36 @@ def test_error_handling_missing_lm():
         assert "set_lm" in str(e)
 
 
-def test_prepare_finetune_data_filters_to_requested_predictor():
-    bootstrap = BootstrapFinetune(adapter=TraceIdentityAdapter(), exclude_demos=True)
+@pytest.mark.parametrize("multitask", [False, True])
+def test_finetune_routes_repeated_and_skipped_same_signature_calls(monkeypatch, multitask):
+    class Program(dspy.Module):
+        def __init__(self):
+            signature = dspy.Signature("input -> output")
+            self.first = Predict(signature)
+            self.second = Predict(signature)
 
-    data, _ = bootstrap._prepare_finetune_data(
-        trace_data=make_two_predictor_trace(),
-        lm=DummyLM([]),
-        pred_ind=1,
-    )
+        def forward(self, input):
+            result = self.second(input=input + ":second")
+            if input == "both":
+                self.first(input=input + ":first-1")
+                result = self.first(input=input + ":first-2")
+            return result
 
-    assert data == [{"inputs": {"input": "predictor-1"}, "outputs": {"output": "one"}}]
+    values = ["both:second", "both:first-1", "both:first-2", "skip:second"]
+    student = Program()
+    student.set_lm(DummyLM({value: {"output": value} for value in values}))
+    optimizer = BootstrapFinetune(adapter=TraceIdentityAdapter(), multitask=multitask, num_threads=2)
+    submitted = {}
 
+    def train(jobs):
+        submitted.update({key[1]: job["train_data"] for key, job in jobs.items()})
+        return {key: job["lm"] for key, job in jobs.items()}
 
-def test_prepare_finetune_data_includes_all_predictors_without_filter():
-    bootstrap = BootstrapFinetune(adapter=TraceIdentityAdapter(), exclude_demos=True)
-
-    data, _ = bootstrap._prepare_finetune_data(
-        trace_data=make_two_predictor_trace(),
-        lm=DummyLM([]),
-        pred_ind=None,
-    )
-
-    assert sorted(data, key=lambda item: item["inputs"]["input"]) == [
-        {"inputs": {"input": "predictor-0"}, "outputs": {"output": "zero"}},
-        {"inputs": {"input": "predictor-1"}, "outputs": {"output": "one"}},
-    ]
+    monkeypatch.setattr(optimizer, "finetune_lms", train)  # provider boundary only
+    optimizer.compile(student, trainset=[Example(input=value).with_inputs("input") for value in ("both", "skip")])
+    expected = {None: values} if multitask else {0: values[1:3], 1: [values[0], values[3]]}
+    assert set(submitted) == set(expected)
+    for key, inputs in expected.items():
+        assert sorted(submitted[key], key=lambda item: item["inputs"]["input"]) == [
+            {"inputs": {"input": value}, "outputs": {"output": value}} for value in sorted(inputs)
+        ]

@@ -7,7 +7,9 @@ import orjson
 
 import dspy
 from dspy.adapters.utils import get_field_description_string
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.signatures import InputField, OutputField
+from dspy.utils.execution import capture_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ def prepare_models_for_resampling(program: dspy.Module, n: int, teacher_settings
 
 def wrap_program(program: dspy.Module, metric: Callable):
     def wrapped_program(example):
-        with dspy.context(trace=[]):
+        with dspy.context(trace=[], _trace_program=program), capture_invocation(program) as capture:
             prediction, trace, score = None, None, 0.0
             try:
                 prediction = program(**example.inputs())
@@ -46,7 +48,7 @@ def wrap_program(program: dspy.Module, metric: Callable):
         output_metadata = {}
 
         try:
-            output = metric(example, prediction)
+            output = call_metric(metric, example, prediction, MetricContext(invocation=capture.invocation))
             if isinstance(output, (int, float)):
                 score = output
             elif isinstance(output, dspy.Prediction):
@@ -72,7 +74,7 @@ def wrap_program(program: dspy.Module, metric: Callable):
 
 def append_a_demo(demo_input_field_maxlen):
     def append_a_demo_(bucket, system, **kwargs):
-        predictor2name, name2predictor = kwargs["predictor2name"], kwargs["name2predictor"]
+        name2predictor = kwargs["name2predictor"]
         batch_10p_score = kwargs["batch_10p_score"]
 
         good = bucket[0]
@@ -91,7 +93,7 @@ def append_a_demo(demo_input_field_maxlen):
                     _inputs[k] = f"{str(v)[:demo_input_field_maxlen]}\n\t\t... <TRUNCATED FOR BREVITY>"
 
             demo = dspy.Example(augmented=True, **_inputs, **_outputs)
-            name = predictor2name.get(id(predictor))
+            name = step.component_name
             if name is None:
                 continue
             name2demo[name] = demo  # keep the last demo for each predictor
@@ -106,7 +108,6 @@ def append_a_demo(demo_input_field_maxlen):
 
 
 def append_a_rule(bucket, system, **kwargs):
-    predictor2name = kwargs["predictor2name"]
     batch_10p_score, batch_90p_score = kwargs["batch_10p_score"], kwargs["batch_90p_score"]
     prompt_model = kwargs["prompt_model"] or dspy.settings.lm
 
@@ -130,14 +131,14 @@ def append_a_rule(bucket, system, **kwargs):
             good["prediction"] = {"N/A": "Prediction not available"}
 
     better_trajectory = [
-        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)}
-        for p, i, o in good["trace"]
-        if id(p) in predictor2name
+        {"module_name": step.component_name, "inputs": step.inputs, "outputs": dict(step.outputs)}
+        for step in good["trace"]
+        if step.component_name is not None
     ]
     worse_trajectory = [
-        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)}
-        for p, i, o in bad["trace"]
-        if id(p) in predictor2name
+        {"module_name": step.component_name, "inputs": step.inputs, "outputs": dict(step.outputs)}
+        for step in bad["trace"]
+        if step.component_name is not None
     ]
 
     kwargs = {

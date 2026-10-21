@@ -1,7 +1,9 @@
 from typing import Callable
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.predict.predict import Module, Prediction
+from dspy.utils.execution import capture_invocation
 
 
 class BestOfN(Module):
@@ -42,7 +44,8 @@ class BestOfN(Module):
         fail_count: int | None = None,
     ):
         self.module = module
-        self.reward_fn = lambda *args: reward_fn(*args)  # to prevent this from becoming a parameter
+        # Keep module-valued rewards out of the program's optimizable parameters.
+        self.reward_fn = lambda inputs, pred, context=None: call_metric(reward_fn, inputs, pred, context or MetricContext())
         self.threshold = threshold
         self.N = N
         self.fail_count = fail_count or N  # default to N if fail_count is not provided
@@ -57,14 +60,18 @@ class BestOfN(Module):
             lm_ = lm.copy(rollout_id=rid, temperature=1.0)
             mod = self.module.deepcopy()
             mod.set_lm(lm_)
+            capture = dspy.settings.get("_execution_capture")
+            if capture is not None:
+                capture.inherit_names(self.module, mod)
 
             try:
                 with dspy.context(trace=[]):
-                    pred = mod(**kwargs)
+                    with capture_invocation() as attempt:
+                        pred = mod(**kwargs)
                     trace = dspy.settings.trace.copy()
 
                     # NOTE: Not including the trace of reward_fn.
-                    reward = self.reward_fn(kwargs, pred)
+                    reward = self.reward_fn(kwargs, pred, MetricContext(invocation=attempt.invocation))
 
                 if reward > best_reward:
                     best_reward, best_pred, best_trace = reward, pred, trace

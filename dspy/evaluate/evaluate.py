@@ -3,6 +3,7 @@ import importlib
 import json
 import logging
 import types
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -11,8 +12,10 @@ if TYPE_CHECKING:
 import tqdm
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.primitives.prediction import Prediction
 from dspy.utils.callback import with_callbacks
+from dspy.utils.execution import capture_invocation
 from dspy.utils.parallelizer import ParallelExecutor
 
 try:
@@ -171,8 +174,12 @@ class Evaluate:
         )
 
         def process_item(example):
-            prediction = program(**example.inputs())
-            score = metric(example, prediction)
+            # Arbitrary callables have no DSPy root boundary; their incidental
+            # predictor calls must not masquerade as the complete candidate.
+            record = accepts_metric_context(metric) and isinstance(program, dspy.Module)
+            with capture_invocation(program) if record else nullcontext() as capture:
+                prediction = program(**example.inputs())
+            score = call_metric(metric, example, prediction, MetricContext(invocation=capture.invocation if capture else None))
             return prediction, score
 
         results = executor.execute(process_item, devset)

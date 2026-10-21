@@ -315,10 +315,10 @@ class AdapterParseError(DSPyError):
     def __init__(
         self,
         adapter_name: str,
-        signature: Signature,
+        signature: type[Signature],
         lm_response: str,
         message: str | None = None,
-        parsed_result: str | None = None,
+        parsed_result: dict[str, Any] | None = None,
     ):
         self.adapter_name = adapter_name
         self.signature = signature

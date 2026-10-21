@@ -57,6 +57,25 @@ class MyCallback(BaseCallback):
         self.calls.append({"handler": "on_tool_end", "outputs": outputs, "exception": exception})
 
 
+def test_sdk_callback_with_dynamic_fallback_still_receives_legacy_events():
+    events = []
+
+    class SDKCallback:
+        def on_module_start(self, call_id, instance, inputs):
+            events.append(("start", call_id, inputs["kwargs"]))
+
+        def on_module_end(self, call_id, outputs, exception):
+            events.append(("end", call_id, outputs))
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    with dspy.context(lm=DummyLM([{"a": "answer"}]), callbacks=[SDKCallback()]):
+        result = dspy.Predict("q -> a")(q="question")
+    assert len(events) == 2
+    assert events == [("start", events[0][1], {"q": "question"}), ("end", events[0][1], result)]
+
+
 def test_bind_active_call_id_restores_context_after_exception():
     observed_call_ids = []
 

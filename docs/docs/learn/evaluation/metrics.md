@@ -140,3 +140,65 @@ def validate_hops(example, pred, trace=None):
 
     return True
 ```
+
+## Experimental: explicit metric requests
+
+The target API explicitly declares `metric_context` to separate the question being asked
+from available trace evidence. Migrate metrics and their direct callers together:
+
+```python
+def metric(gold, pred, *, metric_context):
+    score = float(gold.answer == pred.answer)
+    return score >= 0.8 if metric_context.purpose == "accept" else score
+
+score = metric(gold, pred, metric_context=dspy.MetricContext("score"))
+```
+
+`dspy.MetricContext` contains:
+
+- `purpose`: `"score"` for fitness/ranking, `"accept"` for demonstration admission,
+  or `"feedback"` for GEPA's component critique. Thresholded bootstrapping asks for
+  a score; unthresholded bootstrapping and fine-tuning filtering ask for acceptance.
+- `trace`: optional existing `(predictor, inputs, prediction)` tuples. `None` means
+  unavailable; an empty tuple means no steps recorded. Membership is snapshotted,
+  but predictor/input/output objects remain shared. Treat evidence as read-only.
+- `component_name` and `target`: optional GEPA component name and occurrence index
+  into `trace`. Use `metric_context.trace[metric_context.target]` for that step.
+- `usage`: optional reported non-cached token totals by model, not invoice accounting.
+- `execution`: optional detached `ExecutionTrace`. Its invocation IDs distinguish
+  repeated calls and copied attempts. `target_ref` identifies the selected predictor
+  occurrence when it was recorded; it is otherwise `None`.
+
+Evidence availability never determines purpose. Evaluate does not capture a trace for
+this API; existing bootstrap/ranking collectors supply tuples. Flex additionally supplies
+usage even when trajectories are not retained. Predictor tuples are not provider requests.
+
+Contextual bootstrap/GEPA and Flex capture candidate execution before the outer metric
+runs. For standalone inspection, use `with dspy.capture_execution(program) as capture`,
+then read `capture.trace`. Records include observed losing attempts; demonstration tuples
+still select winners. Records are JSON snapshots, not replay state or conversation history.
+`execution.annotate(text, span_id=..., output_path="/answer")` creates separate feedback
+addressed to an invocation's output; it does not change the metric's return contract.
+
+Only a declared parameter opts in; `**kwargs` alone does not. Module metrics declare it
+on `forward`. For a fully migrated metric, remove the legacy `trace` argument and require
+`metric_context`. BestOfN and Refine pass an inputs dict rather than a gold Example.
+
+**Results remain caller-specific:** return a numeric fitness for scoring, a boolean for
+acceptance, or the existing `Prediction(score=..., feedback=...)` for GEPA feedback.
+The bridge does not coerce results, apply thresholds, or retry exceptions. Legacy
+truthiness is unchanged: notably, `Prediction(score=False)` is truthy. Built-in metrics
+are not silently migrated by the current bridge. That bridge still accepts legacy metrics;
+it is not a requirement of the target API.
+
+### Agent-assisted migration
+
+The repository includes `.agents/skills/migrating-dspy-metrics/SKILL.md`. Copy the
+`migrating-dspy-metrics` directory into your project's `.agents/skills/` (or your agent's
+supported skill directory), then ask: **"Use migrating-dspy-metrics to migrate our DSPy
+metrics and direct callers to the context-only API."**
+
+The skill checks the target DSPy API before editing, follows metrics through wrappers and
+optimizers, and tests scoring, acceptance, and feedback separately. It does not add legacy
+signature fallbacks by default. It also identifies behavioral decisions a signature rewrite
+cannot settle, such as a false-valued Prediction that previously admitted demonstrations.

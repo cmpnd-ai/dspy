@@ -150,7 +150,7 @@ class ParallelExecutor:
             original = thread_local_overrides.get()
             new_overrides = {**original, **parent_overrides.copy()}
             if new_overrides.get("usage_tracker"):
-                # Usage tracker needs to be deep copied across threads so that each thread tracks its own usage
+                # Legacy per-worker tracking stays isolated; invocation totals follow parentage.
                 new_overrides["usage_tracker"] = copy.deepcopy(new_overrides["usage_tracker"])
             token = thread_local_overrides.set(new_overrides)
 

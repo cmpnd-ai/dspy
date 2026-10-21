@@ -17,7 +17,8 @@ from dspy.predict.parameter import Parameter
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import Signature, ensure_signature
-from dspy.utils.callback import BaseCallback
+from dspy.utils.callback import BaseCallback, with_callbacks
+from dspy.utils.callback_context import ACTIVE_INVOCATION
 from dspy.utils.constants import IS_TYPE_UNDEFINED
 
 logger = logging.getLogger(__name__)
@@ -241,16 +242,24 @@ class Predict(Module, Parameter):
                 present,
                 missing,
             )
+        invocation = ACTIVE_INVOCATION.get()
+        if invocation is not None and invocation.instance is self:
+            invocation.inputs = kwargs
         return lm, config, signature, demos, kwargs
 
     def _forward_postprocess(self, completions, signature, **kwargs):
-        pred = Prediction.from_completions(completions, signature=signature)
-        if kwargs.pop("_trace", True) and settings.trace is not None and settings.max_trace_size > 0:
+        return Prediction.from_completions(completions, signature=signature)
+
+    def _record_trace(self, invocation):
+        if invocation.inputs is None:
+            return
+        invocation.inputs = dict(invocation.inputs)
+        enabled = invocation.inputs.pop("_trace", True)
+        if invocation.exception is None and enabled and settings.trace is not None and settings.max_trace_size > 0:
             trace = settings.trace
             if len(trace) >= settings.max_trace_size:
                 trace.pop(0)
-            trace.append((self, {**kwargs}, pred))
-        return pred
+            trace.append(invocation)
 
     def _should_stream(self):
         stream_listeners = settings.stream_listeners or []
@@ -260,6 +269,7 @@ class Predict(Module, Parameter):
 
         return should_stream
 
+    @with_callbacks
     def forward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 
@@ -274,6 +284,7 @@ class Predict(Module, Parameter):
 
         return self._forward_postprocess(completions, signature, **kwargs)
 
+    @with_callbacks
     async def aforward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 

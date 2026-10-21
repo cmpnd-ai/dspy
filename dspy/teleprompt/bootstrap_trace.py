@@ -1,14 +1,17 @@
 import logging
-from dataclasses import dataclass
-from types import MethodType
-from typing import Any, Callable, TypedDict
+from dataclasses import dataclass, replace
+from typing import Any, Callable, TypedDict, cast
+
+from typing_extensions import NotRequired
 
 import dspy
 from dspy.evaluate.evaluate import Evaluate
+from dspy.evaluate.metric_context import MetricContext, call_metric
 from dspy.primitives.example import Example
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.utils.exceptions import AdapterParseError, LMError
+from dspy.utils.execution import ExecutionTrace, Invocation, UsageTotals, _Capture, capture_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +25,28 @@ class FailedPrediction:
 class TraceData(TypedDict):
     example_ind: int
     example: Example
-    prediction: Prediction
-    trace: list[tuple[Any, dict[str, Any], Prediction]]
-    score: float | None
+    prediction: Prediction | FailedPrediction
+    trace: list[Invocation]
+    invocation: Invocation
+    score: NotRequired[float | Prediction]
+    usage: NotRequired[UsageTotals | None]
+    execution: NotRequired[ExecutionTrace]
 
 
 def bootstrap_trace_data(
     program: Module,
     dataset: list[Example],
-    metric: Callable | None = None,
+    metric: Callable[..., float | Prediction] | None = None,
     num_threads: int | None = None,
-    raise_on_error=True,
-    capture_failed_parses=False,
+    raise_on_error: bool = True,
+    capture_failed_parses: bool = False,
     failure_score: float = 0,
     format_failure_score: float = -1,
     log_format_failures: bool = False,
     callback_metadata: dict[str, Any] | None = None,
     capture_crashes: bool = False,
+    capture_usage: bool = False,
+    capture_execution: bool = False,
 ) -> list[TraceData]:
     # Return a list of dicts with the following keys: example_ind, example, prediction, trace, and score
     # (if metric != None)
@@ -51,39 +59,43 @@ def bootstrap_trace_data(
         failure_score=failure_score,
     )
 
-    def wrapped_metric(example, prediction, trace=None):
-        prediction, _ = prediction
+    def wrapped_metric(
+        example: Example,
+        captured: tuple[Prediction | FailedPrediction, Invocation, ExecutionTrace | None],
+        trace: list[Invocation] | None = None,
+    ) -> float | Prediction:
+        prediction, invocation, _execution = captured
         if isinstance(prediction, FailedPrediction):
             return prediction.format_reward if prediction.format_reward is not None else format_failure_score
-        return metric(example, prediction, trace) if metric else True
+        return call_metric(
+            metric, example, prediction,
+            MetricContext(invocation=invocation),
+            legacy_args=(trace,),
+        ) if metric else True
 
-    # Use `object.__getattribute__` to bypass the custom hook `Module.__getattribute__` so that we avoid
-    # the warning that `forward` is not accessed through `__call__`.
-    original_forward = object.__getattribute__(program, "forward")
-
-    def patched_forward(program_to_use: Module, **kwargs):
-        with dspy.context(trace=[]):
+    def collect(**kwargs: Any) -> tuple[Prediction | FailedPrediction, list[Invocation], _Capture]:
+        trace: list[Invocation]
+        with (
+            dspy.context(trace=[], _trace_program=program),
+            capture_invocation(program, recording=capture_execution) as capture,
+        ):
             try:
-                return original_forward(**kwargs), dspy.settings.trace.copy()
+                prediction = program(**kwargs)
+                trace = cast(list[Invocation], dspy.settings.trace.copy())
+                return prediction, trace, capture
             except AdapterParseError as e:
                 completion_str = e.lm_response
                 parsed_result = e.parsed_result
                 failed_signature = e.signature
-                failed_inputs = kwargs
 
                 present = list(parsed_result.keys()) if parsed_result else None
                 expected = list(failed_signature.output_fields.keys())
 
-                found_pred = None
-                for pred in program_to_use.predictors():
-                    if pred.signature == failed_signature:
-                        found_pred = pred
-                        break
-                if found_pred is None:
-                    raise ValueError(f"Failed to find the predictor for the failed signature: {failed_signature}")
+                failed_call = getattr(e, "_execution_call", None)
+                if failed_call is None:
+                    raise ValueError("The parse error did not originate in an observed predictor call") from e
 
-                trace = dspy.settings.trace.copy()
-                # Trace is Tuple[signature, inputs, prediction outputs]
+                trace = cast(list[Invocation], dspy.settings.trace.copy())
                 if present:
                     failed_pred = FailedPrediction(
                         completion_text=completion_str,
@@ -92,14 +104,7 @@ def bootstrap_trace_data(
                     )
                 else:
                     failed_pred = FailedPrediction(completion_text=completion_str, format_reward=format_failure_score)
-
-                trace.append(
-                    (
-                        found_pred,
-                        failed_inputs,
-                        failed_pred,
-                    )
-                )
+                trace.append(replace(failed_call, outputs=failed_pred))
 
                 if log_format_failures:
                     logging.warning(
@@ -107,7 +112,7 @@ def bootstrap_trace_data(
                         "the adapter's formatting."
                     )
 
-                return failed_pred, trace
+                return failed_pred, trace, capture
             except LMError:
                 raise
             except Exception as e:
@@ -115,23 +120,29 @@ def bootstrap_trace_data(
                     raise
                 logger.warning("Program raised on an example; capturing it as a failed prediction: %s: %s",
                                type(e).__name__, e)
-                return FailedPrediction(completion_text=f"{type(e).__name__}: {e}"), dspy.settings.trace.copy()
+                trace = cast(list[Invocation], dspy.settings.trace.copy())
+                return (
+                    FailedPrediction(completion_text=f"{type(e).__name__}: {e}"), trace,
+                    capture,
+                )
 
-    program.forward = MethodType(patched_forward, program)
+    class CapturedProgram(Module):
+        def forward(self, **kwargs: Any) -> tuple[Prediction | FailedPrediction, Invocation, ExecutionTrace | None]:
+            prediction, trace, capture = collect(**kwargs)
+            invocation = capture.invocation
+            invocation.trace = tuple(trace)
+            return prediction, invocation, capture.trace if capture_execution else None
 
-    try:
-        results = evaluator(
-            program,
-            metric=wrapped_metric,
-            callback_metadata=callback_metadata,
-        ).results
-    finally:
-        program.forward = original_forward
+    results = evaluator(
+        CapturedProgram(),
+        metric=wrapped_metric,
+        callback_metadata=callback_metadata,
+    ).results
 
-    data = []
+    data: list[TraceData] = []
     for example_ind, (example, prediction, score) in enumerate(results):
         try:
-            prediction, trace = prediction
+            prediction, invocation, execution = prediction
         except ValueError as ve:
             # TODO(GRPO Team): Often during GRPO bootstrapping, the LLM response does not follow dspy formatting. This
             # leads to a value error. To reproduce this issue, try Qwen/Qwen2.5-Coder-0.5B-Instruct with MATH dataset.
@@ -145,7 +156,14 @@ def bootstrap_trace_data(
                 raise ve
             else:
                 continue
-        data_dict = {"example": example, "prediction": prediction, "trace": trace, "example_ind": example_ind}
+        data_dict: TraceData = {
+            "example": example, "prediction": prediction, "trace": list(invocation.trace),
+            "invocation": invocation, "example_ind": example_ind,
+        }
+        if execution is not None:
+            data_dict["execution"] = execution
+        if capture_usage:
+            data_dict["usage"] = invocation.usage
         if metric:
             data_dict["score"] = score
         data.append(data_dict)

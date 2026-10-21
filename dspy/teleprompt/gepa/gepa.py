@@ -10,6 +10,7 @@ from gepa.core.adapter import ProposalFn
 from gepa.proposer.reflective_mutation.base import ReflectionComponentSelector
 
 from dspy.clients.lm import LM
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.primitives import Example, Module, Prediction
 from dspy.teleprompt.gepa.gepa_utils import (
     CodeProposalFn,
@@ -39,7 +40,6 @@ class GEPAFeedbackMetric(Protocol):
         trace: Optional["DSPyTrace"],
         pred_name: str | None,
         pred_trace: Optional["DSPyTrace"],
-        program_trace: Optional["DSPyTrace"] = None,
     ) -> Union[float, "ScoreWithFeedback"]:
         """
         This function is called with the following arguments:
@@ -49,10 +49,6 @@ class GEPAFeedbackMetric(Protocol):
         - pred_name: Optional. The name of the target predictor currently being optimized by GEPA, for which
             the feedback is being requested.
         - pred_trace: Optional. The trace of the target predictor's execution GEPA is seeking feedback for.
-        - program_trace: Optional. The full execution trace of the program, supplied at scoring time when a
-            `dspy.Flex` submodule is being optimized. Declare this parameter to score against how an answer was
-            produced (e.g. `len(program_trace)` as an LM-call count), rather than only whether it was correct.
-            Unlike `trace`, it is populated during candidate *scoring*.
 
         Note the `pred_name` and `pred_trace` arguments. During optimization, GEPA will call the metric to obtain
         feedback for individual predictors being optimized. GEPA provides the name of the predictor in `pred_name`
@@ -211,7 +207,6 @@ class GEPA(Teleprompter):
         trace: Optional[DSPyTrace] = None,
         pred_name: Optional[str] = None,
         pred_trace: Optional[DSPyTrace] = None,
-        program_trace: Optional[DSPyTrace] = None,
     ) -> float | ScoreWithFeedback:
         \"""
         This function is called with the following arguments:
@@ -221,9 +216,6 @@ class GEPA(Teleprompter):
         - pred_name: Optional. The name of the target predictor currently being optimized by GEPA, for which
             the feedback is being requested.
         - pred_trace: Optional. The trace of the target predictor's execution GEPA is seeking feedback for.
-        - program_trace: Optional. The program's execution trace, supplied at scoring time when a `dspy.Flex`
-            submodule is being optimized. Declare it to score against how the answer was produced (e.g. an
-            LM-call penalty). Defaults to None.
 
         Note the `pred_name` and `pred_trace` arguments. During optimization, GEPA will call the metric to obtain
         feedback for individual predictors being optimized. GEPA provides the name of the predictor in `pred_name`
@@ -435,10 +427,14 @@ class GEPA(Teleprompter):
         gepa_kwargs: dict | None = None,
     ):
         try:
-            inspect.signature(metric).bind(None, None, None, None, None)
+            if accepts_metric_context(metric):
+                inspect.signature(getattr(metric, "forward", metric)).bind(None, None, metric_context=MetricContext())
+            else:
+                inspect.signature(metric).bind(None, None, None, None, None)
         except TypeError as e:
             raise TypeError(
-                "GEPA metric must accept five arguments: (gold, pred, trace, pred_name, pred_trace). "
+                "GEPA metric must accept (gold, pred, *, metric_context) or the legacy five arguments "
+                "(gold, pred, trace, pred_name, pred_trace). "
                 "See https://dspy.ai/api/optimizers/GEPA for details."
             ) from e
 
@@ -611,14 +607,13 @@ class GEPA(Teleprompter):
                 module_inputs: Example,
                 module_outputs: Prediction,
                 captured_trace: "DSPyTrace",
+                metric_context: MetricContext | None = None,
             ) -> "ScoreWithFeedback":
                 trace_for_pred = [(predictor, predictor_inputs, predictor_output)]
-                o = self.metric_fn(
-                    module_inputs,
-                    module_outputs,
-                    captured_trace,
-                    pred_name,
-                    trace_for_pred,
+                o = call_metric(
+                    self.metric_fn, module_inputs, module_outputs,
+                    metric_context or MetricContext("feedback"),
+                    legacy_args=(captured_trace, pred_name, trace_for_pred),
                 )
                 if hasattr(o, "feedback"):
                     if o["feedback"] is None:

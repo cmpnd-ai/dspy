@@ -88,6 +88,9 @@ async def test_async_native_cache_and_history(monkeypatch):
 
 def test_native_n_fans_out_but_bookkeeping_is_one_call(monkeypatch):
     transport = native_transport(monkeypatch, [wire("first"), wire("second")])
+    monkeypatch.setattr("dspy.clients.costs.model_info", lambda *args, **kwargs: {
+        "input_cost_per_token": 0.000001, "output_cost_per_token": 0.000003,
+    })
 
     class Trace(BaseCallback):
         def __init__(self):
@@ -101,8 +104,11 @@ def test_native_n_fans_out_but_bookkeeping_is_one_call(monkeypatch):
 
     trace = Trace()
     lm = dspy.LM("openai/gpt-4o-mini", callbacks=[trace])
-    with track_usage() as usage:
+    with track_usage() as usage, dspy.capture_execution() as capture:
         assert lm("hello", n=2) == ["first", "second"]
+    invocation, = capture.roots
+    assert invocation.get_total_lm_calls() == 1  # Two provider requests, one DSPy LM call.
+    assert invocation.get_total_cost() == pytest.approx(0.000010)
     assert len(transport.requests) == 2
     assert len(lm.history) == 1
     assert trace.events[1] == ("end", trace.events[0][1])
@@ -131,8 +137,11 @@ def test_provider_auth_error_does_not_switch_backend(monkeypatch):
         pytest.fail("An authentication failure must not invoke LiteLLM")
 
     monkeypatch.setattr(LiteLLMEngine, "complete_legacy", forbidden)
-    with pytest.raises(dspy.LMAuthError):
+    with dspy.capture_execution() as capture, pytest.raises(dspy.LMAuthError):
         dspy.LM("openai/gpt-4o-mini", cache=False)("hello")
+    invocation, = capture.roots
+    assert invocation.get_total_lm_calls() == 1
+    assert invocation.get_total_cost() is None
 
 
 def test_unrepresentable_ordinary_options_choose_compatibility_before_io(monkeypatch):

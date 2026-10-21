@@ -150,27 +150,95 @@ def test_build_program_rebinds_flex_code() -> None:
 
 
 @deno_required
-def test_selection_eval_passes_program_trace_to_declaring_metric() -> None:
-    """The selection eval (capture_traces=False) must pass the execution trace to a metric that
-    declares `program_trace`, so a trace-dependent score (e.g. an LLM-call penalty that rewards
-    deterministic code) actually drives candidate selection."""
+@pytest.mark.parametrize("capture_traces", [False, True])
+def test_selection_eval_supplies_candidate_evidence(capture_traces) -> None:
+    """Evidence is independent of retention and excludes the metric's own judge."""
     seen: dict[str, object] = {}
 
-    def trace_aware_metric(gold, pred, trace=None, pred_name=None, pred_trace=None, program_trace=None):
-        seen["trace"] = trace
-        seen["n_calls"] = len(program_trace) if program_trace is not None else None
-        return 1.0
+    def trace_aware_metric(gold, pred, *, metric_context):
+        seen["context"] = metric_context
+        dspy.Predict("q -> a")(q="judge")
+        return 0.75 if metric_context.purpose == "score" and len(metric_context.invocation.trace) == 1 else 0.0
 
     student = dspy.Flex(Echo)  # a flex submodule is present
     adapter = DspyAdapter(student_module=student, metric_fn=trace_aware_metric, feedback_map={})
-    candidate = {"self": SIMPLE_MODULE}  # one dspy.Predict -> one traced call
+    candidate = {"self": SIMPLE_MODULE}
     ex = dspy.Example(q="hi", a="hi").with_inputs("q")
 
-    dspy.configure(lm=DummyLM([{"a": "hi"}]))
-    adapter.evaluate([ex], candidate, capture_traces=False)  # the selection path
+    dspy.configure(lm=DummyLM([{"a": "hi"}, {"a": "judged"}]))
+    batch = adapter.evaluate([ex], candidate, capture_traces=capture_traces)
 
-    assert seen.get("n_calls") == 1  # the metric received the trace, with the one call
-    assert seen.get("trace") is None  # eval-mode semantics of the `trace` argument are preserved
+    assert batch.scores == [0.75]
+    invocation = seen["context"].invocation
+    assert len(invocation.trace) == 1
+    assert invocation.trace[0].inputs == {"q": "hi"}
+    assert invocation.usage is not None
+    assert all(call.inputs != {"q": "judge"} for call in invocation.descendants())
+    assert (batch.trajectories is not None) == capture_traces
+
+
+@deno_required
+@pytest.mark.parametrize("capture_traces", [False, True])
+@pytest.mark.parametrize("num_threads", [1, 2])
+def test_candidate_usage_includes_batch_workers(monkeypatch, capture_traces, num_threads):
+    litellm = pytest.importorskip("litellm")
+
+    def completion(**kwargs):
+        query = kwargs["messages"][-1]["content"]
+        tokens = next(value for label, value in (("seed", 5), ("three", 3), ("seven", 7), ("judge", 100), ("hi", 11))
+                      if label in query)
+        return litellm.ModelResponse(
+            choices=[{"message": {"role": "assistant", "content": "[[ ## a ## ]]\nhi\n[[ ## completed ## ]]"},
+                      "finish_reason": "stop"}],
+            usage={"prompt_tokens": tokens - 1, "completion_tokens": 1, "total_tokens": tokens},
+        )
+
+    monkeypatch.setattr(litellm, "completion", completion)
+
+    class Program(dspy.Module):
+        def __init__(self):
+            self.flex = dspy.Flex(Echo)
+            self.predict = dspy.Predict("q -> a")
+
+        def forward(self, q):
+            self.predict(q="seed")
+            self.predict.batch(
+                [dspy.Example(q=q).with_inputs("q") for q in ("three", "seven")],
+                num_threads=num_threads, disable_progress_bar=True,
+            )
+            return self.flex(q=q)
+
+    seen = []
+
+    def metric(gold, pred, *, metric_context):
+        seen.append(metric_context)
+        dspy.Predict("q -> a")(q="judge")
+        return 1 - metric_context.invocation.usage["openai/test"]["total_tokens"] / 100
+
+    adapter = DspyAdapter(student_module=Program(), metric_fn=metric, feedback_map={}, num_threads=2)
+    with dspy.context(lm=dspy.LM("openai/test", engine="litellm", cache=False), track_usage=True):
+        batch = adapter.evaluate([dspy.Example(q="hi").with_inputs("q")], {"flex": SIMPLE_MODULE}, capture_traces)
+    assert seen, batch.outputs
+    assert batch.scores == [0.74]  # 5 sequential + 3 and 7 in workers + 11 in Flex; never the 100-token judge
+    invocation = seen[0].invocation
+    assert invocation.usage["openai/test"]["total_tokens"] == 26
+    assert batch.outputs[0].get_lm_usage() == invocation.usage
+    assert invocation.own_usage == {}
+    lm_calls = [call for call in invocation.descendants() if call.kind == "lm"]
+    assert sorted(call.own_usage["openai/test"]["total_tokens"] for call in lm_calls) == [3, 5, 7, 11]
+    assert all(call.cache_hit is False for call in lm_calls)
+    assert all(call.own_usage == {} for call in invocation.trace)
+
+
+@deno_required
+def test_program_trace_extension_requires_explicit_migration():
+    def metric(gold, pred, program_trace=None):
+        return 1.0
+
+    adapter = DspyAdapter(student_module=dspy.Flex(Echo), metric_fn=metric, feedback_map={})
+    ex = dspy.Example(q="hi", a="hi").with_inputs("q")
+    with pytest.raises(TypeError, match="must migrate to metric_context"):
+        adapter.evaluate([ex], {"self": SIMPLE_MODULE}, capture_traces=False)
 
 
 @deno_required
@@ -202,11 +270,10 @@ def test_selection_eval_binds_metric_with_required_contract_params() -> None:
     declared parameters as None rather than dropping them, so the metric doesn't raise TypeError."""
     seen: dict[str, object] = {}
 
-    def strict_metric(gold, pred, trace, pred_name, pred_trace, program_trace=None):
+    def strict_metric(gold, pred, trace, pred_name, pred_trace):
         seen["trace"] = trace
         seen["pred_name"] = pred_name
         seen["pred_trace"] = pred_trace
-        seen["n_calls"] = len(program_trace) if program_trace is not None else None
         return 1.0
 
     student = dspy.Flex(Echo)
@@ -219,7 +286,6 @@ def test_selection_eval_binds_metric_with_required_contract_params() -> None:
 
     assert batch.scores == [1.0]  # bound and scored instead of raising TypeError
     assert seen.get("trace") is None and seen.get("pred_name") is None and seen.get("pred_trace") is None
-    assert seen.get("n_calls") == 1  # program_trace still delivered to a metric that declares it
 
 
 # --- adapter: scores stay aligned to the batch when examples crash ------------

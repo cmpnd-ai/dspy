@@ -73,11 +73,13 @@ class BootstrapFinetune(FinetuneTeleprompter):
         teachers = [prepare_teacher(student, t) for t in teachers]
         num_threads = self.num_threads or dspy.settings.num_threads
         for t in teachers:
-            trace_data += bootstrap_trace_data(program=t, dataset=trainset, metric=self.metric, num_threads=num_threads)
+            trace_data += bootstrap_trace_data(
+                program=t, dataset=trainset, metric=self.metric, num_threads=num_threads,
+            )
 
         logger.info("Preparing the train data...")
         key_to_data = {}
-        for pred_ind, pred in enumerate(student.predictors()):
+        for pred_ind, (pred_name, pred) in enumerate(student.named_predictors()):
             data_pred_ind = None if self.multitask else pred_ind
             if pred.lm is None:
                 raise ValueError(
@@ -89,7 +91,7 @@ class BootstrapFinetune(FinetuneTeleprompter):
 
             if training_key not in key_to_data:
                 train_data, data_format = self._prepare_finetune_data(
-                    trace_data=trace_data, lm=pred.lm, pred_ind=data_pred_ind
+                    trace_data=trace_data, lm=pred.lm, component_name=None if self.multitask else pred_name,
                 )
                 logger.info(f"Using {len(train_data)} data points for fine-tuning the model: {pred.lm.model}")
                 finetune_kwargs = {
@@ -165,7 +167,7 @@ class BootstrapFinetune(FinetuneTeleprompter):
 
         return key_to_lm
 
-    def _prepare_finetune_data(self, trace_data: list[dict[str, Any]], lm: LM, pred_ind: int | None = None):
+    def _prepare_finetune_data(self, trace_data: list[dict[str, Any]], lm: LM, component_name: str | None = None):
         # TODO(nit) Log dataset details/size; make logs nicer
         if self.metric:
             logger.info(f"Collected data for {len(trace_data)} examples")
@@ -176,13 +178,13 @@ class BootstrapFinetune(FinetuneTeleprompter):
         adapter = self.adapter[lm] or settings.adapter or ChatAdapter()
         data_format = infer_data_format(adapter)
         for item in trace_data:
-            for trace_pred_ind, _ in enumerate(item["trace"]):
-                if pred_ind is None or trace_pred_ind == pred_ind:
-                    call_data = build_call_data_from_trace(
-                        trace=item["trace"],
-                        pred_ind=trace_pred_ind,
-                        adapter=adapter,
-                        exclude_demos=self.exclude_demos,
+            for call in item["trace"]:
+                if component_name is None or call.component_name == component_name:
+                    call_data = adapter.format_finetune_data(
+                        signature=call.instance.signature,
+                        demos=[] if self.exclude_demos else call.instance.demos,
+                        inputs=call.inputs,
+                        outputs=call.outputs,
                     )
                     data.append(call_data)
 
@@ -191,28 +193,6 @@ class BootstrapFinetune(FinetuneTeleprompter):
         random.Random(0).shuffle(data)
 
         return data, data_format
-
-
-# Note: Shared below are useful functions for preparing student/teacher programs
-# Similar methods are implemented separately and used by other DSPy
-# teleprompters. These can be moved to shared locations.
-def build_call_data_from_trace(
-    trace: list[dict],
-    pred_ind: int,
-    adapter: Adapter,
-    exclude_demos: bool = False,
-) -> dict[str, list[dict[str, Any]]]:
-    # Find data that's relevant to the predictor
-    pred, inputs, outputs = trace[pred_ind]  # assuming that the order is kept
-
-    demos = [] if exclude_demos else pred.demos
-    call_data = adapter.format_finetune_data(
-        signature=pred.signature,
-        demos=demos,
-        inputs=inputs,
-        outputs=outputs,
-    )
-    return call_data
 
 
 # # TODO(PR) check with team

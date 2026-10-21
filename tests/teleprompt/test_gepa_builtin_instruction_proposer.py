@@ -698,7 +698,9 @@ def test_reflective_dataset_preserves_builtin_values_and_custom_string_format(bu
         scores=[0],
         trajectories=[
             {
-                "trace": [(student, {"payload": payload}, output)],
+                "trace": [dspy.Invocation(
+                    student, "predict", {}, None, inputs={"payload": payload}, outputs=output, component_name="self",
+                )],
                 "example": example,
                 "prediction": output,
                 "score": 0,

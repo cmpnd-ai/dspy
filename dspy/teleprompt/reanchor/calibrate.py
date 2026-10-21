@@ -36,13 +36,16 @@ import copy
 import itertools
 import math
 import random
+from contextlib import nullcontext
 from typing import Any, Callable
 
 import dspy
 from dspy.adapters.decision import record_evidence
 from dspy.adapters.decision_state import DecisionState
 from dspy.adapters.types.decision import Choice, Noul, decision_type
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.predict.predict import Predict
+from dspy.utils.execution import capture_invocation
 from dspy.utils.parallelizer import ParallelExecutor
 
 MAX_CANDIDATES = 40  # candidate settings per parameter; more distinct values are thinned to quantiles
@@ -80,9 +83,9 @@ def effective(predict: Predict, field: str) -> dict:
     return DecisionState(predict.signature, fields).fields[field]
 
 
-def metric_value(metric: Callable, example, pred) -> float:
+def metric_value(metric: Callable, example, pred, invocation=None) -> float:
     """The metric's score as a float, from a number or from a prediction carrying `score`."""
-    verdict = metric(example, pred)
+    verdict = call_metric(metric, example, pred, MetricContext(invocation=invocation))
     return verdict.score if hasattr(verdict, "score") else float(verdict)
 
 
@@ -92,9 +95,12 @@ def scores(
     """The program's metric score on each example. Any program or metric error fails the pass."""
 
     def one(example):
-        with dspy.context(trace=[]):
+        with (
+            dspy.context(trace=[]),
+            capture_invocation(program) if accepts_metric_context(metric) else nullcontext() as capture,
+        ):
             pred = program(**example.inputs())
-        return metric_value(metric, example, pred)
+        return metric_value(metric, example, pred, capture.invocation if capture else None)
 
     executor = ParallelExecutor(num_threads=num_threads, max_errors=1, disable_progress_bar=not progress)
     values = executor.execute(one, examples)

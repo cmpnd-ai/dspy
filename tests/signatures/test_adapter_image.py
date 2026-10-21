@@ -17,16 +17,20 @@ from dspy.utils.dummies import DummyLM
 @pytest.fixture
 def sample_pil_image():
     """Fixture to provide a sample image for testing"""
-    url = "https://images.dog.ceo/breeds/dane-great/n02109047_8912.jpg"
-    response = requests.get(url)
-    response.raise_for_status()
-    return PILImage.open(BytesIO(response.content))
+    return PILImage.new("RGB", (12, 8), color=(40, 90, 130))
 
 
 @pytest.fixture
-def sample_dspy_image_download():
-    url = "https://images.dog.ceo/breeds/dane-great/n02109047_8912.jpg"
-    return dspy.Image.from_url(url)
+def sample_dspy_image_download(sample_pil_image, sample_url, monkeypatch):
+    # Exercise download decoding without depending on a public image host.
+    buffer = BytesIO()
+    sample_pil_image.save(buffer, format="JPEG")
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "image/jpeg"
+    response._content = buffer.getvalue()
+    monkeypatch.setattr("dspy.adapters.types.image.requests.get", lambda *args, **kwargs: response)
+    return dspy.Image.from_url(sample_url)
 
 
 @pytest.fixture

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from copy import deepcopy
 from random import sample
 from typing import Callable
@@ -7,8 +8,10 @@ from pydantic import BaseModel
 from tqdm import tqdm
 
 import dspy
+from dspy.evaluate.metric_context import MetricContext, accepts_metric_context, call_metric
 from dspy.predict.avatar import ActionOutput
 from dspy.teleprompt.teleprompt import Teleprompter
+from dspy.utils.execution import capture_invocation
 
 DEFAULT_MAX_EXAMPLES = 10
 
@@ -94,8 +97,9 @@ class AvatarOptimizer(Teleprompter):
         actor = deepcopy(actor)
 
         try:
-            prediction = actor(**example.inputs().toDict())
-            score = self.metric(example, prediction)
+            with capture_invocation(actor) if accepts_metric_context(self.metric) else nullcontext() as capture:
+                prediction = actor(**example.inputs().toDict())
+            score = call_metric(self.metric, example, prediction, MetricContext(invocation=capture.invocation if capture else None))
 
             if return_outputs:
                 return example, prediction, score

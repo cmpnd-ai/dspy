@@ -553,18 +553,13 @@ def _hint_responses_api(lm, exc):
 
 
 def _account_failed_call(lm, results, primary):
-    if settings.usage_tracker:
-        for result in results:
-            try:
-                settings.usage_tracker.add_usage(lm.model, result.usage)
-            except Exception as secondary:
-                # A custom tracker must not replace an engine error or cancel.
-                try:
-                    primary.usage_errors = (*getattr(primary, "usage_errors", ()), secondary)
-                    if hasattr(primary, "add_note"):
-                        primary.add_note(f"Usage accounting also failed ({type(secondary).__name__}); see usage_errors.")
-                except Exception:
-                    pass
+    from dspy.utils.execution import record_usage
+
+    for result in results:
+        try:
+            record_usage(lm.model, result.usage, cache_hit=result.cache_hit, cost=result.cost)
+        except Exception as secondary:
+            primary.usage_errors = (*getattr(primary, "usage_errors", ()), secondary)
 
 
 def _retryable(state, exc, attempt, retries):
@@ -727,8 +722,9 @@ async def aexecute(lm, call):
 
 
 def finalize(lm, call, result):
-    if not result.cache_hit and settings.usage_tracker:
-        settings.usage_tracker.add_usage(lm.model, result.usage)
+    from dspy.utils.execution import record_usage
+
+    record_usage(lm.model, result.usage, cache_hit=result.cache_hit, cost=result.cost)
     if not settings.disable_history:
         import datetime
         import uuid

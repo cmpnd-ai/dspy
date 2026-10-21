@@ -1,8 +1,6 @@
 import copy as copy_module
-import datetime
 import importlib
 import inspect
-import uuid
 from typing import Any, TextIO
 
 from dspy.clients._deprecation import warn_legacy_lm, warn_openai_messages
@@ -139,46 +137,6 @@ class BaseLM:
     def supported_params(self) -> set[str]:
         """Set of supported OpenAI-style parameter names for the model."""
         return set()
-
-    def _process_lm_response(self, response, prompt, messages, **kwargs):
-        merged_kwargs = {**self.kwargs, **kwargs}
-
-        if self.model_type == "responses":
-            outputs = self._process_response(response)
-        else:
-            outputs = self._process_completion(response, merged_kwargs)
-
-        return self._record_response(response, prompt, messages, outputs, kwargs)
-
-    def _record_response(self, response, prompt, messages, outputs, kwargs, request=None):
-        if not getattr(response, "cache_hit", False) and settings.usage_tracker:
-            settings.usage_tracker.add_usage(self.model, dict(getattr(response, "usage", {}) or {}))
-
-        if settings.disable_history:
-            return outputs
-
-        # Cache hits retain historical cost metadata but add no billed usage.
-        kwargs = {k: v for k, v in kwargs.items() if not k.startswith("api_")}
-        entry = {
-            "prompt": prompt,
-            "messages": messages,
-            "kwargs": kwargs,
-            "response": response,
-            "outputs": outputs,
-            "usage": dict(getattr(response, "usage", {}) or {}),
-            "cost": getattr(response, "_hidden_params", {}).get("response_cost"),
-            "timestamp": datetime.datetime.now().isoformat(),
-            "uuid": str(uuid.uuid4()),
-            "model": self.model,
-            "response_model": response.model,
-            "model_type": self.model_type,
-        }
-
-        if request is not None:
-            entry["request"] = request
-        self.update_history(entry)
-
-        return outputs
 
     @with_callbacks
     def __call__(self, prompt=None, *, messages=None, **kwargs):

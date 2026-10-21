@@ -1464,38 +1464,6 @@ def batch_entry_http(body: "dict[str, Any]", status: int = 200) -> HttpResponse:
     )
 
 
-class UnsupportedLiveSession:
-    def send(self, event=None, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def send_turn(self, *args, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def send_audio(self, *args, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def send_image(self, *args, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def send_text(self, *args, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def send_tool_result(self, *args, **kwargs):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def interrupt(self):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def end_audio(self):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def recv(self):
-        raise UnsupportedFeatureError("live session not supported")
-
-    def close(self) -> None:
-        return
-
-
 def _iter_lines(chunks: Iterator[bytes]) -> Iterator[bytes]:
     """Split arbitrary byte chunks into newline-terminated lines for SSE
     (linear in the bytes, however long a line is: INV-056)."""

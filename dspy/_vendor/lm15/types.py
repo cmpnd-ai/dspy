@@ -149,7 +149,6 @@ _MISSING: Any = object()
 # they enter the core model.
 JsonPrimitive: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
-JsonArray: TypeAlias = list[JsonValue]
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
@@ -859,9 +858,6 @@ def _is_part(value: object) -> bool:
     """Return True if value is one of lm15's concrete Part variants."""
     return isinstance(value, PART_CLASSES)
 
-
-MediaPart: TypeAlias = ImagePart | AudioPart | VideoPart | DocumentPart | BinaryPart
-MEDIA_TYPES: tuple[type, ...] = get_args(MediaPart)
 
 # Shared endpoint metadata/content aliases
 Extensions: TypeAlias = JsonObject
@@ -3246,25 +3242,6 @@ class VideoJobInfo:
         _validate_optional_text(self.created_at, field_name="VideoJobInfo.created_at", allow_empty=False)
         _validate_optional_text(self.model, field_name="VideoJobInfo.model", allow_empty=False)
         _validate_json_field(self, "provider_data")
-
-
-EndpointRequest: TypeAlias = (
-    Request
-    | FileUploadRequest
-    | BatchRequest
-    | ImageGenerationRequest
-    | SpeechGenerationRequest
-    | VideoGenerationRequest
-)
-
-EndpointResponse: TypeAlias = (
-    Response
-    | FileInfo
-    | BatchJobInfo
-    | ImageGenerationResponse
-    | SpeechGenerationResponse
-    | VideoJobInfo
-)
 
 
 # ─── Audio Format ────────────────────────────────────────────────────

@@ -678,7 +678,7 @@ def race_callback_and_manual(
     def ask() -> None:
         try:
             manual_box["value"] = ctx.ui.prompt(prompt)
-        except (KeyboardInterrupt, EOFError):
+        except (KeyboardInterrupt, EOFError, LoginCancelled):
             manual_box["cancelled"] = True
         except BaseException as exc:  # a UI bug is a sanitized failure, not a crash into headless mode
             manual_box["error"] = type(exc).__name__

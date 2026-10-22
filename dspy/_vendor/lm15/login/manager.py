@@ -219,8 +219,16 @@ class Auth:
         slots = (document.get(META_KEY) or {}).get("slots") or {}
         if provider in document or provider in slots:
             return self._view(document, provider)
-        owners = [owner for owner, record in slots.items()
-                  if provider in record.get("routes", ()) and provider in self.descriptor(owner).routes]
+        owners = []
+        for owner, record in slots.items():
+            if provider not in record.get("routes", ()):
+                continue
+            try:
+                if provider in self.descriptor(owner).routes:
+                    owners.append(owner)
+            except AuthOperationError as exc:
+                if exc.reason != "method_unavailable":
+                    raise
         if len(owners) > 1:
             raise AuthOperationError(
                 f"{provider}: multiple saved connections advertise this route; select a connection",

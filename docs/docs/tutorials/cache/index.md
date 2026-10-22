@@ -125,19 +125,19 @@ This is especially beneficial when:
 
 ## Restricting Pickle Deserialization
 
-By default, DSPy's on-disk cache uses Python's `pickle` for serialization. While this handles arbitrary Python objects, `pickle.load` can execute arbitrary code -- meaning a corrupted or malicious cache file could be dangerous.
+DSPy's on-disk cache uses Python's `pickle` for serialization. `pickle.load` can execute arbitrary code, so a corrupted or malicious cache file could be dangerous. To guard against this, the on-disk cache restricts which types it is allowed to deserialize by default.
 
-DSPy provides an opt-in `restrict_pickle` mode that restricts which types the cache is allowed to deserialize:
-
-```python
-dspy.configure_cache(restrict_pickle=True)
-```
-
-When enabled, the cache only allows:
+The cache only allows:
 
 - **LiteLLM and OpenAI response types** (`litellm.types.*`, `openai.types.*`) -- the pydantic data models that DSPy caches for LM calls, embeddings, and the Responses API.
 - **NumPy array reconstruction helpers** -- the specific internal functions needed to deserialize `numpy.ndarray` (used by embedding caches).
 - **User-registered types** via `safe_types` -- any additional types you explicitly trust.
+
+If you fully trust the contents of your cache directory, you can turn the restriction off:
+
+```python
+dspy.configure_cache(restrict_pickle=False)
+```
 
 If you cache custom types (dataclasses, pydantic models, etc.), register them:
 
@@ -149,13 +149,13 @@ class MyResult:
     score: float
     label: str
 
-dspy.configure_cache(restrict_pickle=True, safe_types=[MyResult])
+dspy.configure_cache(safe_types=[MyResult])
 ```
 
 If a type is missing from the allowlist, the cache treats it as a miss and returns `None`. The log message will name the exact type that was rejected:
 
 ```
-WARNING dspy.clients.cache: Failed to deserialize disk cache entry <key>
+WARNING dspy.clients.cache: Failed to deserialize disk cache entry <key>: Type <module>.<name> is not in the safe_types allowlist. Register it via dspy.configure_cache(safe_types=[...]).
 ```
 
 ### Nested types
@@ -163,7 +163,7 @@ WARNING dspy.clients.cache: Failed to deserialize disk cache entry <key>
 If your registered type contains nested custom types, you must register all of them. For example, if `MyResult` contains a `Metadata` field, register both:
 
 ```python
-dspy.configure_cache(restrict_pickle=True, safe_types=[MyResult, Metadata])
+dspy.configure_cache(safe_types=[MyResult, Metadata])
 ```
 
 The error message will tell you exactly which nested type is missing.

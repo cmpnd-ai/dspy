@@ -6,6 +6,7 @@ import pytest
 
 import dspy
 from dspy.clients import capabilities as hints
+from dspy.clients.backend_selection import select_backend
 from dspy.clients.engines import AsyncLM15Engine, LM15Engine
 from dspy.lm15 import Message, Response, Usage
 
@@ -43,6 +44,49 @@ def test_configuration_refusal_matches_execution(metadata):
         lm("hello")
     with pytest.raises(dspy.LMUnsupportedFeatureError):
         _ = lm.supports_response_schema
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"headers": {"x-test": "yes"}},
+        {"extra_headers": {"x-test": "yes"}},
+        {"api_version": "2024-02-01"},
+        {"azure_ad_token_provider": lambda: "token"},
+        {"organization": "org-123"},
+        {"project": "proj-456"},
+        {"extra_query": {"foo": "bar"}},
+        {"custom_llm_provider": "alternate"},
+    ],
+)
+def test_decision_requests_disabled_when_compatibility_forced(options, metadata):
+    lm = dspy.LM("typesafe:jev-latest", cache=False, **options)
+    try:
+        selection = select_backend(lm)
+        assert not selection.native
+        assert selection.resolution.provider == "typesafe"
+        assert not lm.supports_decision_requests
+    finally:
+        lm.close()
+
+
+def test_decision_requests_enabled_when_native_backend_selected(metadata):
+    lm = dspy.LM("typesafe:jev-latest", api_key="fake", api_base="https://example.test", cache=False)
+    try:
+        selection = select_backend(lm)
+        assert selection.native
+        assert selection.resolution.provider == "typesafe"
+        assert lm.supports_decision_requests
+    finally:
+        lm.close()
+
+
+def test_forced_native_decision_configuration_error_matches_execution(metadata):
+    lm = dspy.LM("typesafe:jev-latest", engine="lm15", headers={"x-test": "yes"})
+    with pytest.raises(dspy.LMUnsupportedFeatureError):
+        lm("hello")
+    with pytest.raises(dspy.LMUnsupportedFeatureError):
+        _ = lm.supports_decision_requests
 
 
 @pytest.mark.asyncio

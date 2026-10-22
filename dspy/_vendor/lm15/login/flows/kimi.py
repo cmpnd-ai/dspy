@@ -2,7 +2,7 @@
 lm15.login.flows.kimi — Kimi Code (subscription) device login.
 
 RFC 8628 against ``auth.kimi.com`` (JSON replies).  The access token
-authenticates ``https://api.kimi.com/coding`` as a bearer — a different
+authenticates ``https://api.kimi.com/coding/v1`` as a bearer — a different
 host from the metered ``moonshotai`` route, so this is its own route,
 ``kimi-code``, bound to that base URL.  Pi 0.87.0 ``oauth/kimi-coding.ts``
 is the implementation reference.

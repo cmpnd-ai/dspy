@@ -130,6 +130,20 @@ class AsyncBaseProviderLM:
 
         return has_stored_credential(cls.manifest)
 
+    @classmethod
+    def stored_credential_state(cls) -> str:
+        """Offline: ``usable`` | ``unusable`` | ``logged_out`` | ``absent``.
+
+        Mirror of :meth:`BaseProviderLM.stored_credential_state` so the
+        router's ``oauth-unless-explicit`` branch (R3, ratified 2026-09-22)
+        sees the four-state probe on the async path too: a logged-out or
+        expired subscription login BLOCKS the ambient env key instead of
+        collapsing to ``absent`` and silently spending money.
+        """
+        from ..access import stored_credential_state
+
+        return stored_credential_state(cls.manifest)
+
     def _mirror_binding(self) -> None:
         """Copy what the inner adapter's access binding resolved: the
         provider string, the credential (a per-request provider for stored
@@ -1043,6 +1057,7 @@ class AsyncXaiLM(AsyncBaseProviderLM):
     manifest: ClassVar[ProviderManifest] = XaiLM.manifest
     # Same offline probe as the sync sibling (oauth-unless-explicit policy).
     has_stored_credential: ClassVar = XaiLM.has_stored_credential
+    stored_credential_state: ClassVar = XaiLM.stored_credential_state
 
     _inner: XaiLM = field(init=False, repr=False, compare=False)
 

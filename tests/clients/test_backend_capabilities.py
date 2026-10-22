@@ -8,6 +8,7 @@ import pytest
 
 import dspy
 from dspy.clients import capabilities as hints
+from dspy.clients.backend_selection import select_backend
 from dspy.clients.call_result import CallResult
 from dspy.clients.engines import AsyncLiteLLMEngine, AsyncLM15Engine, LiteLLMEngine, LM15Engine
 from dspy.clients.execution import _engine, prepare
@@ -99,6 +100,53 @@ def test_forced_native_configuration_error_matches_execution(conflicting_metadat
         _engine(lm, prepare(lm, "hello", None, {}), False)
     with pytest.raises(dspy.LMUnsupportedFeatureError):
         _ = lm.supports_response_schema
+    assert not conflicting_metadata
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"headers": {"x-test": "yes"}},
+        {"extra_headers": {"x-test": "yes"}},
+        {"api_version": "2024-02-01"},
+        {"azure_ad_token_provider": lambda: "token"},
+        {"organization": "org-123"},
+        {"project": "proj-456"},
+        {"extra_query": {"foo": "bar"}},
+        {"custom_llm_provider": "alternate"},
+    ],
+)
+def test_decision_requests_disabled_when_compatibility_forced(options, conflicting_metadata):
+    lm = dspy.LM("typesafe:jev-latest", cache=False, **options)
+    try:
+        selection = select_backend(lm)
+        assert not selection.native
+        assert selection.resolution.provider == "typesafe"
+        assert not lm.supports_decision_requests
+        # The hint is withdrawn rather than substituted with a LiteLLM catalog lookup.
+        assert not conflicting_metadata
+    finally:
+        lm.close()
+
+
+def test_decision_requests_enabled_when_native_backend_selected(conflicting_metadata):
+    lm = dspy.LM("typesafe:jev-latest", api_key="fake", api_base="https://example.test", cache=False)
+    try:
+        selection = select_backend(lm)
+        assert selection.native
+        assert selection.resolution.provider == "typesafe"
+        assert lm.supports_decision_requests
+        assert not conflicting_metadata
+    finally:
+        lm.close()
+
+
+def test_forced_native_decision_configuration_error_matches_execution(conflicting_metadata):
+    lm = dspy.LM("typesafe:jev-latest", engine="lm15", headers={"x-test": "yes"})
+    with pytest.raises(dspy.LMUnsupportedFeatureError):
+        _engine(lm, prepare(lm, "hello", None, {}), False)
+    with pytest.raises(dspy.LMUnsupportedFeatureError):
+        _ = lm.supports_decision_requests
     assert not conflicting_metadata
 
 

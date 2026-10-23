@@ -72,9 +72,18 @@ class Adapter:
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
 
-        # Decorate format() and parse() method with with_callbacks
-        cls.format = with_callbacks(cls.format)
-        cls.parse = with_callbacks(cls.parse)
+        # Decorate format() and parse() method with with_callbacks. Guard against
+        # re-wrapping a method that was already wrapped (e.g. inherited from a
+        # parent class processed by __init_subclass__): without this guard, every
+        # inheritance level stacks another callback wrapper on the inherited
+        # method, so a single logical adapter.format()/parse() call fires the
+        # adapter callbacks multiple times with distinct, unrelated call_ids.
+        if not getattr(cls.format, "_callbacks_wrapped", False):
+            cls.format = with_callbacks(cls.format)
+            cls.format._callbacks_wrapped = True
+        if not getattr(cls.parse, "_callbacks_wrapped", False):
+            cls.parse = with_callbacks(cls.parse)
+            cls.parse._callbacks_wrapped = True
 
     def _call_preprocess(
         self,

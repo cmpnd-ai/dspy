@@ -660,6 +660,11 @@ class TestRLMCodeFenceParsing:
             # Double fences (outer decorative ```)
             ("```\n```python\nprint(1)\n```\n```", "print(1)"),
             ("```\n```\nprint(2)\n```\n```", "print(2)"),
+            # Preamble that mentions triple quotes must not open a Python string
+            # and hide the real fence (a real triple string is always closed).
+            ('Use """ for docstrings.\n```python\nprint(1)\n```', "print(1)"),
+            ('Use """ for docstrings.\n```python\nprint(1)\n```\nDone.', "print(1)"),
+            ("Use ''' for strings.\n```python\nprint(1)\n```", "print(1)"),
         ],
     )
     def test_strip_code_fences(self, raw, expected):

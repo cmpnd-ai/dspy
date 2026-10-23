@@ -204,6 +204,17 @@ def _strip_code_fences(code: str) -> str:
             break
         in_triple = _advance_triple_state(line, in_triple)
     if fence_line_idx is None:
+        # No fence found while tracking triple-quoted strings. If a triple
+        # string is still open here, it was not a real Python string (a real
+        # one is always closed) but prose mentioning ``"""``/``'''``; retry the
+        # scan without triple tracking so a real fence after such prose is
+        # still recognized.
+        if in_triple is not None:
+            for i, line in enumerate(lines):
+                if _is_fence_open_line(line.strip()):
+                    fence_line_idx = i
+                    break
+    if fence_line_idx is None:
         # No standalone fence line; the ``` occurrences live inside code.
         return code
 

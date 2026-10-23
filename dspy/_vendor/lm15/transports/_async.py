@@ -430,9 +430,17 @@ class StdlibAsyncTransport:
                 release=release_with_slot,
             )
         except BaseException:
-            if conn is not None:
-                await self._pool.discard(conn)
+            # Release the pool slot BEFORE any await: a second cancellation
+            # delivered while the handler is suspended must not strand the
+            # semaphore slot.  Mirror the sync transport's ordering, where
+            # this step is fully synchronous.
             release_slot_once()
+            if conn is not None:
+                # Shield the discard so a re-cancel during the pool lock
+                # acquisition can't abort `_in_use.discard(conn)` +
+                # `conn.close()`.  The shielded task completes even if the
+                # outer await is cancelled; the slot is already freed above.
+                await asyncio.shield(self._pool.discard(conn))
             raise
 
     # ─── Connection I/O ───

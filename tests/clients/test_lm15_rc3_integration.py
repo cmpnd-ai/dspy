@@ -368,3 +368,58 @@ async def test_rate_limit_evidence_survives_public_boundary(asynchronous, stream
     assert error.request_id == "req-123" and error.provider_code == "limited"
     assert error.retry_after == 23 and _delay(error, 0) == 23
     assert error.rate_limit_headers == {"retry-after": ("23",)}
+
+
+# ── Non-finite JSON constants in streamed/judged answers (regression) ──────────
+#
+# A judgment answer whose JSON contains NaN / Infinity / an overflowing literal
+# such as 1e999 must degrade to a TextPart instead of crashing stream assembly
+# with a raw TypeError. Python's json.loads accepts NaN/Infinity and overflows
+# 1e999 to inf; DataPart.__post_init__ then rejects the non-finite value, so
+# data_part_from_text must keep that construction inside its except boundary.
+
+_JUDGMENT_REQUEST = lm15.Request(
+    model="m",
+    messages=(lm15.Message.user("q"),),
+    config=lm15.Config(response_format={"type": "json_schema", "schema": {
+        "type": "object",
+        "properties": {"verdict": {"type": "boolean"}},
+    }}),
+)
+
+
+@pytest.mark.parametrize("text,expect_part", [
+    ('{"verdict": true}', "data"),       # valid JSON object -> DataPart (happy path)
+    ('{"verdict": NaN}', "text"),        # non-standard constant -> degrade
+    ('{"verdict": Infinity}', "text"),   # non-standard constant -> degrade
+    ('{"verdict": 1e999}', "text"),      # overflows to inf -> degrade
+    ('{"verdict": ', "text"),            # truncated: stays a TextPart
+    ('["list", "not", "object"]', "text"),  # valid JSON but not an object
+])
+def test_data_part_from_text_table_of_answers(text, expect_part):
+    from dspy._vendor.lm15.judgments import data_part_from_text, request_judgments
+
+    found = request_judgments(_JUDGMENT_REQUEST)
+    assert found  # the request is judgment-shaped
+    part = data_part_from_text(text, found)
+    if expect_part == "data":
+        assert isinstance(part, lm15.DataPart)
+        assert part.type == "data"
+    else:
+        assert part is None
+
+
+@pytest.mark.parametrize("text", [
+    '{"verdict": NaN}', '{"verdict": 1e999}',
+])
+def test_stream_accumulator_response_degrades_non_finite_judgment_to_text_part(text):
+    from dspy._vendor.lm15.result import StreamAccumulator, response_to_events
+
+    response = lm15.Response(None, "m", lm15.Message.assistant(text), "stop", lm15.Usage())
+    acc = StreamAccumulator(_JUDGMENT_REQUEST)
+    for event in response_to_events(response):
+        acc.push(event)
+    out = acc.response()
+    assert out.message.parts and isinstance(out.message.parts[0], lm15.TextPart)
+    assert out.message.parts[0].text == text
+    assert out.finish_reason == "stop"

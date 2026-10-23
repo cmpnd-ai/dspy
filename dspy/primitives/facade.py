@@ -24,6 +24,7 @@ import contextlib
 import inspect
 import json
 import secrets
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -127,6 +128,32 @@ SANDBOX_LM_KWARGS = frozenset({
     "cache", "rollout_id", "prompt_cache", "prompt_cache_key",
 })
 _LM_CALL_INPUTS = frozenset({"prompt", "messages", "request"})
+
+
+class _LLMCallBudget:
+    """Per-forward ceiling on LM calls through the sandbox facade, shared by every host path
+    generated code can reach.
+
+    A ``SandboxLM`` charges ``reserve(n)`` (one slot per requested completion) before every call it
+    admits. The same budget instance is handed to a ``FacadeInvocation`` so a bridged predictor that
+    runs many host LM calls behind one predictor-call slot (e.g. a bridged ``RLM`` main loop) cannot
+    spend more than the forward's LM-call budget regardless of how few ``max_predictor_calls`` slots
+    it consumes.
+    """
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._count = 0
+        self._lock = threading.Lock()
+
+    def reserve(self, n: int = 1) -> None:
+        with self._lock:
+            if self._count + n > self._limit:
+                raise RuntimeError(
+                    f"LLM call limit exceeded: {self._count} + {n} > {self._limit}. "
+                    f"Use Python code for aggregation instead of making more LLM calls."
+                )
+            self._count += n
 
 
 class SandboxLM(BaseLM):

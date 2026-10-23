@@ -28,7 +28,7 @@ import dspy
 from dspy.adapters.types.base_type import Type as _CustomType
 from dspy.adapters.utils import annotation_allows_none, parse_value
 from dspy.primitives.code_interpreter import CodeInterpreterError, _create_interpreter
-from dspy.primitives.facade import FacadeInvocation, restore_custom_types
+from dspy.primitives.facade import FacadeInvocation, _LLMCallBudget, restore_custom_types
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +104,17 @@ class BridgeRuntime:
     backend chosen for the Flex.
     """
 
-    def __init__(self, flex: Any, factory: Callable[[], Any], max_predictor_calls: int | None = 100) -> None:
+    def __init__(
+        self,
+        flex: Any,
+        factory: Callable[[], Any],
+        max_predictor_calls: int | None = 100,
+        max_lm_calls: int | None = None,
+    ) -> None:
         self._flex = flex
         self._factory = factory
         self._max_predictor_calls = max_predictor_calls
+        self._max_lm_calls = max_lm_calls
         self._module_src: str | None = None
         self._class_name: str | None = None
 
@@ -117,14 +124,25 @@ class BridgeRuntime:
         self._class_name = parse_module_class_name(module_src)
 
     def invocation(self, originals: dict[str, Any] | None = None) -> FacadeInvocation:
-        """A fresh per-forward invocation over tools, factory, budget, and custom types."""
+        """A fresh per-forward invocation over tools, factory, budget, and custom types.
+
+        Every ``forward`` gets its own LM-call budget (``max_lm_calls``) so a single bridged
+        predictor call that drives many host LM calls (e.g. a bridged ``RLM`` main loop) cannot
+        spend more than the forward's LM-call budget, regardless of how few ``max_predictor_calls``
+        slots it consumes. ``reserve`` is what makes the ``SandboxLM`` metering non-inert on the
+        Flex path.
+        """
         ctx = self._flex._flex_ctx
+        reserve = None
+        if self._max_lm_calls is not None:
+            reserve = _LLMCallBudget(self._max_lm_calls).reserve
         return FacadeInvocation(
             ctx.context_names(),
             self._factory,
             self._max_predictor_calls,
             custom_types=ctx.custom_types(),
             originals=originals,
+            reserve=reserve,
         )
 
     def forward(self, inputs: dict[str, Any]) -> Any:

@@ -42,6 +42,13 @@ class Flex(Module, Parameter):
             ``dspy.configure(interpreter_factory=...)`` replaces the default.
         max_predictor_calls: Maximum number of predictor calls the optimizer-authored code can
             make per ``forward`. ``None`` removes the limit.
+        max_lm_calls: Maximum number of host LM calls the optimizer-authored code can drive per
+            ``forward`` across every bridged predictor. ``None`` (the default) derives a guard from
+            ``max_predictor_calls`` so the budget scales with it; pass an explicit ``int`` for a
+            custom ceiling, or ``None`` together with ``max_predictor_calls=None`` to remove both
+            limits. A single bridged predictor call (e.g. a ``dspy.RLM`` main loop) can drive many
+            host LM calls behind one ``max_predictor_calls`` slot; this bound is what stops such a
+            call from spending an unbounded LM budget.
     """
 
     def __init__(
@@ -51,6 +58,7 @@ class Flex(Module, Parameter):
         tools: list[Any] | None = None,
         interpreter_factory: Callable[[], CodeInterpreter] = PythonInterpreter,
         max_predictor_calls: int | None = 100,
+        max_lm_calls: int | None = None,
     ):
         super().__init__()
 
@@ -64,12 +72,15 @@ class Flex(Module, Parameter):
         _validate_interpreter_factory(interpreter_factory)
         self._interpreter_factory = interpreter_factory
         self._max_predictor_calls = max_predictor_calls
+        self._max_lm_calls = max_lm_calls if max_lm_calls is not None else max_predictor_calls
 
         self._rebuild_bridge()
         self._bind_code(self._baseline_src())
 
     def _rebuild_bridge(self) -> None:
-        self._bridge: BridgeRuntime = BridgeRuntime(self, self._interpreter_factory, self._max_predictor_calls)
+        self._bridge: BridgeRuntime = BridgeRuntime(
+            self, self._interpreter_factory, self._max_predictor_calls, self._max_lm_calls,
+        )
 
     def __getstate__(self) -> dict[str, Any]:
         state = super().__getstate__()

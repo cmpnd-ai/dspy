@@ -21,6 +21,7 @@ wire or writing a fixture on purpose.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Literal, Union
@@ -45,12 +46,21 @@ CREDENTIAL_KINDS: frozenset[str] = frozenset({"api_key", "bearer_token", "aws"})
 
 _EXPIRY_SKEW_SECONDS = 300  # AUTH-3: inside the skew window counts as expired.
 
+# datetime.fromisoformat on Python 3.10 accepts at most 6 fractional digits;
+# RFC 3339 / protobuf-JSON Timestamps may carry up to 9.  Trim the trailing
+# digits past the microsecond boundary so nanosecond timestamps parse on the
+# supported Python floor (>=3.10), matching iso_utc in providers/common.py.
+_TRIM_FRACTION = re.compile(r"\.(\d{6})\d+")
+
 
 def parse_rfc3339(value: str) -> datetime:
     """``2026-09-03T12:00:00Z`` (or an offset) → aware UTC datetime."""
     text = value.strip()
     if text.endswith("Z") or text.endswith("z"):
         text = text[:-1] + "+00:00"
+    # datetime.fromisoformat rejects >6 fractional digits on Python 3.10 (GCP
+    # and Gemini emit nanoseconds); trim the fraction to microseconds.
+    text = _TRIM_FRACTION.sub(r".\1", text)
     parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)

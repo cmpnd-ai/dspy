@@ -1060,7 +1060,12 @@ def _gcp_impersonate(ctx: ChainContext, source: BearerToken, url: str, delegates
     token = data.get("accessToken")
     if not token:
         raise AuthError("generateAccessToken: no accessToken")
-    expires = parse_rfc3339(str(data["expireTime"])) if data.get("expireTime") else None
+    expires = None
+    if data.get("expireTime"):
+        try:
+            expires = parse_rfc3339(str(data["expireTime"]))
+        except ValueError:
+            expires = None
     return BearerToken(str(token), expires_at=expires)
 
 

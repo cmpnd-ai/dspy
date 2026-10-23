@@ -19,7 +19,8 @@ from dspy.streaming import StatusMessage, StatusMessageProvider, StreamResponse,
 async def test_streamify_yields_expected_response_chunks(litellm_test_server):
     api_base, _ = litellm_test_server
     lm = dspy.LM(
-        engine="litellm", model="openai/dspy-test-model",
+        engine="litellm",
+        model="openai/dspy-test-model",
         api_base=api_base,
         api_key="fakekey",
         cache=True,
@@ -51,7 +52,8 @@ async def test_streamify_yields_expected_response_chunks(litellm_test_server):
 async def test_streaming_response_yields_expected_response_chunks(litellm_test_server):
     api_base, _ = litellm_test_server
     lm = dspy.LM(
-        engine="litellm", model="openai/dspy-test-model",
+        engine="litellm",
+        model="openai/dspy-test-model",
         api_base=api_base,
         api_key="fakekey",
         cache=False,
@@ -738,7 +740,9 @@ async def test_stream_listener_returns_correct_chunk_chat_adapter_untokenized_st
                 dspy.streaming.StreamListener(signature_field_name="judgement"),
             ],
         )
-        with dspy.context(lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
+        ):
             output = program(question="why did a chicken cross the kitchen?")
             all_chunks = []
             async for value in output:
@@ -824,6 +828,214 @@ async def test_stream_listener_missing_completion_marker_chat_adapter():
 
 
 @pytest.mark.anyio
+async def test_stream_listener_single_chunk_full_identifier_no_end_marker_chat_adapter():
+    """A coarse single chunk carrying the full start identifier plus value (no end marker) is emitted.
+
+    Regression test for silent data loss: when a provider (e.g. Gemini) emits the whole field
+    header plus value in one chunk and the stream ends without an end marker, the value used to
+    be buffered in ``field_start_queue`` and dropped by ``finalize``. It must now be emitted as a
+    final ``StreamResponse``.
+    """
+    program = dspy.streamify(
+        dspy.Predict("question->answer"),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+    )
+
+    async def single_chunk_stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gemini",
+            choices=[StreamingChoices(delta=Delta(content="[[ ## answer ## ]] To get to the other side."))],
+        )
+
+    with mock.patch("litellm.acompletion", side_effect=single_chunk_stream):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
+        ):
+            output = program(question="why did a chicken cross the kitchen?")
+            chunks = []
+            prediction = None
+            async for value in output:
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    chunks.append(value)
+                elif isinstance(value, dspy.Prediction):
+                    prediction = value
+
+    assert len(chunks) == 1
+    assert chunks[0].signature_field_name == "answer"
+    assert chunks[0].chunk == "To get to the other side."
+    assert chunks[0].is_last_chunk is True
+    assert prediction is not None
+    assert prediction.answer == "To get to the other side."
+
+
+@pytest.mark.anyio
+async def test_stream_listener_multi_listener_no_data_loss_when_field_ends_during_start_identification():
+    """With multiple listeners and ``include_final_prediction_in_output_stream=False`` the field whose
+    stream ends while its start identifier is still buffered must still reach the output stream.
+
+    This is the confirmed data-loss variant of the bug: another listener streaming suppresses the
+    final ``Prediction`` yield, so a dropped buffered field value used to disappear entirely.
+    """
+
+    class MyProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predict1 = dspy.Predict("question->answer")
+            self.predict2 = dspy.Predict("question, answer->judgement")
+
+        def forward(self, x, **kwargs):
+            answer = self.predict1(question=x, **kwargs).answer
+            return self.predict2(question=x, answer=answer, **kwargs)
+
+    program = dspy.streamify(
+        MyProgram(),
+        stream_listeners=[
+            dspy.streaming.StreamListener(signature_field_name="answer"),
+            dspy.streaming.StreamListener(signature_field_name="judgement"),
+        ],
+        include_final_prediction_in_output_stream=False,
+    )
+
+    async def answer_stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gemini",
+            choices=[StreamingChoices(delta=Delta(content="[[ ## answer ## ]] To get to the other side."))],
+        )
+
+    async def judgement_stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gemini", choices=[StreamingChoices(delta=Delta(content="[[ ## judgement ## ]]\n\n"))]
+        )
+        yield ModelResponseStream(model="gemini", choices=[StreamingChoices(delta=Delta(content="Good."))])
+        yield ModelResponseStream(
+            model="gemini", choices=[StreamingChoices(delta=Delta(content="\n\n[[ ## completed ## ]]"))]
+        )
+
+    stream_generators = [answer_stream, judgement_stream]
+
+    async def completion_side_effect(*args, **kwargs):
+        return stream_generators.pop(0)()
+
+    with mock.patch("litellm.acompletion", side_effect=completion_side_effect):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
+        ):
+            output = program(x="why did a chicken cross the kitchen?")
+            all_chunks = []
+            predictions = []
+            async for value in output:
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    all_chunks.append(value)
+                elif isinstance(value, dspy.Prediction):
+                    predictions.append(value)
+
+    answer_chunks = [c for c in all_chunks if c.signature_field_name == "answer"]
+    judgement_chunks = [c for c in all_chunks if c.signature_field_name == "judgement"]
+
+    # The answer field's value must be present in the stream (previously lost entirely).
+    assert len(answer_chunks) == 1
+    assert answer_chunks[0].chunk == "To get to the other side."
+    assert answer_chunks[0].is_last_chunk is True
+
+    # The judgement field still streams normally (no regression).
+    assert len(judgement_chunks) > 0
+    assert "".join(c.chunk for c in judgement_chunks).strip() == "Good."
+
+    # The value is reachable somewhere in the output stream.
+    stream_text = "".join(c.chunk for c in all_chunks if isinstance(c.chunk, str))
+    assert "To get to the other side." in stream_text
+
+
+@pytest.mark.anyio
+async def test_stream_listener_single_chunk_with_end_marker_still_uses_cache_hit_path():
+    """A single chunk containing the start identifier, value, and end marker keeps using the
+    cache-hit path (no streamed chunk, value delivered via the final Prediction). Guards against
+    the finalize recovery accidentally interfering with the one-chunk cache-hit behavior.
+    """
+    program = dspy.streamify(
+        dspy.Predict("question->answer"),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+        include_final_prediction_in_output_stream=False,
+    )
+
+    async def cache_hit_stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gemini",
+            choices=[
+                StreamingChoices(
+                    delta=Delta(content="[[ ## answer ## ]] To get to the other side.\n\n[[ ## completed ## ]]")
+                )
+            ],
+        )
+
+    with mock.patch("litellm.acompletion", side_effect=cache_hit_stream):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
+        ):
+            output = program(question="why did a chicken cross the kitchen?")
+            chunks = []
+            prediction = None
+            async for value in output:
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    chunks.append(value)
+                elif isinstance(value, dspy.Prediction):
+                    prediction = value
+
+    assert chunks == []
+    assert prediction is not None
+    assert prediction.answer == "To get to the other side."
+
+
+def test_finalize_drops_partial_start_identifier_chat_adapter():
+    """Unit-level: a buffer holding only a partial start identifier is dropped, preserving the
+    existing 'stream hasn't started' semantics (no spurious recovery)."""
+    listener = dspy.streaming.StreamListener(signature_field_name="answer", predict_name="predict1")
+    chunk = ModelResponseStream(model="m", choices=[StreamingChoices(delta=Delta(content="[[ ## ans"))])
+    with dspy.context(adapter=dspy.ChatAdapter()):
+        assert listener.receive(chunk) is None
+        assert listener.stream_start is False
+        final = listener.finalize()
+
+    assert final is None
+    assert listener.stream_start is False
+
+
+def test_finalize_empty_value_keeps_prediction_fallback_chat_adapter():
+    """A buffered full start identifier with an empty field value must not suppress the final
+    ``Prediction`` fallback. ``finalize`` emits nothing and leaves ``stream_start`` False so the
+    (empty) result is still delivered via the fallback Prediction, matching pre-fix behavior."""
+    listener = dspy.streaming.StreamListener(signature_field_name="answer", predict_name="predict1")
+    chunk = ModelResponseStream(model="m", choices=[StreamingChoices(delta=Delta(content="[[ ## answer ## ]]"))])
+    with dspy.context(adapter=dspy.ChatAdapter()):
+        assert listener.receive(chunk) is None
+        assert listener.stream_start is False
+        final = listener.finalize()
+
+    assert final is None
+    # stream_start stays False so streamify still yields the fallback Prediction.
+    assert listener.stream_start is False
+    # The buffer is consumed and the stream is marked ended (so allow_reuse resets cleanly).
+    assert listener.field_start_queue == []
+    assert listener.stream_end is True
+
+
+def test_finalize_skips_recovery_for_json_adapter():
+    """JSONAdapter relies on structural JSON end detection and the Prediction fallback; the recovery
+    must not emit a naive text extraction (which would leak the closing ``}``)."""
+    listener = dspy.streaming.StreamListener(signature_field_name="answer", predict_name="predict1")
+    chunk = ModelResponseStream(
+        model="m", choices=[StreamingChoices(delta=Delta(content='{"answer": "To get to the other side."}'))]
+    )
+    with dspy.context(adapter=dspy.JSONAdapter()):
+        assert listener.receive(chunk) is None
+        assert listener.stream_start is False
+        final = listener.finalize()
+
+    assert final is None
+    assert listener.stream_start is False
+
+
+@pytest.mark.anyio
 async def test_stream_listener_returns_correct_chunk_json_adapter_untokenized_stream():
     class MyProgram(dspy.Module):
         def __init__(self):
@@ -871,7 +1083,9 @@ async def test_stream_listener_returns_correct_chunk_json_adapter_untokenized_st
                 dspy.streaming.StreamListener(signature_field_name="judgement"),
             ],
         )
-        with dspy.context(lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.JSONAdapter()):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.JSONAdapter()
+        ):
             output = program(question="why did a chicken cross the kitchen?")
             all_chunks = []
             async for value in output:
@@ -1143,7 +1357,8 @@ async def test_streaming_allows_custom_streamable_type():
 
     with mock.patch("litellm.acompletion", side_effect=stream):
         with dspy.context(
-            lm=dspy.LM("openai/gpt-4o-mini", engine="litellm", cache=False), adapter=dspy.ChatAdapter(native_response_types=[CustomType])
+            lm=dspy.LM("openai/gpt-4o-mini", engine="litellm", cache=False),
+            adapter=dspy.ChatAdapter(native_response_types=[CustomType]),
         ):
             output = program(question="why did a chicken cross the kitchen?")
             all_chunks = []
@@ -1356,9 +1571,7 @@ async def test_chat_adapter_with_generic_type_annotation():
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" response"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]\n\n"))])
-        yield ModelResponseStream(
-            model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))]
-        )
+        yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="1"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content="\n\n[[ ##"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" completed"))])
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ## ]]"))])
@@ -2170,9 +2383,16 @@ async def test_default_cot_fallback_streams_reasoning(adapter_type, mode):
         text = texts[adapter_type]
         for offset in range(0, len(text), 4):
             # Providers can return thinking even when disabled, including alongside content.
-            yield ModelResponseStream(choices=[StreamingChoices(delta=Delta(
-                content=text[offset:offset + 4], reasoning_content="Native thinking." if offset == 0 else None,
-            ))])
+            yield ModelResponseStream(
+                choices=[
+                    StreamingChoices(
+                        delta=Delta(
+                            content=text[offset : offset + 4],
+                            reasoning_content="Native thinking." if offset == 0 else None,
+                        )
+                    )
+                ]
+            )
 
     model = "openai/gpt-4o-mini" if mode == "unsupported" else "openai/gpt-5"
     lm = dspy.LM(model, engine="litellm", cache=False, max_tokens=16000)

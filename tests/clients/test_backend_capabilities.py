@@ -109,7 +109,7 @@ def test_environment_gateway_unrelated_variable_keeps_native(model, variable, co
     # A gateway variable for a different provider must not reroute a model; the
     # native engine stays, so the LiteLLM compatibility capability path (and
     # its confounded lookups) is never consulted.
-    for name in ("OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_API_BASE"):
+    for name in ("OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(variable, "https://gateway.invalid")
     lm = dspy.LM(model, cache=False)

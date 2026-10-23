@@ -20,7 +20,7 @@ from dspy.utils.callback import BaseCallback
 from dspy.utils.exceptions import LMConfigurationError, LMError, LMUnsupportedFeatureError
 from dspy.utils.lazy_import import require
 
-from .base_lm import BaseLM
+from .base_lm import LM_CLASS_STATE_KEY, BaseLM, _load_recorded_lm_class
 
 anyio = require("anyio")
 
@@ -622,6 +622,14 @@ class LM(BaseLM):
     @classmethod
     def load_state(cls, state: dict[str, Any], *, allow_custom_lm_class: bool = False):
         state = dict(state)
+        # Dispatch to a recorded subclass before decoding the engine: a custom
+        # engine is saved as a {'class', 'state'} record that _load_engine
+        # turns into an object here. If this state names a different LM class,
+        # the inherited LM.load_state would re-enter and try to decode that
+        # object again, so dispatch first while the engine is still a record.
+        class_path = state.get(LM_CLASS_STATE_KEY)
+        if class_path is not None and class_path != f"{cls.__module__}.{cls.__qualname__}":
+            return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
         if isinstance(state.get("prompt_cache"), dict):
             from dspy._vendor.lm15.serde import cache_config_from_dict
 

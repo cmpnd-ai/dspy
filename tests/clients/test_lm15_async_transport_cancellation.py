@@ -181,11 +181,11 @@ async def test_double_cancel_under_lock_contention_releases_slot_and_closes_conn
     finally:
         release_lock.set()
         if holder is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await holder
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await transport.aclose()
         await server.aclose()
@@ -222,7 +222,7 @@ async def test_single_cancel_no_contention_releases_pool_and_closes_conn():
     finally:
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await transport.aclose()
         await server.aclose()
@@ -261,7 +261,7 @@ async def test_double_cancel_no_contention_still_releases_pool():
     finally:
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await transport.aclose()
         await server.aclose()

@@ -454,7 +454,7 @@ class StreamListener:
         if self.xml_parser is not None:
             return self._xml_adapter_handle_stream_chunk("", final=True)
         if not self.stream_start:
-            return None
+            return self._finalize_unstarted_stream()
 
         self.stream_end = True
         if self.field_end_queue.qsize() > 0:
@@ -468,6 +468,53 @@ class StreamListener:
                     is_last_chunk=True,
                 )
         return None
+
+    def _finalize_unstarted_stream(self) -> StreamResponse | None:
+        """Recover a field value still buffered in ``field_start_queue`` when the stream ends.
+
+        With coarse-grained providers (e.g. Gemini) a single chunk can carry the full start
+        identifier plus the field value and no end marker. ``receive`` buffers such a chunk and
+        defers the stream start to the next chunk; if the stream ends on that same chunk the
+        buffered value would be silently lost. Here we extract the text after the start
+        identifier and emit it as the final chunk. Buffers holding only a partial start
+        identifier are dropped, preserving the existing "stream hasn't started" semantics.
+
+        JSONAdapter is excluded: its field end is structural (``}`` or the next key), so naive
+        text extraction would leak boilerplate, and the truncation that would leave a JSON
+        listener unstarted also makes the response unparseable (the program raises before
+        ``finalize`` runs); the one-chunk valid-JSON case keeps relying on the Prediction fallback.
+        """
+        adapter = _get_adapter()
+        if isinstance(adapter, JSONAdapter):
+            return None
+        adapter_name = adapter.__class__.__name__ if adapter else "ChatAdapter"
+        if adapter_name not in self.adapter_identifiers:
+            return None
+        start_identifier = self.adapter_identifiers[adapter_name]["start_identifier"]
+        assert isinstance(start_identifier, str)
+
+        concat_message = "".join(self.field_start_queue)
+        if start_identifier not in concat_message:
+            return None
+
+        value_start_index = concat_message.find(start_identifier) + len(start_identifier)
+        token = concat_message[value_start_index:].lstrip()
+        self.field_start_queue = []
+        self.stream_end = True
+        if not token:
+            # The header was identified but the field value is empty. Emit nothing and leave
+            # ``stream_start`` False so the final ``Prediction`` fallback still delivers the
+            # (empty) result for single-listener setups; ``stream_end`` ensures ``allow_reuse``
+            # listeners reset cleanly on the next stream.
+            return None
+        self.stream_start = True
+        token = self.held_whitespace + token
+        return StreamResponse(
+            self.predict_name,
+            self.signature_field_name,
+            token,
+            is_last_chunk=True,
+        )
 
     @property
     def _output_type(self) -> type | None:

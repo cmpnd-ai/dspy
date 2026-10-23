@@ -652,7 +652,7 @@ class LM(BaseLM):
                 f"LM response was truncated due to exceeding max_tokens={self.kwargs.get('max_tokens', self.kwargs.get('max_completion_tokens'))}. "
                 "You can inspect the latest LM interactions with `dspy.inspect_history()`. "
                 "To avoid truncation, consider passing a larger max_tokens when setting up dspy.LM. "
-                f"You may also consider increasing the temperature (currently {self.kwargs['temperature']}) "
+                f"You may also consider increasing the temperature (currently {self.kwargs.get('temperature')}) "
                 " if the reason for truncation is repetition."
             )
 

@@ -17,6 +17,7 @@ caller registered themselves before any save is theirs and is never
 unregistered.
 """
 
+import importlib
 import threading
 from contextlib import contextmanager
 
@@ -33,6 +34,8 @@ def serialize_by_value(modules):
     with _lock:
         registry = set(cloudpickle.list_registry_pickle_by_value())
         for module in modules:
+            if isinstance(module, str):
+                module = importlib.import_module(module)
             name = module.__name__
             if _active.get(name, 0) == 0 and name in registry:
                 continue  # registered by the caller, not by a save: not ours to count or remove

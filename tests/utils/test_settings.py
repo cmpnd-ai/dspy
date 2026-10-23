@@ -266,3 +266,48 @@ def callback(x):
         # Only need to clean up sys.path
         if str(tmp_path) in sys.path:
             sys.path.remove(str(tmp_path))
+
+
+def test_settings_save_with_extra_modules_as_strings(tmp_path):
+    # The `dspy.settings.save` type annotation endorses passing module names
+    # as strings (`list[str]`). Saving with the string form must embed the
+    # module by value so it round-trips after the module is no longer
+    # importable, instead of crashing with `AttributeError: 'str' object has
+    # no attribute '__name__'`.
+    custom_module_path = tmp_path / "custom_module_str.py"
+    with open(custom_module_path, "w") as f:
+        f.write(
+            """
+def callback(x):
+    return x + 1
+"""
+        )
+
+    # Add the tmp_path to Python path so we can import the module
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import custom_module_str
+
+        dspy.configure(callbacks=[custom_module_str.callback])
+
+        settings_path = tmp_path / "settings.pkl"
+        # Documented/typed string form.
+        dspy.settings.save(settings_path, modules_to_serialize=["custom_module_str"])
+
+        # Remove the custom module again to simulate it not being available at load time
+        sys.modules.pop("custom_module_str", None)
+        sys.path.remove(str(tmp_path))
+        del custom_module_str
+
+        dspy.configure(callbacks=None)
+
+        # Loading should succeed and preserve the callback by value.
+        loaded_settings = dspy.load_settings(settings_path, allow_pickle=True)
+        dspy.settings.configure(**loaded_settings)
+
+        assert dspy.settings.callbacks[0](3) == 4
+
+    finally:
+        # Only need to clean up sys.path
+        if str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))

@@ -634,3 +634,123 @@ def test_overlapping_saves_share_one_by_value_registration(tmp_path):
     finally:
         sys.modules.pop("shared_module", None)
         sys.path.remove(str(tmp_path))
+
+
+def test_serialize_by_value_accepts_module_name_strings(tmp_path):
+    # The docs (`modules_to_serialize=[MyClass.__module__]`) and the
+    # `dspy.settings.save` type annotation endorse passing module names as
+    # strings, so `serialize_by_value` must normalize strings to modules
+    # instead of crashing with `AttributeError: 'str' object has no attribute
+    # '__name__'` (wrapped as a misleading "remove the non-picklable
+    # attributes" RuntimeError at the save call sites).
+    import sys
+
+    import cloudpickle
+
+    from dspy.utils.pickle_by_value import serialize_by_value
+
+    (tmp_path / "string_module.py").write_text("def f():\n    return 1\n")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        assert "string_module" not in cloudpickle.list_registry_pickle_by_value()
+
+        # The documented string form registers the module and cleans up after.
+        with serialize_by_value(["string_module"]):
+            assert "string_module" in cloudpickle.list_registry_pickle_by_value()
+        assert "string_module" not in cloudpickle.list_registry_pickle_by_value()
+
+        # The module-object form still works (no regression).
+        import string_module
+
+        with serialize_by_value([string_module]):
+            assert "string_module" in cloudpickle.list_registry_pickle_by_value()
+        assert "string_module" not in cloudpickle.list_registry_pickle_by_value()
+
+        # Mixing strings and module objects in one list works.
+        with serialize_by_value(["string_module", string_module]):
+            assert "string_module" in cloudpickle.list_registry_pickle_by_value()
+        assert "string_module" not in cloudpickle.list_registry_pickle_by_value()
+    finally:
+        sys.modules.pop("string_module", None)
+        if str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))
+
+
+def test_serialize_by_value_string_and_module_share_one_registration(tmp_path):
+    # Refcounting is keyed by module name. A string and the matching module
+    # object must share one registration and one refcount, so the outer save
+    # is not stripped while the inner one (in either form) is still running.
+    import sys
+
+    import cloudpickle
+
+    from dspy.utils.pickle_by_value import serialize_by_value
+
+    (tmp_path / "mixed_module.py").write_text("def f():\n    return 1\n")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import mixed_module
+
+        with serialize_by_value(["mixed_module"]):
+            with serialize_by_value([mixed_module]):
+                assert "mixed_module" in cloudpickle.list_registry_pickle_by_value()
+            assert "mixed_module" in cloudpickle.list_registry_pickle_by_value()
+        assert "mixed_module" not in cloudpickle.list_registry_pickle_by_value()
+    finally:
+        sys.modules.pop("mixed_module", None)
+        if str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))
+
+
+def test_serialize_by_value_unknown_string_raises_module_not_found_error():
+    # An unknown module name should surface ImportError (the real cause),
+    # not the misleading AttributeError/__name__ crash.
+    from dspy.utils.pickle_by_value import serialize_by_value
+
+    with pytest.raises(ModuleNotFoundError):
+        with serialize_by_value(["this_module_does_not_exist_anywhere"]):
+            pass
+
+
+def test_save_with_extra_modules_as_strings(tmp_path):
+    # End-to-end: saving a program with `modules_to_serialize` given as the
+    # documented string form (`[mod.__name__]`) embeds the class by value so
+    # it loads after the module is no longer importable.
+    import sys
+
+    custom_module_path = tmp_path / "custom_module_str.py"
+    with open(custom_module_path, "w") as f:
+        f.write("""
+import dspy
+
+class MyModule(dspy.Module):
+    def __init__(self):
+        self.cot = dspy.ChainOfThought(dspy.Signature("q -> a"))
+
+    def forward(self, q):
+        return self.cot(q=q)
+""")
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import custom_module_str
+
+        cot = custom_module_str.MyModule()
+
+        # The documented form: pass the module name string (`MyClass.__module__`).
+        cot.save(
+            tmp_path,
+            modules_to_serialize=[custom_module_str.MyModule.__module__],
+            save_program=True,
+        )
+
+        # Embedding by value means the program loads even after the module is gone.
+        sys.modules.pop("custom_module_str", None)
+        sys.path.remove(str(tmp_path))
+        del custom_module_str
+
+        loaded_module = dspy.load(tmp_path, allow_pickle=True)
+        assert loaded_module.cot.predict.signature == cot.cot.predict.signature
+    finally:
+        if str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))

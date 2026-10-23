@@ -251,18 +251,25 @@ def gemini_schema(schema: JsonObject, found: Mapping[str, Judgment]) -> JsonObje
 # ─── §3 the answer ────────────────────────────────────────────────────
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def data_part_from_text(text: str, found: Mapping[str, Judgment]) -> DataPart | None:
     """The model's JSON object as a DataPart (value only), or None when the
     text is not a JSON object (a truncated answer stays a TextPart)."""
     if not found:
         return None
     try:
-        value = json.loads(text.strip())
+        # Reject NaN/Infinity constants like _parse_json_best_effort does; an
+        # overflowing literal (e.g. 1e999) becomes inf, which DataPart rejects
+        # below, so the answer degrades to a TextPart instead of crashing.
+        value = json.loads(text.strip(), parse_constant=_reject_json_constant)
+        if not isinstance(value, dict):
+            return None
+        return DataPart(value=value)
     except (ValueError, TypeError):
         return None
-    if not isinstance(value, dict):
-        return None
-    return DataPart(value=value)
 
 
 def replace_text_with_data(parts: Sequence[Any], found: Mapping[str, Judgment]) -> tuple[Any, ...]:

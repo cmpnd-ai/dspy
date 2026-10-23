@@ -1161,3 +1161,29 @@ def test_bridged_rlm_main_loop_is_bounded_by_lm_call_budget_on_sandbox() -> None
     with pytest.raises(RuntimeError, match="LLM call limit exceeded"):
         flex(value=1)
     assert len(lm.history) == 4
+
+
+def test_setstate_restores_flex_missing_max_lm_calls() -> None:
+    # Programs saved before ``max_lm_calls`` existed lack the attribute on the pickled state, but
+    # ``__setstate__`` calls ``_rebuild_bridge`` which now reads it. The restore must derive it from
+    # ``max_predictor_calls`` (the same default ``__init__`` uses) instead of raising ``AttributeError``.
+    flex = _bridged_flex_with(max_predictor_calls=7)
+    state = flex.__getstate__()
+    # Simulate a pre-change pickle: the only per-instance state is what __getstate__ returns.
+    # Strip ``_max_lm_calls`` from the underlying instance dict the state carries.
+    state.pop("_max_lm_calls", None)
+    restored = Flex.__new__(Flex)
+    restored.__setstate__(state)
+    assert restored._max_lm_calls == 7  # derived from max_predictor_calls, not AttributeError
+    assert restored._bridge._max_lm_calls == 7  # plumbed into the rebuilt bridge
+
+
+def test_setstate_keeps_explicit_max_lm_calls_when_present() -> None:
+    # A program saved with an explicit ``max_lm_calls`` keeps that value (the restore must not
+    # clobber a present attribute with the derived default).
+    flex = _bridged_flex_with(max_predictor_calls=5, max_lm_calls=20)
+    state = flex.__getstate__()
+    restored = Flex.__new__(Flex)
+    restored.__setstate__(state)
+    assert restored._max_lm_calls == 20
+    assert restored._bridge._max_lm_calls == 20

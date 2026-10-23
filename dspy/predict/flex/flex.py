@@ -48,7 +48,9 @@ class Flex(Module, Parameter):
             custom ceiling, or ``None`` together with ``max_predictor_calls=None`` to remove both
             limits. A single bridged predictor call (e.g. a ``dspy.RLM`` main loop) can drive many
             host LM calls behind one ``max_predictor_calls`` slot; this bound is what stops such a
-            call from spending an unbounded LM budget.
+            call from spending an unbounded LM budget. The budget counts requested completions, not
+            host requests: a call with ``n=3`` charges three slots, so it fails under
+            ``max_lm_calls=2`` even though it makes only one host request.
     """
 
     def __init__(
@@ -89,6 +91,10 @@ class Flex(Module, Parameter):
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         super().__setstate__(state)
+        # Programs saved before ``max_lm_calls`` existed lack the attribute; derive it from the
+        # predictor-call guard the way ``__init__`` does, so ``_rebuild_bridge`` can read it.
+        if not hasattr(self, "_max_lm_calls"):
+            self._max_lm_calls = self._max_predictor_calls
         self._rebuild_bridge()
         if self._module_src is not None:
             self._bridge.bind(self._module_src)

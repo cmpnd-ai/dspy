@@ -113,8 +113,71 @@ class _LLMCallBudget:
             self._count += n
 
 
+def _is_fence_open_line(stripped: str) -> bool:
+    """Return whether a stripped line opens a markdown code fence.
+
+    A fence opening is a line beginning with ``` optionally followed by a single
+    language tag. This keeps triple backticks that occur *inside* Python string
+    literals, docstrings, or comments from being mistaken for a fence: such
+    occurrences carry surrounding code (e.g. the closing ``"`` of ``"```"``) that
+    does not look like a language tag.
+    """
+    if not stripped.startswith("```"):
+        return False
+    info = stripped[3:].strip()
+    if not info:
+        return True
+    tag = info.split()[0]
+    return all(c.isalnum() or c in "+-_" for c in tag)
+
+
+def _advance_triple_state(line: str, in_triple: str | None) -> str | None:
+    """Walk one line and return the active triple-quoted-string delimiter.
+
+    ``in_triple`` is the active delimiter (three single or three double quotes)
+    carried from a prior line, or ``None`` when not inside a multi-line string.
+    Single-line string literals and comments are skipped so their contents cannot
+    open or close a triple-quoted span. This lets the fence detector ignore ```
+    that appear inside string literals, docstrings, or comments.
+    """
+    i = 0
+    n = len(line)
+    while i < n:
+        if in_triple is not None:
+            idx = line.find(in_triple, i)
+            if idx == -1:
+                return in_triple
+            i = idx + 3
+            in_triple = None
+            continue
+        c = line[i]
+        if c == "#":
+            return in_triple
+        if c in ('"', "'"):
+            triple = c * 3
+            if line.startswith(triple, i):
+                close = line.find(triple, i + 3)
+                if close == -1:
+                    return triple
+                i = close + 3
+                continue
+            close = line.find(c, i + 1)
+            if close == -1:
+                return in_triple
+            i = close + 1
+            continue
+        i += 1
+    return in_triple
+
+
 def _strip_code_fences(code: str) -> str:
-    """Extract Python code from markdown fences, or return as-is if no fences."""
+    """Extract Python code from markdown fences, or return as-is if no fences.
+
+    Only fences whose opening and closing ``` sit on their own lines are
+    recognized, and lines inside a Python triple-quoted string are never treated
+    as fences, so triple backticks inside string literals, docstrings, or
+    comments are never mistaken for markdown fences.
+    """
     code = code.strip()
     if "```" not in code:
         return code
@@ -128,23 +191,58 @@ def _strip_code_fences(code: str) -> str:
     if "```" not in code:
         return code
 
-    # Find the first opening fence (skip any text before it)
-    fence_start = code.find("```")
-    lang_line, separator, remainder = code[fence_start + 3:].partition("\n")
-    if not separator:
+    # Find the first opening fence: a line beginning with ``` (optionally
+    # followed by a language tag), skipping any preamble and any line that lies
+    # inside a Python triple-quoted string. This avoids treating ``` inside
+    # strings/comments/docstrings as an opening fence.
+    lines = code.splitlines()
+    fence_line_idx = None
+    in_triple: str | None = None
+    for i, line in enumerate(lines):
+        if in_triple is None and _is_fence_open_line(line.strip()):
+            fence_line_idx = i
+            break
+        in_triple = _advance_triple_state(line, in_triple)
+    if fence_line_idx is None:
+        # No fence found while tracking triple-quoted strings. If a triple
+        # string is still open here, it was not a real Python string (a real
+        # one is always closed) but prose mentioning ``"""``/``'''``; retry the
+        # scan without triple tracking so a real fence after such prose is
+        # still recognized.
+        if in_triple is not None:
+            for i, line in enumerate(lines):
+                if _is_fence_open_line(line.strip()):
+                    fence_line_idx = i
+                    break
+    if fence_line_idx is None:
+        # No standalone fence line; the ``` occurrences live inside code.
+        return code
+
+    remainder_lines = lines[fence_line_idx + 1:]
+    if not remainder_lines:
+        # Opening fence with no body (no newline after it); nothing to extract.
         return code
 
     # Accept python-labeled fences or bare ``` fences; reject explicit non-Python tags
-    lang = (lang_line.strip().split(maxsplit=1)[0] if lang_line.strip() else "").lower()
+    lang_line = lines[fence_line_idx].strip()[3:].strip()
+    lang = (lang_line.split(maxsplit=1)[0] if lang_line else "").lower()
     if lang not in _PYTHON_FENCE_LANGS:
         raise SyntaxError(f"Expected Python code but got ```{lang} fence. Write Python code, not {lang}.")
 
-    # Find closing fence
-    block_end = remainder.find("```")
-    if block_end == -1:
-        return remainder.strip()
+    # Find the closing fence: a line whose stripped content is exactly ``` and
+    # that is not inside a Python triple-quoted string, so ``` inside
+    # strings/comments cannot truncate the extracted body.
+    in_triple = None
+    block_end = None
+    for j, line in enumerate(remainder_lines):
+        if in_triple is None and line.strip() == "```":
+            block_end = j
+            break
+        in_triple = _advance_triple_state(line, in_triple)
+    if block_end is None:
+        return "\n".join(remainder_lines).strip()
 
-    return remainder[:block_end].strip()
+    return "\n".join(remainder_lines[:block_end]).strip()
 
 
 @experimental

@@ -16,7 +16,7 @@ import pytest
 
 import dspy
 from dspy.adapters.types.tool import Tool
-from dspy.predict.rlm import RLM, _LLMCallBudget, _strip_code_fences
+from dspy.predict.rlm import RLM, _is_fence_open_line, _LLMCallBudget, _strip_code_fences
 from dspy.primitives.code_interpreter import (
     CodeExecutionError,
     CodeInterpreterError,
@@ -660,6 +660,11 @@ class TestRLMCodeFenceParsing:
             # Double fences (outer decorative ```)
             ("```\n```python\nprint(1)\n```\n```", "print(1)"),
             ("```\n```\nprint(2)\n```\n```", "print(2)"),
+            # Preamble that mentions triple quotes must not open a Python string
+            # and hide the real fence (a real triple string is always closed).
+            ('Use """ for docstrings.\n```python\nprint(1)\n```', "print(1)"),
+            ('Use """ for docstrings.\n```python\nprint(1)\n```\nDone.', "print(1)"),
+            ("Use ''' for strings.\n```python\nprint(1)\n```", "print(1)"),
         ],
     )
     def test_strip_code_fences(self, raw, expected):
@@ -668,6 +673,112 @@ class TestRLMCodeFenceParsing:
     def test_strip_code_fences_rejects_non_python_lang(self):
         with pytest.raises(SyntaxError, match="json"):
             _strip_code_fences('```json\n{"a": 1}\n```')
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # Triple backticks inside a string literal when there is no real fence:
+            # the code must be returned untouched (regression: previously raised
+            # SyntaxError or returned the string's contents as "code").
+            ('s = "```markdown\n# Title\n```"\nprint(len(s))', 's = "```markdown\n# Title\n```"\nprint(len(s))'),
+            ('md = "```\ninner\n```"\nprint(md)', 'md = "```\ninner\n```"\nprint(md)'),
+            ('re.findall(r"```(\\w+)", txt)', 're.findall(r"```(\\w+)", txt)'),
+            ("x = 1  # use ``` fences in markdown\nprint(x)", "x = 1  # use ``` fences in markdown\nprint(x)"),
+            # Real python fence whose body contains backticks inside a string:
+            # the full body must be returned, not truncated at the in-string backticks.
+            ('```python\ns = "```"\nprint(s)\n```', 's = "```"\nprint(s)'),
+            ('```python\nmd = "```\ninner\n```"\nprint(md)\n```', 'md = "```\ninner\n```"\nprint(md)'),
+            # Backticks inside a docstring inside a fenced block: the closing fence
+            # is the standalone ``` line, not the backticks carried by inline code.
+            ('```python\ndef f():\n    "doc ``` not a fence"\n    return 1\n```', 'def f():\n    "doc ``` not a fence"\n    return 1'),
+            # Triple-quoted string spanning multiple lines: the ```python and ```
+            # lines inside the string must not be treated as fences (unfenced case).
+            ('md = """\n```python\nprint("inner")\n```\n"""\nprint(md)', 'md = """\n```python\nprint("inner")\n```\n"""\nprint(md)'),
+            # Same idea inside a real python fence: the in-string ``` lines are not
+            # the closing fence, so the full body is returned unchanged.
+            ('```python\nmd = """\n```python\nprint("inner")\n```\n"""\nprint(md)\n```', 'md = """\n```python\nprint("inner")\n```\n"""\nprint(md)'),
+            # A fence line indented with leading whitespace is still recognized;
+            # the body is returned as the original did (leading/trailing whitespace trimmed).
+            ("    ```python\n    print(1)\n    ```", "print(1)"),
+            # Trailing whitespace on a closing fence line is ignored.
+            ("```python\nprint(1)\n```   ", "print(1)"),
+        ],
+    )
+    def test_strip_code_fences_ignores_backticks_inside_code(self, raw, expected):
+        assert _strip_code_fences(raw) == expected
+
+    def test_strip_code_fences_rejects_non_python_lang_on_its_own_line(self):
+        # A genuine non-Python fence on its own line is still rejected.
+        with pytest.raises(SyntaxError, match="bash"):
+            _strip_code_fences("```bash\necho hi\n```")
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # An opening fence with no body / no trailing newline is returned as-is,
+            # matching the pre-fix `if not separator: return code` path (no raise).
+            ("```python", "```python"),
+            ("```py", "```py"),
+            ("```", "```"),
+            # A non-Python tag with no body is also returned as-is (no raise): the
+            # no-body check precedes the language-tag rejection.
+            ("```json", "```json"),
+        ],
+    )
+    def test_strip_code_fences_fence_with_no_body_returns_as_is(self, raw, expected):
+        assert _strip_code_fences(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("```", True),
+            ("```python", True),
+            ("```py", True),
+            ("```python3", True),
+            ("    ```python", True),  # leading whitespace is stripped
+            ("```python   ", True),  # trailing whitespace is stripped
+            ("```json", True),  # tag validity is the language check's job, not detection's
+            # Must NOT be treated as a fence opening:
+            ('```"', False),  # closing quote of an in-string "```"
+            ("```# comment", False),  # comment, not a language tag
+            ('```"markdown', False),  # in-string artifact
+            ('s = "```markdown', False),  # backticks are not at line start
+            ("print('x')", False),
+            ("", False),
+        ],
+    )
+    def test_is_fence_open_line(self, line, expected):
+        assert _is_fence_open_line(line.strip()) is expected
+
+    def test_rlm_executes_full_code_with_backticks_in_string(self):
+        """An RLM action whose code contains ``` inside a string is executed verbatim.
+
+        Regression for the silent-wrong-execution bug: previously the stripper treated
+        the in-string ``` as a markdown fence and returned the string's contents
+        (e.g. ``inner``) as the code to execute, dropping the model's real statements.
+        """
+        # Use a valid triple-quoted Python string so the fixture parses, and assert
+        # it does: the regression only holds against a program a real interpreter runs.
+        code = 'md = """\n```\ninner\n```\n"""\nprint(md)'
+        compile(code, "<rlm test>", "exec")
+        mock = MockInterpreter(responses=[
+            "['__builtins__']",  # the printed `md` value; irrelevant to the assertion
+            FinalOutput({"answer": "ok"}),
+        ])
+        rlm = RLM("query -> answer", max_iters=5)
+        rlm.generate_action = make_mock_predictor([
+            {"reasoning": "Build a markdown string", "code": code},
+            {"reasoning": "Submit", "code": 'SUBMIT("ok")'},
+        ])
+
+        result = rlm.forward(query="test", interpreter_factory=lambda: mock)
+        assert result.answer == "ok"
+        # The full, untouched program is what the interpreter received and what the
+        # trajectory records — never the truncated/fabricated in-string content.
+        executed_codes = [c for c, _ in mock.call_history]
+        assert code in executed_codes
+        assert "inner" not in executed_codes
+        assert result.trajectory[0]["code"] == code
 
 
 class TestRLMFormatting:

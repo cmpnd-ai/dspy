@@ -712,6 +712,35 @@ def test_serialize_by_value_unknown_string_raises_module_not_found_error():
             pass
 
 
+def test_serialize_by_value_failed_import_leaves_no_registration(tmp_path):
+    # If a later module name cannot be imported, earlier successful imports
+    # must not leave any module registered (or its refcount bumped), so a
+    # later save without ``modules_to_serialize`` is unaffected.
+    import sys
+
+    import cloudpickle
+
+    from dspy.utils.pickle_by_value import serialize_by_value
+
+    (tmp_path / "valid_module.py").write_text("def f():\n    return 1\n")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        assert "valid_module" not in cloudpickle.list_registry_pickle_by_value()
+        assert "json" not in cloudpickle.list_registry_pickle_by_value()
+
+        with pytest.raises(ModuleNotFoundError):
+            with serialize_by_value(["json", "valid_module", "no_such_module"]):
+                pass
+
+        # Neither the stdlib module nor the local module was left registered.
+        assert "json" not in cloudpickle.list_registry_pickle_by_value()
+        assert "valid_module" not in cloudpickle.list_registry_pickle_by_value()
+    finally:
+        sys.modules.pop("valid_module", None)
+        if str(tmp_path) in sys.path:
+            sys.path.remove(str(tmp_path))
+
+
 def test_save_with_extra_modules_as_strings(tmp_path):
     # End-to-end: saving a program with `modules_to_serialize` given as the
     # documented string form (`[mod.__name__]`) embeds the class by value so
@@ -752,5 +781,6 @@ class MyModule(dspy.Module):
         loaded_module = dspy.load(tmp_path, allow_pickle=True)
         assert loaded_module.cot.predict.signature == cot.cot.predict.signature
     finally:
+        sys.modules.pop("custom_module_str", None)
         if str(tmp_path) in sys.path:
             sys.path.remove(str(tmp_path))

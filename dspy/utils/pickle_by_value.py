@@ -29,13 +29,19 @@ _active: dict[str, int] = {}  # module name -> saves currently relying on DSPy's
 
 @contextmanager
 def serialize_by_value(modules):
-    modules = list(modules or [])
+    # Resolve string names to module objects before acquiring the lock, so a
+    # failed import leaves nothing registered (no partial cleanup needed) and an
+    # imported module can run its own save during import without deadlocking on
+    # the non-reentrant lock.
     owned: list = []
+    resolved = []
+    for module in modules or []:
+        if isinstance(module, str):
+            module = importlib.import_module(module)
+        resolved.append(module)
     with _lock:
         registry = set(cloudpickle.list_registry_pickle_by_value())
-        for module in modules:
-            if isinstance(module, str):
-                module = importlib.import_module(module)
+        for module in resolved:
             name = module.__name__
             if _active.get(name, 0) == 0 and name in registry:
                 continue  # registered by the caller, not by a save: not ours to count or remove

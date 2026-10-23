@@ -308,6 +308,8 @@ def callback(x):
         assert dspy.settings.callbacks[0](3) == 4
 
     finally:
-        # Only need to clean up sys.path
+        # Remove the cached module so a later test with the same name does not
+        # import this code by mistake, even if the save above raised.
+        sys.modules.pop("custom_module_str", None)
         if str(tmp_path) in sys.path:
             sys.path.remove(str(tmp_path))

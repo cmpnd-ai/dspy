@@ -43,6 +43,32 @@ class CustomLMSubclass(dspy.LM):
     pass
 
 
+class StrictLoaderBaseLM(dspy.BaseLM):
+    """A custom BaseLM whose load_state does NOT strip the internal marker.
+
+    Its constructor rejects the unexpected ``_dspy_lm_class`` kwarg, so a
+    loader that forwards the saved state verbatim (``cls(**state)``) only
+    works when the entry point removes the marker before dispatch.
+    """
+
+    def __init__(self, model, *, deployment, **kwargs):
+        if LM_CLASS_STATE_KEY in kwargs:
+            raise TypeError(f"unexpected keyword argument '{LM_CLASS_STATE_KEY}'")
+        super().__init__(model=model, **kwargs)
+        self.deployment = deployment
+
+    def dump_state(self):
+        state = super().dump_state()
+        state["deployment"] = self.deployment
+        return state
+
+    @classmethod
+    def load_state(cls, state):
+        # Trusts the entry point to strip internal fields; does not pop the
+        # marker itself, mirroring loaders that simply do cls(**state).
+        return cls(**state)
+
+
 class Echo:
     """A stateful custom engine for the custom-engine round-trip tests."""
 
@@ -149,6 +175,26 @@ def test_custom_lm_subclass_with_custom_engine_round_trips_through_lm_load_state
     assert isinstance(loaded, CustomLMSubclass)
     assert isinstance(loaded.engine, Echo) and loaded.engine.tag == "a"
     assert loaded("hi") == ["echo:a"]
+
+
+def test_lm_load_state_strips_marker_before_dispatching_to_custom_loader():
+    # A custom loader that does cls(**state) without popping the internal
+    # marker must still load through the LM subclass entry point: the marker
+    # is removed before the early dispatch, so the recorded class's
+    # load_state/constructor never sees _dspy_lm_class. Regression for the
+    # divergence between LM.load_state (get) and BaseLM.load_state (pop).
+    state = StrictLoaderBaseLM(model="custom-model", deployment="prod").dump_state()
+    assert state[LM_CLASS_STATE_KEY] == f"{__name__}.StrictLoaderBaseLM"
+
+    loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
+    assert isinstance(loaded, StrictLoaderBaseLM)
+    assert loaded.deployment == "prod"
+    assert LM_CLASS_STATE_KEY not in loaded.kwargs
+
+    # The BaseLM entry point must keep behaving identically.
+    loaded_baselm = dspy.BaseLM.load_state(state, allow_custom_lm_class=True)
+    assert isinstance(loaded_baselm, StrictLoaderBaseLM)
+    assert loaded_baselm.deployment == "prod"
 
 
 def test_nested_custom_lm_class_round_trips_through_lm_load_state():

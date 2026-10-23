@@ -43,6 +43,31 @@ class CustomLMSubclass(dspy.LM):
     pass
 
 
+class Echo:
+    """A stateful custom engine for the custom-engine round-trip tests."""
+
+    def __init__(self, tag="t"):
+        self.tag = tag
+
+    def complete(self, request):
+        from dspy.lm15 import Message, Response, Usage
+
+        return Response(
+            id=None,
+            model=request.model,
+            message=Message.assistant(f"echo:{self.tag}"),
+            finish_reason="stop",
+            usage=Usage(),
+        )
+
+    def dump_state(self):
+        return {"tag": self.tag}
+
+    @classmethod
+    def load_state(cls, state):
+        return cls(**state)
+
+
 class Outer:
     class NestedCustomLM(dspy.BaseLM):
         pass
@@ -105,6 +130,25 @@ def test_custom_lm_subclass_of_lm_is_gated_through_lm_load_state():
     loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
     assert isinstance(loaded, CustomLMSubclass)
     assert loaded.engine == "litellm"
+
+
+def test_custom_lm_subclass_with_custom_engine_round_trips_through_lm_load_state():
+    # A custom dspy.LM subclass carrying a custom engine: the outer LM.load_state
+    # must dispatch to the recorded subclass before _load_engine turns the
+    # engine record into an object, otherwise the inherited LM.load_state re-entry
+    # raises (the record is no longer a dict). Regression for the trust gate
+    # through the subclass entry point with a custom engine.
+    state = CustomLMSubclass("custom/echo", engine=Echo("a"), cache=False).dump_state()
+    assert state[LM_CLASS_STATE_KEY] == f"{__name__}.CustomLMSubclass"
+    assert state["engine"] == {"class": f"{__name__}:Echo", "state": {"tag": "a"}}
+
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.LM.load_state(state)
+
+    loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
+    assert isinstance(loaded, CustomLMSubclass)
+    assert isinstance(loaded.engine, Echo) and loaded.engine.tag == "a"
+    assert loaded("hi") == ["echo:a"]
 
 
 def test_nested_custom_lm_class_round_trips_through_lm_load_state():

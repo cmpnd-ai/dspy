@@ -51,10 +51,19 @@ def select_backend(lm, options=None):
             # Preserve legacy environment-configured gateways. A public native
             # endpoint must not receive credentials meant for that gateway. A
             # declared provider states its address explicitly; an explicit
-            # declaration beats an ambient variable.
+            # declaration beats an ambient variable.  LiteLLM names a gateway
+            # variable after either the model-string prefix (e.g.
+            # "together_ai" -> TOGETHER_AI_API_BASE) or the resolved provider
+            # (e.g. an unprefixed "gpt-4o" -> openai-chat -> OPENAI_API_BASE);
+            # probe both, so a model written without a prefix still detects a
+            # gateway the native engine would otherwise bypass.
             prefix = lm.model.split("/", 1)[0].upper()
+            provider_prefix = resolution.provider.removesuffix("-chat").removesuffix("-responses").upper()
             if spec == "auto" and not resolution.declared and any(
-                os.getenv(name) for name in (f"{prefix}_API_BASE", f"{prefix}_BASE_URL")
+                os.getenv(name) for name in (
+                    f"{prefix}_API_BASE", f"{prefix}_BASE_URL",
+                    f"{provider_prefix}_API_BASE", f"{provider_prefix}_BASE_URL",
+                )
             ):
                 native = False
             if spec == "auto" and resolution.provider == "xai" and "api_key" not in clients and os.getenv("XAI_API_KEY"):

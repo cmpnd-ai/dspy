@@ -8,6 +8,7 @@ import pytest
 
 import dspy
 from dspy.clients import capabilities as hints
+from dspy.clients.backend_selection import select_backend
 from dspy.clients.call_result import CallResult
 from dspy.clients.engines import AsyncLiteLLMEngine, AsyncLM15Engine, LiteLLMEngine, LM15Engine
 from dspy.clients.execution import _engine, prepare
@@ -71,6 +72,49 @@ def test_environment_gateway_uses_same_backend_for_capabilities(variable, confli
     assert not lm.supports_function_calling
     assert not lm.supports_response_schema
     assert conflicting_metadata
+
+
+@pytest.mark.parametrize("model,variable", [
+    ("gpt-4o", "OPENAI_API_BASE"),
+    ("claude-3-5-sonnet-20241022", "ANTHROPIC_API_BASE"),
+    ("anthropic/claude-3-5-sonnet-20241022", "ANTHROPIC_API_BASE"),
+    # Registry providers where LiteLLM names the gateway variable after the
+    # model-string prefix rather than the canonical provider id; probing the
+    # resolved provider alone would miss these and regress them.
+    ("together_ai/meta-llama/Llama-3", "TOGETHER_AI_API_BASE"),
+    ("moonshot/moonshot-v1", "MOONSHOT_API_BASE"),
+])
+def test_environment_gateway_detects_unprefixed_and_registry_models(model, variable, conflicting_metadata, monkeypatch):
+    # Regression: the legacy gateway guard must probe both the model-string
+    # prefix and the resolved provider, so a model written without a provider
+    # prefix (e.g. "gpt-4o" -> openai) still falls back to the LiteLLM
+    # compatibility engine when a gateway env var is configured -- instead of
+    # silently hitting the public vendor endpoint carrying the gateway's key.
+    for name in (
+        "OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL",
+        "AZURE_API_BASE", "AZURE_BASE_URL", "TOGETHER_AI_API_BASE", "MOONSHOT_API_BASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "https://gateway.invalid")
+    lm = dspy.LM(model, cache=False)
+    assert not select_backend(lm).native, f"{model!r} with {variable} set must fall back to LiteLLM"
+    assert isinstance(_engine(lm, prepare(lm, "hello", None, {}), False)[0], LiteLLMEngine)
+
+
+@pytest.mark.parametrize("model,variable", [
+    ("gpt-4o", "ANTHROPIC_API_BASE"),
+    ("claude-3-5-sonnet-20241022", "OPENAI_API_BASE"),
+])
+def test_environment_gateway_unrelated_variable_keeps_native(model, variable, conflicting_metadata, monkeypatch):
+    # A gateway variable for a different provider must not reroute a model; the
+    # native engine stays, so the LiteLLM compatibility capability path (and
+    # its confounded lookups) is never consulted.
+    for name in ("OPENAI_API_BASE", "OPENAI_BASE_URL", "ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "https://gateway.invalid")
+    lm = dspy.LM(model, cache=False)
+    assert select_backend(lm).native
+    assert not conflicting_metadata
 
 
 def test_native_compatible_settings_do_not_consult_litellm(conflicting_metadata):

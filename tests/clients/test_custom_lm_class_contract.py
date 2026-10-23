@@ -1,0 +1,199 @@
+"""The custom-LM-class trust gate is entry-point independent.
+
+`BaseLM.load_state` records the concrete LM class in `_dspy_lm_class` and
+refuses to import a custom (non-builtin) class unless `allow_custom_lm_class`
+is set, because importing it runs application code from the serialized path.
+Historically the entire gate lived inside an `if cls is BaseLM:` branch, so
+calling `load_state` through a subclass entry point — most notably
+`dspy.LM.load_state`, which forwards via `super()` — skipped the gate and
+silently constructed a plain instance of the subclass. These tests pin the
+fix: the gate fires regardless of the entry point.
+"""
+
+import json
+
+import pytest
+
+import dspy
+from dspy.clients.base_lm import LM_CLASS_STATE_KEY
+
+
+class CustomBaseLM(dspy.BaseLM):
+    """A custom BaseLM subclass with extra persistent state."""
+
+    def __init__(self, model, *, deployment, **kwargs):
+        super().__init__(model=model, **kwargs)
+        self.deployment = deployment
+
+    def dump_state(self):
+        state = super().dump_state()
+        state["deployment"] = self.deployment
+        return state
+
+    @classmethod
+    def load_state(cls, state):
+        state = dict(state)
+        state.pop(LM_CLASS_STATE_KEY, None)
+        return cls(**state)
+
+
+class CustomLMSubclass(dspy.LM):
+    """A custom dspy.LM subclass that adds no extra state of its own."""
+
+    pass
+
+
+class Outer:
+    class NestedCustomLM(dspy.BaseLM):
+        pass
+
+
+class NotAnLM:
+    """A module-level class that is not a BaseLM subclass."""
+
+
+# ─── the gate is entry-point independent ──────────────────────────────
+
+
+def test_lm_load_state_refuses_custom_lm_class_without_opt_in():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+    assert state[LM_CLASS_STATE_KEY] == f"{__name__}.CustomBaseLM"
+
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.LM.load_state(state)
+
+
+def test_baselm_and_lm_entry_points_gate_the_custom_lm_class_identically():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+    # Both entry points must refuse a custom LM class by default, mirroring
+    # test_loading_a_custom_engine_is_gated_like_a_custom_lm_class.
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.BaseLM.load_state(state)
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.LM.load_state(state)
+
+
+def test_lm_load_state_reconstructs_custom_lm_class_with_opt_in():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+
+    loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
+
+    assert isinstance(loaded, CustomBaseLM)
+    assert loaded.model == "custom-model"
+    assert loaded.deployment == "prod"
+    assert loaded.dump_state()[LM_CLASS_STATE_KEY] == f"{__name__}.CustomBaseLM"
+
+
+def test_baselm_load_state_reconstructs_custom_lm_class_with_opt_in():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+
+    loaded = dspy.BaseLM.load_state(state, allow_custom_lm_class=True)
+
+    assert isinstance(loaded, CustomBaseLM)
+    assert loaded.deployment == "prod"
+
+
+def test_custom_lm_subclass_of_lm_is_gated_through_lm_load_state():
+    # A state dumped from a dspy.LM subclass carries that subclass's path; it
+    # must not be silently flattened into a plain dspy.LM.
+    state = CustomLMSubclass(model="openai/gpt-4o-mini", engine="litellm").dump_state()
+    assert state[LM_CLASS_STATE_KEY] == f"{__name__}.CustomLMSubclass"
+
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.LM.load_state(state)
+
+    loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
+    assert isinstance(loaded, CustomLMSubclass)
+    assert loaded.engine == "litellm"
+
+
+def test_nested_custom_lm_class_round_trips_through_lm_load_state():
+    state = Outer.NestedCustomLM(model="nested-model").dump_state()
+    assert state[LM_CLASS_STATE_KEY] == f"{__name__}.Outer.NestedCustomLM"
+
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        dspy.LM.load_state(state)
+
+    loaded = dspy.LM.load_state(state, allow_custom_lm_class=True)
+    assert isinstance(loaded, Outer.NestedCustomLM)
+
+
+# ─── the built-in path is unchanged ────────────────────────────────────
+
+
+def test_builtin_marker_through_lm_load_state_is_not_gated():
+    # A built-in dspy.LM marker loading through dspy.LM.load_state must still
+    # construct a plain dspy.LM without requiring the trust flag.
+    state = dspy.LM("openai/gpt-4o-mini", engine="litellm").dump_state()
+    assert state[LM_CLASS_STATE_KEY] == "dspy.clients.lm.LM"
+
+    loaded = dspy.LM.load_state(state)
+    assert isinstance(loaded, dspy.LM)
+    assert loaded.engine == "litellm"
+    assert loaded.dump_state() == state
+
+
+def test_builtin_marker_through_baselm_load_state_is_not_gated():
+    state = dspy.LM("openai/gpt-4o-mini", engine="litellm").dump_state()
+
+    loaded = dspy.BaseLM.load_state(state)
+    assert isinstance(loaded, dspy.LM)
+    assert loaded.engine == "litellm"
+
+
+def test_legacy_markerless_state_through_lm_load_state_loads_as_lm():
+    # A marker-less (legacy) state loading through the subclass entry point
+    # still constructs cls directly, exactly as before.
+    state = dspy.LM("openai/gpt-4o-mini", engine="litellm").dump_state()
+    state.pop(LM_CLASS_STATE_KEY)
+
+    loaded = dspy.LM.load_state(state)
+    assert isinstance(loaded, dspy.LM)
+    assert loaded.model == "openai/gpt-4o-mini"
+
+
+# ─── validation of the recorded class ──────────────────────────────────
+
+
+def test_recorded_class_that_is_not_a_baselm_subclass_is_typeerror():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+    state[LM_CLASS_STATE_KEY] = f"{__name__}.NotAnLM"
+
+    with pytest.raises(TypeError, match=r"must be a subclass of dspy\.BaseLM"):
+        dspy.LM.load_state(state, allow_custom_lm_class=True)
+    with pytest.raises(TypeError, match=r"must be a subclass of dspy\.BaseLM"):
+        dspy.BaseLM.load_state(state, allow_custom_lm_class=True)
+
+
+def test_unimportable_recorded_class_is_importerror_through_lm_load_state():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+    state[LM_CLASS_STATE_KEY] = "no.such.module.CustomLM"
+
+    with pytest.raises(ImportError, match="Could not import serialized LM class"):
+        dspy.LM.load_state(state, allow_custom_lm_class=True)
+
+
+# ─── end-to-end through dump_state / load_state round trips ────────────
+
+
+def test_custom_lm_state_is_json_portable_through_lm_load_state():
+    state = CustomBaseLM(model="custom-model", deployment="prod").dump_state()
+    json.dumps(state)  # the gate must operate on JSON-portable state
+
+    loaded = dspy.LM.load_state(json.loads(json.dumps(state)), allow_custom_lm_class=True)
+    assert isinstance(loaded, CustomBaseLM)
+    assert loaded.deployment == "prod"
+
+
+def test_program_save_and_load_with_custom_lm_class_via_lm_entry(tmp_path):
+    program = dspy.Predict("question -> answer")
+    program.lm = CustomBaseLM(model="custom-model", deployment="saved")
+    path = tmp_path / "program.json"
+    program.save(path)
+
+    fresh = dspy.Predict("question -> answer")
+    with pytest.raises(ValueError, match="Refusing to import custom serialized LM class"):
+        fresh.load(path)
+    fresh.load(path, allow_unsafe_lm_state=True)
+    assert isinstance(fresh.lm, CustomBaseLM)
+    assert fresh.lm.deployment == "saved"

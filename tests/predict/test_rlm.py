@@ -686,6 +686,12 @@ class TestRLMCodeFenceParsing:
             # Backticks inside a docstring inside a fenced block: the closing fence
             # is the standalone ``` line, not the backticks carried by inline code.
             ('```python\ndef f():\n    "doc ``` not a fence"\n    return 1\n```', 'def f():\n    "doc ``` not a fence"\n    return 1'),
+            # Triple-quoted string spanning multiple lines: the ```python and ```
+            # lines inside the string must not be treated as fences (unfenced case).
+            ('md = """\n```python\nprint("inner")\n```\n"""\nprint(md)', 'md = """\n```python\nprint("inner")\n```\n"""\nprint(md)'),
+            # Same idea inside a real python fence: the in-string ``` lines are not
+            # the closing fence, so the full body is returned unchanged.
+            ('```python\nmd = """\n```python\nprint("inner")\n```\n"""\nprint(md)\n```', 'md = """\n```python\nprint("inner")\n```\n"""\nprint(md)'),
             # A fence line indented with leading whitespace is still recognized;
             # the body is returned as the original did (leading/trailing whitespace trimmed).
             ("    ```python\n    print(1)\n    ```", "print(1)"),
@@ -746,7 +752,10 @@ class TestRLMCodeFenceParsing:
         the in-string ``` as a markdown fence and returned the string's contents
         (e.g. ``inner``) as the code to execute, dropping the model's real statements.
         """
-        code = 'md = "```\ninner\n```"\nprint(md)'
+        # Use a valid triple-quoted Python string so the fixture parses, and assert
+        # it does: the regression only holds against a program a real interpreter runs.
+        code = 'md = """\n```\ninner\n```\n"""\nprint(md)'
+        compile(code, "<rlm test>", "exec")
         mock = MockInterpreter(responses=[
             "['__builtins__']",  # the printed `md` value; irrelevant to the assertion
             FinalOutput({"answer": "ok"}),

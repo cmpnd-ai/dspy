@@ -53,7 +53,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Tuple
 from xml.etree import ElementTree
 
-from ..credentials import ApiKey, AwsCredentials, BearerToken, CredentialValue, parse_rfc3339
+from .._authlock import hold_file_lock, write_private_json_atomic
+from ..credentials import ApiKey, AwsCredentials, BearerToken, CredentialValue, format_rfc3339, parse_rfc3339
 from ..errors import _GUIDANCE_MARKER, AuthError, NotConfiguredError
 from ..features import NAMED_CREDENTIALS, RUNG_KINDS, AccessPolicy
 from . import rs256, sigv4
@@ -142,6 +143,38 @@ class ChainContext:
             return self.path(text).read_text(encoding="utf-8")
         except OSError:
             return None
+
+    def write(self, text: str, data: dict[str, Any]) -> None:
+        """Write ``data`` as JSON to ``text``, atomically on the real
+        filesystem (via :func:`write_private_json_atomic`) or into the
+        in-memory ``files`` dict when the harness overrides the filesystem."""
+        content = json.dumps(data, indent=2) + "\n"
+        if self.files is not None:
+            normalized = str(self.path(text))
+            if isinstance(self.files, dict):
+                # Match the existing key by path normalization (same rule as
+                # read), so the old ``~``-prefixed entry is replaced, not
+                # shadowed by a second absolute-path entry.
+                for existing in list(self.files):
+                    if str(self.path(existing)) == normalized:
+                        self.files[existing] = content
+                        return
+                self.files[normalized] = content
+            else:
+                # Non-dict Mapping (e.g. MappingProxyType): copy into a dict
+                # and replace the matching key by path normalization, the
+                # same rule as the dict branch, so a ``~``-prefixed entry is
+                # replaced rather than shadowed by a second absolute-path key.
+                files = dict(self.files)
+                for existing in list(files):
+                    if str(self.path(existing)) == normalized:
+                        files[existing] = content
+                        self.files = files
+                        return
+                files[normalized] = content
+                self.files = files
+            return
+        write_private_json_atomic(self.path(text), data)
 
     def exists(self, text: str) -> bool:
         return self.read(text) is not None
@@ -465,11 +498,66 @@ def _sso_config(ctx: ChainContext) -> dict[str, str] | None:
     return None
 
 
+def _sso_refresh_token(ctx: ChainContext, cache_path: str, token: dict, sso_region: str) -> str:
+    """Refresh an expired SSO access token and persist the result back to the
+    cache file, matching botocore's ``SSOTokenProvider._refresher``.
+
+    The refreshed ``accessToken``, a new ``expiresAt`` (derived from
+    ``expiresIn``), and a rotated ``refreshToken`` (when the response carries
+    one) are written back to ``~/.aws/sso/cache/<cache_key>.json`` so the next
+    resolution — including the AWS CLI's own — finds the fresh token instead of
+    repeating the OIDC round trip with a stale (and possibly invalidated)
+    refresh token.  On the real filesystem the refresh is guarded by
+    :func:`hold_file_lock` with a double-checked re-read, so concurrent lm15
+    processes do not double-spend a rotating refresh token.
+    """
+
+    def do_refresh(tok: dict) -> str:
+        if not (tok.get("refreshToken") and tok.get("clientId") and tok.get("clientSecret")):
+            raise NotConfiguredError("IAM Identity Center: token expired and not refreshable; run `aws sso login`", credential_hint="aws sso login")
+        data = _exchange(ctx, "POST", f"https://oidc.{sso_region}.amazonaws.com/token", {"content-type": "application/json"},
+                         json.dumps({"clientId": tok["clientId"], "clientSecret": tok["clientSecret"],
+                                     "grantType": "refresh_token", "refreshToken": tok["refreshToken"]}).encode(), "sso-oidc CreateToken",
+                         hint="aws sso login")
+        access = data.get("accessToken")
+        if not access:
+            raise AuthError("sso-oidc CreateToken: no accessToken")
+        updated = dict(tok)
+        updated["accessToken"] = access
+        new_expiry = _expires_from(ctx.now(), data.get("expiresIn"))
+        if new_expiry is not None:
+            updated["expiresAt"] = format_rfc3339(new_expiry)
+        if data.get("refreshToken") is not None:
+            updated["refreshToken"] = data["refreshToken"]
+        ctx.write(cache_path, updated)
+        return access
+
+    if ctx.files is not None:
+        return do_refresh(token)
+    with hold_file_lock(str(ctx.path(cache_path))):
+        # Double-checked refresh: another process (or the AWS CLI) may have
+        # refreshed — and rotated the refresh token — while we waited.
+        fresh = ctx.read(cache_path)
+        if fresh is not None:
+            try:
+                current = json.loads(fresh)
+            except ValueError:
+                current = None
+            if isinstance(current, dict):
+                existing = current.get("accessToken")
+                existing_expires = parse_rfc3339(current["expiresAt"]) if current.get("expiresAt") else None
+                if existing and (existing_expires is None or existing_expires - ctx.now() > _SKEW):
+                    return existing
+                token = current
+        return do_refresh(token)
+
+
 def _sso_acquire(ctx: ChainContext) -> AwsCredentials | None:
     cfg = _sso_config(ctx)
     if cfg is None:
         return None
-    raw = ctx.read(f"~/.aws/sso/cache/{cfg['cache_key']}.json")
+    cache_path = f"~/.aws/sso/cache/{cfg['cache_key']}.json"
+    raw = ctx.read(cache_path)
     if raw is None:
         raise NotConfiguredError("IAM Identity Center: no cached token; run `aws sso login`", credential_hint="aws sso login")
     token = json.loads(raw)
@@ -479,14 +567,7 @@ def _sso_acquire(ctx: ChainContext) -> AwsCredentials | None:
     sso_region = cfg.get("sso_region") or "us-east-1"
     assert ctx.http is not None
     if not access or (expires is not None and expires - now <= _SKEW):
-        if not (token.get("refreshToken") and token.get("clientId") and token.get("clientSecret")):
-            raise NotConfiguredError("IAM Identity Center: token expired and not refreshable; run `aws sso login`", credential_hint="aws sso login")
-        data = _exchange(ctx, "POST", f"https://oidc.{sso_region}.amazonaws.com/token", {"content-type": "application/json"},
-                         json.dumps({"clientId": token["clientId"], "clientSecret": token["clientSecret"],
-                                     "grantType": "refresh_token", "refreshToken": token["refreshToken"]}).encode(), "sso-oidc CreateToken")
-        access = data.get("accessToken")
-        if not access:
-            raise AuthError("sso-oidc CreateToken: no accessToken")
+        access = _sso_refresh_token(ctx, cache_path, token, sso_region)
     account, role = cfg.get("sso_account_id"), cfg.get("sso_role_name")
     if not (account and role):
         raise NotConfiguredError("IAM Identity Center: profile needs sso_account_id and sso_role_name")

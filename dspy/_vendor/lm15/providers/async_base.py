@@ -260,14 +260,21 @@ class AsyncBaseProviderLM:
     async def batch_submit(self, request: "BatchRequest"):
         self._inner._batch_preflight(request)
         upload_body = None
-        upload_req = await self._build(self._inner._batch_upload_request, request)
+        # MAP-13: the batch builders run under the adapter's policy so
+        # "refuse" refuses here too; a batch ticket has no adaptations field
+        # (provisional surface), so under "note" the record is not kept.
+        # The contextvar is task-safe and is copied into the asyncio.to_thread
+        # worker, so adapt() inside an offloaded builder still sees it.
+        with collecting(check_policy(self.adaptations), provider=self.provider):
+            upload_req = await self._build(self._inner._batch_upload_request, request)
         if upload_req is not None:
             resp = await self._send(upload_req)
             if resp.status >= 400:
                 raise self._inner._http_error(resp)
             upload_body = _parse_reply(resp, _reply_object)
         try:
-            submit_req = await self._build(self._inner._batch_submit_request, request, upload_body)
+            with collecting(check_policy(self.adaptations), provider=self.provider):
+                submit_req = await self._build(self._inner._batch_submit_request, request, upload_body)
         except ProviderError as error:
             if upload_req is not None:
                 _reply_error_metadata(error, resp)

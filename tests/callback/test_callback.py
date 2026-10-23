@@ -5,6 +5,8 @@ import cloudpickle
 import pytest
 
 import dspy
+from dspy.adapters import ChatAdapter, JSONAdapter, XMLAdapter
+from dspy.adapters.baml_adapter import BAMLAdapter
 from dspy.utils.callback import ACTIVE_CALL_ID, BaseCallback, with_callbacks
 from dspy.utils.callback_context import _bind_active_call_id
 from dspy.utils.dummies import DummyLM
@@ -370,3 +372,94 @@ def test_active_id():
     assert len(set(callback.call_ids)) == 3
     parent_call_id = callback.call_ids[0]
     assert callback.parent_call_ids == [None, parent_call_id, parent_call_id]
+
+
+class CallIdRecordingCallback(BaseCallback):
+    """Records adapter format/parse events together with the ``call_id`` they fired under."""
+
+    def __init__(self):
+        self.events = []
+
+    def on_adapter_format_start(self, call_id, instance, inputs):
+        self.events.append(("on_adapter_format_start", call_id))
+
+    def on_adapter_format_end(self, call_id, outputs, exception):
+        self.events.append(("on_adapter_format_end", call_id))
+
+    def on_adapter_parse_start(self, call_id, instance, inputs):
+        self.events.append(("on_adapter_parse_start", call_id))
+
+    def on_adapter_parse_end(self, call_id, outputs, exception):
+        self.events.append(("on_adapter_parse_end", call_id))
+
+
+class _QASignature(dspy.Signature):
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+
+# Adapters that inherit (rather than override) ``format``/``parse`` used to gain
+# one extra ``with_callbacks`` wrapper layer per inheritance level because
+# ``Adapter.__init_subclass__`` unconditionally re-wrapped the inherited method.
+class _InheritingAdapter(JSONAdapter):
+    pass
+
+
+class _OverridingFormatAdapter(JSONAdapter):
+    def format(self, signature, demos, inputs):
+        return [{"role": "user", "content": "formatted"}]
+
+
+def _handler_call_ids(events, handler):
+    return [call_id for name, call_id in events if name == handler]
+
+
+def _wrapper_layers(func):
+    layers = 0
+    while hasattr(func, "__wrapped__"):
+        func = func.__wrapped__
+        layers += 1
+    return layers
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "completion"),
+    [
+        (ChatAdapter, "[[ ## answer ## ]]\ntest output"),
+        (JSONAdapter, '{"answer": "test output"}'),
+        (XMLAdapter, "<answer>test output</answer>"),
+        (BAMLAdapter, '{"answer": "test output"}'),
+    ],
+)
+def test_adapter_callbacks_fire_once_per_logical_call(adapter_cls, completion):
+    callback = CallIdRecordingCallback()
+    adapter = adapter_cls(callbacks=[callback])
+
+    adapter.format(_QASignature, [], {"question": "How are you?"})
+    format_starts = _handler_call_ids(callback.events, "on_adapter_format_start")
+    format_ends = _handler_call_ids(callback.events, "on_adapter_format_end")
+    assert len(format_starts) == 1
+    assert len(format_ends) == 1
+    # Exactly one wrapper layer means a single call_id shared by the start/end pair.
+    assert len(set(format_starts)) == 1
+    assert format_starts == format_ends
+
+    callback.events = []
+    adapter.parse(_QASignature, completion)
+    parse_starts = _handler_call_ids(callback.events, "on_adapter_parse_start")
+    parse_ends = _handler_call_ids(callback.events, "on_adapter_parse_end")
+    assert len(parse_starts) == 1
+    assert len(parse_ends) == 1
+    assert len(set(parse_starts)) == 1
+    assert parse_starts == parse_ends
+
+
+@pytest.mark.parametrize(
+    "adapter_cls",
+    [ChatAdapter, JSONAdapter, XMLAdapter, BAMLAdapter, _InheritingAdapter, _OverridingFormatAdapter],
+)
+def test_adapter_methods_have_single_callback_wrapper_layer(adapter_cls):
+    # Each adapter's format/parse must carry exactly one ``with_callbacks`` wrapper
+    # layer regardless of how deep it sits in the inheritance hierarchy.
+    assert _wrapper_layers(adapter_cls.format) == 1
+    assert _wrapper_layers(adapter_cls.parse) == 1

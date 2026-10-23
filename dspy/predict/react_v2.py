@@ -20,10 +20,12 @@ logger = logging.getLogger(__name__)
 # expansion at the `Prediction(**final_outputs, history=..., termination_reason=...)` call sites.
 _RESERVED_PREDICTION_KEYS = frozenset({"history", "termination_reason"})
 
-# Internal input field names ReActV2 injects into its inner Predict signature. A user
-# input with one of these names would be silently overwritten by `_make_react_signature`
-# and replaced or popped out of the caller's kwargs by `forward`/`aforward`, so it must be rejected.
-_RESERVED_INPUT_KEYS = frozenset({"history", "tools", "turn_budget"})
+# Field names ReActV2 injects into its inner Predict signature via `_make_react_signature`. A user
+# input with one of these names would be silently overwritten (the injected input fields `history`,
+# `tools`, `turn_budget` overwrite a same-named input directly, and the injected output fields
+# `next_thought`, `tool_calls` overwrite a same-named input in the same fields dict) and its value
+# would never reach the LM, so such inputs must be rejected at construction.
+_RESERVED_INPUT_KEYS = frozenset({"history", "tools", "turn_budget", "next_thought", "tool_calls"})
 
 # Per-turn input that tells the model where it is in its turn budget. Each turn's value is
 # stored in that turn's history event, so replay rebuilds the exact request that was sent and
@@ -69,7 +71,8 @@ class ReActV2(Module):
             names = ", ".join(f"`{name}`" for name in sorted(reserved_inputs))
             raise ValueError(
                 f"Input field name(s) {names} are reserved by ReActV2 for its internal "
-                "conversation history, tool list, and turn budget. Rename these input fields on your signature."
+                "conversation history, tool list, turn budget, and reasoning/tool-call channels. "
+                "Rename these input fields on your signature."
             )
 
         user_tools = [tool if isinstance(tool, Tool) else Tool(tool) for tool in tools]

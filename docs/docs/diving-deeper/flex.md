@@ -34,7 +34,7 @@ The reflection model authors code, and code can be wrong. A candidate that doesn
 
 ### 7. Generated code always runs through an interpreter
 
-`Flex` takes its interpreter from `interpreter_factory`, else from `dspy.settings.interpreter_factory`, else from `dspy.PythonInterpreter` (Deno/Pyodide). Each of those must be a *zero-argument factory* — a bare instance or `None` is rejected. With the default, everything stays in the sandbox except provided-tool calls, predictor construction, and predictor calls, which bridge back to the host. Custom factories define their own trust boundary: `LocalInterpreter` separates process memory and stdout but retains the host user's filesystem, environment, credentials, network, and process authority. An in-process interpreter (one that runs code with `exec()` in the host, such as `dspy_interpreters.InProcessInterpreter`) works but isolates nothing: generated code shares the host's memory, so `max_predictor_calls` and the bridged LM-option allowlist bind only well-behaved code. Use one only for code you trust. The facade binds `dspy` in that interpreter's namespace and leaves the host's `dspy` module in place. The factory creates a fresh interpreter for each session; a forward owns an outer session and nested code-executing modules may request separate sessions. Source portability between custom interpreters is not guaranteed. `max_predictor_calls` caps how many predictor calls the generated code can make in one `forward`.
+`Flex` takes its interpreter from `interpreter_factory`, else from `dspy.settings.interpreter_factory`, else from `dspy.PythonInterpreter` (Deno/Pyodide). Each of those must be a *zero-argument factory* — a bare instance or `None` is rejected. With the default, everything stays in the sandbox except provided-tool calls, predictor construction, and predictor calls, which bridge back to the host. Custom factories define their own trust boundary: `LocalInterpreter` separates process memory and stdout but retains the host user's filesystem, environment, credentials, network, and process authority. An in-process interpreter (one that runs code with `exec()` in the host, such as `dspy_interpreters.InProcessInterpreter`) works but isolates nothing: generated code shares the host's memory, so `max_predictor_calls` and the bridged LM-option allowlist bind only well-behaved code. Use one only for code you trust. The facade binds `dspy` in that interpreter's namespace and leaves the host's `dspy` module in place. The factory creates a fresh interpreter for each session; a forward owns an outer session and nested code-executing modules may request separate sessions. Source portability between custom interpreters is not guaranteed. `max_predictor_calls` caps how many predictor calls the generated code can make in one `forward`, and `max_lm_calls` caps how many host LM calls those calls can drive in total — including the many LM calls a single bridged code-executing predictor (e.g. `dspy.RLM`) can make behind one predictor-call slot.
 
 ### 8. The declared output types are enforced at the sandbox boundary
 
@@ -52,7 +52,7 @@ The class carries the `@experimental` decorator. Treat the API and serialization
 
 ### Defining and running a Flex
 
-**`dspy.Flex(signature, *, tools=None, interpreter_factory=PythonInterpreter, max_predictor_calls=100)`**
+**`dspy.Flex(signature, *, tools=None, interpreter_factory=PythonInterpreter, max_predictor_calls=100, max_lm_calls=None)`**
 Parses the signature and binds the baseline source — a single `dspy.Predict` over the signature, or a `dspy.RLM` when `tools` are given. Validates `interpreter_factory` as a zero-arg factory and sets up the sandbox bridge. `dspy.configure(interpreter_factory=...)` replaces the default. A factory passed to `Flex` wins, unless it is `PythonInterpreter`.
 
 **`__call__(**inputs)` / `forward(**inputs)`**
@@ -82,6 +82,9 @@ Defaults to `dspy.PythonInterpreter` (sandboxed, needs Deno). `dspy.configure(in
 
 **`max_predictor_calls`**
 The maximum number of predictor calls the generated code can make in one `forward`. It guards against runaway loops. `None` removes the limit.
+
+**`max_lm_calls`**
+The maximum number of host LM calls the generated code can drive in one `forward`, summed across every bridged predictor call. A single predictor call can drive many host LM calls — a bridged `dspy.RLM` runs its whole main loop (one LM call per REPL iteration, plus the extract fallback) on the host behind one `max_predictor_calls` slot, and sandbox-chosen constructor kwargs like `max_iters` can lift that count — so `max_predictor_calls` alone cannot bound LM spend. `max_lm_calls` is the backstop: every bridged LM call is metered against it, and exceeding it raises an error on the offending `forward`. It defaults to `max_predictor_calls` when not set (so it scales with the predictor-call budget); pass an explicit `int` for a custom ceiling, or `None` together with `max_predictor_calls=None` to remove both limits. The budget counts **requested completions, not host requests**: a single call with `n=3` (three completions from one request) charges three slots, so `max_lm_calls=2` rejects it even though it is one host request. Use one slot per completion when sizing the ceiling.
 
 ### What the generated code can use
 

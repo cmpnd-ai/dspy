@@ -976,3 +976,214 @@ def test_nested_rlm_tool_provenance() -> None:
     assert record["inner_rlm"]["count"] == "1"
     # The host-provided tool itself executed in the host process, wherever it was called from:
     assert host_seen["platform"] == host_platform
+
+
+# =============================================================================
+# LM-call budget: bridged predictor LM calls are metered per forward (no Deno)
+# =============================================================================
+# ``max_predictor_calls`` is a guard against runaway loops, but a single bridged
+# predictor call (e.g. a ``dspy.RLM`` main loop) can drive many host LM calls behind one
+# slot. The Flex bridge must wire a per-forward LM-call budget (``reserve``) into its
+# ``FacadeInvocation`` -- like ``dspy.RLM._setup_facade`` already does -- so every
+# ``SandboxLM`` meters its calls. Without it, one predictor-call slot could spend an
+# effectively unbounded host LM budget while ``max_predictor_calls`` looked the other way.
+
+
+def test_max_lm_calls_is_plumbed_to_the_bridge() -> None:
+    flex = _bridged_flex_with(max_lm_calls=12)
+    assert flex._bridge._max_lm_calls == 12
+
+
+def test_max_lm_calls_defaults_to_max_predictor_calls() -> None:
+    # Defaults scale with the predictor-call guard; None disables both limits consistently.
+    assert _bridged_flex()._bridge._max_lm_calls == 100
+    assert _bridged_flex_with(max_predictor_calls=7)._bridge._max_lm_calls == 7
+    assert _bridged_flex_with(max_predictor_calls=None)._bridge._max_lm_calls is None
+    explicit = Flex(Doubler, interpreter_factory=lambda: MockInterpreter(), max_predictor_calls=5, max_lm_calls=20)
+    assert explicit._bridge._max_lm_calls == 20
+
+
+def test_invocation_wires_an_lm_call_reserve_into_the_facade() -> None:
+    # The fix: BridgeRuntime.invocation() passes reserve=budget.reserve so SandboxLM metering is
+    # active on the Flex path (mirroring dspy.RLM). reserve=None means metering is intentionally off.
+    assert _bridged_flex_with(max_lm_calls=3)._bridge.invocation()._reserve is not None
+    assert _bridged_flex_with(max_predictor_calls=None)._bridge.invocation()._reserve is None
+
+
+class _MultiLMCallStub:
+    """Predictor stand-in: makes ``lm_calls`` host LM calls in one ``__call__`` (like an RLM main loop).
+
+    Replaces a bridged predictor in the per-forward registry to prove the Flex LM-call budget
+    bounds the many host LM calls a single predictor-call slot can drive, without needing the RLM
+    REPL/interpreter to run. Each call to ``dspy.settings.lm`` (the SandboxLM the facade installs
+    for the call) reserves one slot against the forward's LM-call budget.
+    """
+
+    def __init__(self, lm_calls: int) -> None:
+        self.lm_calls = lm_calls
+
+    def __call__(self, **kwargs):
+        lm = dspy.settings.lm  # the SandboxLM installed by FacadeInvocation._lm_scope
+        for i in range(self.lm_calls):
+            lm(prompt=f"step {i}")
+        return dspy.Prediction(result=self.lm_calls)
+
+
+def test_one_predictor_call_driving_many_lm_calls_is_bounded() -> None:
+    # The core bug: a single bridged predictor call (1 max_predictor_calls slot) used to drive an
+    # unbounded number of host LM calls while consuming just one slot. The LM-call budget must cap
+    # the total LM calls regardless of the (small) predictor-call count.
+    flex = _bridged_flex_with(max_predictor_calls=10, max_lm_calls=3)
+    inv = flex._bridge.invocation()
+    inv.construct("Predict", "value: int -> result: int", "solve", {})
+    inv._predictors["solve"] = _MultiLMCallStub(5)  # 1 predictor-call slot, 5 host LM calls
+    dspy.configure(lm=DummyLM([{"answer": str(i)} for i in range(5)]))
+    with pytest.raises(RuntimeError, match=r"LLM call limit exceeded: 3 \+ 1 > 3"):
+        inv.call("solve", {"value": 1})
+    assert len(dspy.settings.lm.history) == 3  # only 3 LM calls slipped through before the trip
+
+
+def test_one_predictor_call_under_the_lm_call_budget_is_allowed() -> None:
+    # Happy path of the new guard: a multi-LM-call predictor stays within the budget and its result
+    # crosses the boundary intact (metering never rejects a forward that stays under the cap).
+    flex = _bridged_flex_with(max_predictor_calls=10, max_lm_calls=5)
+    inv = flex._bridge.invocation()
+    inv.construct("Predict", "value: int -> result: int", "solve", {})
+    inv._predictors["solve"] = _MultiLMCallStub(3)
+    dspy.configure(lm=DummyLM([{"answer": str(i)} for i in range(3)]))
+    assert inv.call("solve", {"value": 1}) == {"result": 3}
+    assert len(dspy.settings.lm.history) == 3
+
+
+def test_lifted_sandbox_kwargs_still_bounded_by_flex_budget() -> None:
+    # Part A of the report: sandbox code may construct dspy.RLM(max_llm_calls=10**9, max_iters=10**6)
+    # -- construction consumes no budget and the kwargs are forwarded -- so the inner knobs are lifted.
+    # Part B: even so, the Flex-level LM-call budget (not the sandbox-chosen inner knobs) bounds the
+    # actual host LM calls the predictor drives.
+    flex = _bridged_flex_with(max_predictor_calls=10, max_lm_calls=3)
+    inv = flex._bridge.invocation()
+    inv.construct("RLM", "value: int -> result: int", "rlm", {"max_llm_calls": 10**9, "max_iters": 10**6})
+    rlm = inv._predictors["rlm"]
+    assert rlm.max_llm_calls == 10**9 and rlm.max_iters == 10**6  # construction lifted the inner limits
+    inv._predictors["rlm"] = _MultiLMCallStub(5)  # ...but the Flex budget still bounds its LM calls
+    dspy.configure(lm=DummyLM([{"answer": str(i)} for i in range(5)]))
+    with pytest.raises(RuntimeError, match=r"LLM call limit exceeded"):
+        inv.call("rlm", {"value": 1})
+
+
+def test_lm_call_budget_charges_n_completions_in_one_call() -> None:
+    # One predictor call requesting n=3 completions costs 3 LM-call slots, so it cannot slip 3 calls
+    # past a budget of 2. This is the per-call metering a bridged multi-LM-call predictor relies on.
+    flex = _bridged_flex_with(max_lm_calls=2)
+    inv = flex._bridge.invocation()
+    inv.construct("Predict", "value: int -> result: str", "sub", {"n": 3})
+    dspy.configure(lm=DummyLM([{"result": "x"}] * 4))
+    with pytest.raises(RuntimeError, match=r"LLM call limit exceeded: 0 \+ 3 > 2"):
+        inv.call("sub", {"value": 1})
+
+
+def test_lm_call_budget_is_independent_per_forward() -> None:
+    # Each forward gets its own LM-call budget (fresh _LLMCallBudget in invocation()), so a runaway
+    # on one forward does not poison a concurrent/next forward's LM-call budget any more than it
+    # already does the predictor-call budget.
+    flex = _bridged_flex_with(max_lm_calls=2)
+    a = flex._bridge.invocation()
+    b = flex._bridge.invocation()
+    a.construct("Predict", "value: int -> result: str", "solve", {})
+    b.construct("Predict", "value: int -> result: str", "solve", {})
+    dspy.configure(lm=DummyLM([{"result": str(i)} for i in range(6)]))
+    a.call("solve", {"value": 1})  # budget a: 1/2
+    a.call("solve", {"value": 1})  # budget a: 2/2
+    with pytest.raises(RuntimeError, match=r"LLM call limit exceeded: 2 \+ 1 > 2"):
+        a.call("solve", {"value": 1})  # budget a trips; b is untouched
+    b.call("solve", {"value": 1})  # budget b: 1/2 -- independent
+    b.call("solve", {"value": 1})  # budget b: 2/2 -- still independent
+
+
+def test_predictor_call_budget_still_enforced_alongside_lm_call_budget() -> None:
+    # No regression: a generous LM-call budget does not weaken the predictor-call guard; a runaway
+    # glue that makes many predictor calls (each 1 LM call) is still stopped by max_predictor_calls.
+    flex = _bridged_flex_with(max_predictor_calls=2, max_lm_calls=100)
+    dspy.configure(lm=DummyLM([{"result": str(i)} for i in range(5)]))
+    inv = flex._bridge.invocation()
+    inv.construct("Predict", "value: int -> result: str", "solve", {})
+    inv.call("solve", {"value": 1})  # 1st predictor call
+    inv.call("solve", {"value": 1})  # 2nd predictor call
+    with pytest.raises(CodeInterpreterError, match=r"budget.*Raise max_predictor_calls"):
+        inv.call("solve", {"value": 1})  # 3rd exceeds the PREDICTOR-call budget, not the LM budget
+
+
+# Reproduces the report's Part B without Deno: an in-process interpreter runs optimizer-style glue
+# that constructs a dspy.RLM with raised max_iters and calls it once. Before the fix, that single
+# predictor-call slot drove max_iters+1 host LM calls while max_predictor_calls looked away; the
+# LM-call budget now caps it. Each RLM main-loop iteration makes exactly one host LM call (the
+# ``generate_action`` Predict, which resolves the SandboxLM the Flex facade installs for the call),
+# so with ``max_lm_calls=4`` the fifth iteration's LM call trips the budget before it reaches the LM.
+_NON_SUBMIT_MODULE = textwrap.dedent(
+    """
+    class DoublerModule(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.rlm = dspy.RLM("value: int -> result: int", max_iters=30)
+
+        def forward(self, **inputs):
+            r = self.rlm(value=inputs["value"])
+            return dspy.Prediction(result=int(getattr(r, "result", 0)))
+    """
+).strip()
+
+
+def _non_submit_lm(n: int) -> DummyLM:
+    # An action that only assigns a variable never calls SUBMIT(), so the RLM main loop keeps
+    # iterating (one host LM call per iteration) until the LM-call budget trips. The action
+    # signature's reasoning field carries the ``plan`` fallback name, which is what the adapter
+    # looks for in the response.
+    return DummyLM([{"plan": "go", "code": "x = 1"}] * n)
+
+
+def test_bridged_rlm_main_loop_is_bounded_by_lm_call_budget_in_process() -> None:
+    lm = _non_submit_lm(30)
+    dspy.configure(lm=lm)
+    flex = Flex(Doubler, interpreter_factory=_ExecInterpreter, max_predictor_calls=10, max_lm_calls=4)
+    flex._bind_code(_NON_SUBMIT_MODULE)
+    with pytest.raises(RuntimeError, match="LLM call limit exceeded"):
+        flex(value=1)
+    assert len(lm.history) == 4  # bounded: the un-fixed path made max_iters+1 (~31) host LM calls
+
+
+@deno_required
+def test_bridged_rlm_main_loop_is_bounded_by_lm_call_budget_on_sandbox() -> None:
+    # Same end-to-end proof under the real Deno/Pyodide sandbox the default Flex runs in.
+    lm = _non_submit_lm(30)
+    dspy.configure(lm=lm)
+    flex = Flex(Doubler, interpreter_factory=lambda: dspy.PythonInterpreter(), max_predictor_calls=10, max_lm_calls=4)
+    flex._bind_code(_NON_SUBMIT_MODULE)
+    with pytest.raises(RuntimeError, match="LLM call limit exceeded"):
+        flex(value=1)
+    assert len(lm.history) == 4
+
+
+def test_setstate_restores_flex_missing_max_lm_calls() -> None:
+    # Programs saved before ``max_lm_calls`` existed lack the attribute on the pickled state, but
+    # ``__setstate__`` calls ``_rebuild_bridge`` which now reads it. The restore must derive it from
+    # ``max_predictor_calls`` (the same default ``__init__`` uses) instead of raising ``AttributeError``.
+    flex = _bridged_flex_with(max_predictor_calls=7)
+    state = flex.__getstate__()
+    # Simulate a pre-change pickle: the only per-instance state is what __getstate__ returns.
+    # Strip ``_max_lm_calls`` from the underlying instance dict the state carries.
+    state.pop("_max_lm_calls", None)
+    restored = Flex.__new__(Flex)
+    restored.__setstate__(state)
+    assert restored._max_lm_calls == 7  # derived from max_predictor_calls, not AttributeError
+    assert restored._bridge._max_lm_calls == 7  # plumbed into the rebuilt bridge
+
+
+def test_setstate_keeps_explicit_max_lm_calls_when_present() -> None:
+    # A program saved with an explicit ``max_lm_calls`` keeps that value (the restore must not
+    # clobber a present attribute with the derived default).
+    flex = _bridged_flex_with(max_predictor_calls=5, max_lm_calls=20)
+    state = flex.__getstate__()
+    restored = Flex.__new__(Flex)
+    restored.__setstate__(state)
+    assert restored._max_lm_calls == 20
+    assert restored._bridge._max_lm_calls == 20

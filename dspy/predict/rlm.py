@@ -16,7 +16,6 @@ import functools
 import inspect
 import keyword
 import logging
-import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -37,7 +36,13 @@ from dspy.primitives.code_interpreter import (
     _validate_interpreter_factory,
     resolve_interpreter_factory,
 )
-from dspy.primitives.facade import CALL_TOOL, CONSTRUCT_TOOL, FacadeInvocation, is_reserved_sandbox_name
+from dspy.primitives.facade import (
+    CALL_TOOL,
+    CONSTRUCT_TOOL,
+    FacadeInvocation,
+    _LLMCallBudget,
+    is_reserved_sandbox_name,
+)
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.primitives.python_interpreter import PythonInterpreter
@@ -93,24 +98,6 @@ Prefer `llm_query` for simple one-shot prompts; use sub-agents for structured, t
 recursive subtasks.
 """
 _PYTHON_FENCE_LANGS = {"python", "py", "python3", "py3", ""}
-
-
-class _LLMCallBudget:
-    """Per-forward ceiling on sub-LLM calls, shared by every host path generated code can reach."""
-
-    def __init__(self, limit: int):
-        self._limit = limit
-        self._count = 0
-        self._lock = threading.Lock()
-
-    def reserve(self, n: int = 1) -> None:
-        with self._lock:
-            if self._count + n > self._limit:
-                raise RuntimeError(
-                    f"LLM call limit exceeded: {self._count} + {n} > {self._limit}. "
-                    f"Use Python code for aggregation instead of making more LLM calls."
-                )
-            self._count += n
 
 
 def _strip_code_fences(code: str) -> str:

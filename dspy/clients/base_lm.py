@@ -60,6 +60,28 @@ def _import_lm_class(class_path: str) -> type:
     raise ImportError(f"Could not import serialized LM class `{class_path}`.") from last_error
 
 
+def _load_recorded_lm_class(class_path, state, *, allow_custom_lm_class: bool) -> "BaseLM":
+    """Gate, import, and dispatch to the LM class recorded in serialized state.
+
+    A custom (non-builtin) class path imports application code from the
+    serialized path, so it is refused unless ``allow_custom_lm_class`` is set.
+    This gate is entry-point independent: it applies whether ``load_state`` is
+    entered through ``BaseLM`` or through a subclass such as ``dspy.LM``.
+    """
+    if class_path != _BUILTIN_LM_CLASS_PATH and not allow_custom_lm_class:
+        raise ValueError(
+            f"Refusing to import custom serialized LM class `{class_path}`. "
+            "Pass allow_unsafe_lm_state=True when loading trusted files to enable custom LM classes."
+        )
+
+    lm_cls = _import_lm_class(class_path)
+    if not issubclass(lm_cls, BaseLM):
+        raise TypeError(f"Serialized LM class `{class_path}` must be a subclass of dspy.BaseLM.")
+    if "allow_custom_lm_class" in inspect.signature(lm_cls.load_state).parameters:
+        return lm_cls.load_state(state, allow_custom_lm_class=allow_custom_lm_class)
+    return lm_cls.load_state(state)
+
+
 class BaseLM:
     """Base class for DSPy language models.
 
@@ -268,18 +290,17 @@ class BaseLM:
 
                 return LM(**state)
 
-            if class_path != _BUILTIN_LM_CLASS_PATH and not allow_custom_lm_class:
-                raise ValueError(
-                    f"Refusing to import custom serialized LM class `{class_path}`. "
-                    "Pass allow_unsafe_lm_state=True when loading trusted files to enable custom LM classes."
-                )
+            return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
 
-            lm_cls = _import_lm_class(class_path)
-            if not issubclass(lm_cls, BaseLM):
-                raise TypeError(f"Serialized LM class `{class_path}` must be a subclass of dspy.BaseLM.")
-            if "allow_custom_lm_class" in inspect.signature(lm_cls.load_state).parameters:
-                return lm_cls.load_state(state, allow_custom_lm_class=allow_custom_lm_class)
-            return lm_cls.load_state(state)
+        # A concrete subclass entry point (e.g. dspy.LM.load_state, which
+        # forwards via super()) honors the same custom-class trust gate as
+        # BaseLM.load_state: a recorded marker naming a different class
+        # imports application code, so refuse it unless opted in and dispatch
+        # to the recorded class. A marker matching `cls`, a marker-less
+        # legacy state, or the internal recursion (marker already popped)
+        # reconstructs `cls` directly.
+        if class_path is not None and class_path != f"{cls.__module__}.{cls.__qualname__}":
+            return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
 
         return cls(**state)
 

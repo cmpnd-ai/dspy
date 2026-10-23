@@ -1768,3 +1768,60 @@ def test_responses_only_refusal_names_model_type():
     _hint_responses_api(lm, exc)
     assert str(exc).count("DSPy:") == 1
     assert "model_type='responses'" in str(exc) and "/v1/responses" in str(exc)
+
+
+def _truncated_response():
+    return ModelResponse(
+        choices=[Choices(message=Message(role="assistant", content="Hi!"), finish_reason="length")],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        model="openai/dspy-test-model",
+    )
+
+
+def test_check_truncation_with_copy_temperature_none_does_not_crash(caplog):
+    # lm.copy(temperature=None) removes the "temperature" key from kwargs (by
+    # design, mirroring copy(prompt_cache=None)). A truncated legacy LiteLLM
+    # response must still produce the truncation warning rather than a KeyError.
+    lm = dspy.LM("openai/dspy-test-model", engine="litellm", model_type="chat", max_tokens=100)
+    copied = lm.copy(temperature=None)
+    assert "temperature" not in copied.kwargs
+
+    with caplog.at_level("WARNING", logger="dspy.clients.lm"):
+        copied._check_truncation(_truncated_response())
+
+    assert any("truncated" in r.message for r in caplog.records)
+    assert "temperature" in caplog.records[-1].message
+
+
+def test_check_truncation_with_temperature_present_emits_warning(caplog):
+    lm = dspy.LM("openai/dspy-test-model", engine="litellm", model_type="chat", max_tokens=100, temperature=0.7)
+    assert lm.kwargs["temperature"] == 0.7
+
+    with caplog.at_level("WARNING", logger="dspy.clients.lm"):
+        lm._check_truncation(_truncated_response())
+
+    assert any("truncated" in r.message for r in caplog.records)
+    assert "0.7" in caplog.records[-1].message
+
+
+def test_check_truncation_skips_non_length_finish_reason(caplog):
+    lm = dspy.LM("openai/dspy-test-model", engine="litellm", model_type="chat", max_tokens=100, temperature=0.7)
+    response = ModelResponse(
+        choices=[Choices(message=Message(role="assistant", content="Hi!"), finish_reason="stop")],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        model="openai/dspy-test-model",
+    )
+
+    with caplog.at_level("WARNING", logger="dspy.clients.lm"):
+        lm._check_truncation(response)
+
+    assert not caplog.records
+
+
+def test_check_truncation_skips_responses_model_type(caplog):
+    lm = dspy.LM("openai/dspy-test-model", engine="litellm", model_type="responses", max_tokens=100, temperature=0.7)
+
+    with caplog.at_level("WARNING", logger="dspy.clients.lm"):
+        lm._check_truncation(_truncated_response())
+
+    assert not caplog.records

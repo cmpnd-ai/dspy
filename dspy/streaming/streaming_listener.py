@@ -430,7 +430,7 @@ class StreamListener:
             return None
 
         value_start_index = concat_message.find(start_identifier) + len(start_identifier)
-        token = concat_message[value_start_index:].lstrip()
+        token = concat_message[value_start_index:].strip()
         self.field_start_queue = []
         self.stream_end = True
         if not token:

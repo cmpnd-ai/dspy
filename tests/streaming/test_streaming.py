@@ -869,6 +869,47 @@ async def test_stream_listener_single_chunk_full_identifier_no_end_marker_chat_a
 
 
 @pytest.mark.anyio
+async def test_stream_listener_single_chunk_recovers_value_strips_trailing_whitespace_chat_adapter():
+    """A coarse single chunk whose recovered value carries trailing whitespace emits the stripped value.
+
+    Regression test: the recovered buffered value used to keep trailing whitespace (e.g. ``"42\\n\\n"``)
+    while ``ChatAdapter.parse`` returns ``"42"`` and normal streaming drops those final newlines. The
+    streamed value must not depend on how the provider splits its chunks, so ``finalize`` strips the
+    recovered value before emitting it.
+    """
+    program = dspy.streamify(
+        dspy.Predict("question->answer"),
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name="answer")],
+    )
+
+    async def single_chunk_stream(*args, **kwargs):
+        yield ModelResponseStream(
+            model="gemini",
+            choices=[StreamingChoices(delta=Delta(content="[[ ## answer ## ]] 42\n\n"))],
+        )
+
+    with mock.patch("litellm.acompletion", side_effect=single_chunk_stream):
+        with dspy.context(
+            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
+        ):
+            output = program(question="why did a chicken cross the kitchen?")
+            chunks = []
+            prediction = None
+            async for value in output:
+                if isinstance(value, dspy.streaming.StreamResponse):
+                    chunks.append(value)
+                elif isinstance(value, dspy.Prediction):
+                    prediction = value
+
+    assert len(chunks) == 1
+    assert chunks[0].signature_field_name == "answer"
+    assert chunks[0].chunk == "42"
+    assert chunks[0].is_last_chunk is True
+    assert prediction is not None
+    assert prediction.answer == "42"
+
+
+@pytest.mark.anyio
 async def test_stream_listener_multi_listener_no_data_loss_when_field_ends_during_start_identification():
     """With multiple listeners and ``include_final_prediction_in_output_stream=False`` the field whose
     stream ends while its start identifier is still buffered must still reach the output stream.

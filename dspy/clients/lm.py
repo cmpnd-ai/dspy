@@ -629,6 +629,10 @@ class LM(BaseLM):
         # object again, so dispatch first while the engine is still a record.
         class_path = state.get(LM_CLASS_STATE_KEY)
         if class_path is not None and class_path != f"{cls.__module__}.{cls.__qualname__}":
+            # Remove the internal marker before dispatching so the recorded
+            # class's load_state/constructor receives the same saved fields that
+            # BaseLM.load_state (which pops the marker) would pass it.
+            state.pop(LM_CLASS_STATE_KEY)
             return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
         if isinstance(state.get("prompt_cache"), dict):
             from dspy._vendor.lm15.serde import cache_config_from_dict

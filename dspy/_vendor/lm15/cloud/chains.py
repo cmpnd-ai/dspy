@@ -161,7 +161,18 @@ class ChainContext:
                         return
                 self.files[normalized] = content
             else:
-                self.files = {**dict(self.files), normalized: content}
+                # Non-dict Mapping (e.g. MappingProxyType): copy into a dict
+                # and replace the matching key by path normalization, the
+                # same rule as the dict branch, so a ``~``-prefixed entry is
+                # replaced rather than shadowed by a second absolute-path key.
+                files = dict(self.files)
+                for existing in list(files):
+                    if str(self.path(existing)) == normalized:
+                        files[existing] = content
+                        self.files = files
+                        return
+                files[normalized] = content
+                self.files = files
             return
         write_private_json_atomic(self.path(text), data)
 

@@ -362,7 +362,7 @@ def test_react_v2_rejects_reserved_output_field_names(reserved):
         dspy.ReActV2(f"question -> answer, {reserved}: str", tools=[])
 
 
-@pytest.mark.parametrize("reserved", ["history", "tools", "turn_budget"])
+@pytest.mark.parametrize("reserved", ["history", "tools", "turn_budget", "next_thought", "tool_calls"])
 def test_react_v2_rejects_reserved_input_field_names(reserved):
     with pytest.raises(ValueError, match=reserved):
         dspy.ReActV2(f"{reserved}: str -> answer: str", tools=[])

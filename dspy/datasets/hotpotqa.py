@@ -65,29 +65,3 @@ class HotPotQA(Dataset):
             test.append(example)
 
         self._test = test
-
-
-if __name__ == "__main__":
-    from dspy.dsp.utils import dotdict
-
-    data_args = dotdict(train_seed=1, train_size=16, eval_seed=2023, dev_size=200 * 5, test_size=0)
-    dataset = HotPotQA(**data_args)
-
-    print(dataset)
-    print(dataset.train[0].question)
-    print(dataset.train[15].question)
-
-    print(len(dataset.train), len(dataset.dev), len(dataset.test))
-
-    print(dataset.dev[0].question)
-    print(dataset.dev[340].question)
-    print(dataset.dev[937].question)
-
-"""
-What was the population of the city where Woodward Avenue ends in 2010?
-Where did the star , who is also an executive producer, of the Mick begin her carrer?
-16 1000 0
-Both London and German have seen attacks during war, there was one specific type of attack that Germany called the blitz, what did London call a similar attack?
-Pre-Madonna was a collection of demos by the singer who was a leading presence during the emergence of what network?
-Alan Mills composed the classic folk song that tells the story of what?
-"""

@@ -309,20 +309,12 @@ async def test_acall_fallback_no_double_history():
 
 
 @pytest.mark.asyncio
-async def test_acall_fallback_no_forward_warning(caplog):
+async def test_acall_fallback_no_forward_warning(capsys):
     """Accessing self.forward inside the default aforward does not emit the discouragement warning."""
-    import logging
-
-    logger = logging.getLogger("dspy.primitives.module")
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.WARNING)
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    caplog.handler.setLevel(logging.WARNING)
-
     module = SyncOnlyModule()
     await module.acall(x=1)
-    assert "directly is discouraged" not in caplog.text
+    captured = capsys.readouterr()
+    assert "directly is discouraged" not in captured.err
 
 
 @pytest.mark.asyncio

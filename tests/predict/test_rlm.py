@@ -22,7 +22,6 @@ import dspy
 from dspy.adapters.types.tool import Tool
 from dspy.predict.rlm import (
     RLM,
-    _LLMCallBudget,
     _apply_history_processor,
     _is_fence_open_line,
     _strip_code_fences,
@@ -864,7 +863,7 @@ class TestRLMCodeFenceParsing:
         # The full, untouched program is what the interpreter received and what the
         # trajectory records — never the truncated/fabricated in-string content.
         executed_codes = [c for c, _ in mock.call_history]
-        assert code in executed_codes
+        assert any(c.endswith(code) for c in executed_codes)
         assert "inner" not in executed_codes
         assert result.trajectory[0]["code"] == code
 

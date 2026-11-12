@@ -173,6 +173,8 @@ class Evaluate:
         def process_item(example):
             prediction = program(**example.inputs())
             score = metric(example, prediction)
+            if score is None:
+                raise ValueError("Metric returned None for an example; treating as a failure.")
             return prediction, score
 
         results = executor.execute(process_item, devset)

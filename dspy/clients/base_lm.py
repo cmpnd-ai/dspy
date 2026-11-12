@@ -314,7 +314,19 @@ class BaseLM:
 
                 return LM(**state)
 
-            return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
+            # A recorded marker naming BaseLM itself is builtin (not
+            # application code), but ``_load_recorded_lm_class`` would recurse
+            # back here with the marker already popped and misroute to the
+            # legacy ``LM(**state)`` branch without decoding engine records.
+            # Gate it (mirroring ``_load_recorded_lm_class``) and fall through
+            # to decode engines and reconstruct ``cls`` directly.
+            if class_path != f"{cls.__module__}.{cls.__qualname__}":
+                return _load_recorded_lm_class(class_path, state, allow_custom_lm_class=allow_custom_lm_class)
+            if class_path != _BUILTIN_LM_CLASS_PATH and not allow_custom_lm_class:
+                raise ValueError(
+                    f"Refusing to import custom serialized LM class `{class_path}`. "
+                    "Pass allow_unsafe_lm_state=True when loading trusted files to enable custom LM classes."
+                )
 
         # A concrete subclass entry point (e.g. dspy.LM.load_state, which
         # forwards via super()) honors the same custom-class trust gate as

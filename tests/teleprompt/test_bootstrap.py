@@ -89,6 +89,30 @@ def test_compile_with_predict_instances():
     assert hasattr(compiled_student, "_compiled") and compiled_student._compiled, "Student compilation flag not set"
 
 
+def test_compile_with_mixed_signature_declaration_styles():
+    # Regression: when the student declares its signature as a string and the
+    # teacher declares the same signature as a class (or vice versa), the two
+    # signatures are structurally identical and Signature.equals must return True.
+    # Previously, IS_TYPE_UNDEFINED was applied inconsistently between the two
+    # declaration paths, causing BootstrapFewShot._prepare_predictor_mappings to
+    # raise an AssertionError during compile.
+    class ClassSignature(dspy.Signature):
+        input = dspy.InputField()
+        output = dspy.OutputField()
+
+    student = SimpleModule("input -> output")
+    teacher = SimpleModule(ClassSignature)
+
+    lm = DummyLM(["Initial thoughts", "Finish[blue]"])
+    dspy.configure(lm=lm)
+
+    bootstrap = BootstrapFewShot(metric=simple_metric, max_bootstrapped_demos=1, max_labeled_demos=1)
+    compiled_student = bootstrap.compile(student, teacher=teacher, trainset=trainset)
+
+    assert compiled_student is not None, "Failed to compile student"
+    assert hasattr(compiled_student, "_compiled") and compiled_student._compiled, "Student compilation flag not set"
+
+
 def test_bootstrap_effectiveness():
     # This test verifies if the bootstrapping process improves the student's predictions
     student = SimpleModule("input -> output")

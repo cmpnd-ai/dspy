@@ -173,6 +173,8 @@ class Evaluate:
         def process_item(example):
             prediction = program(**example.inputs())
             score = metric(example, prediction)
+            if score is None:
+                return dspy.Prediction(), self.failure_score
             return prediction, score
 
         results = executor.execute(process_item, devset)

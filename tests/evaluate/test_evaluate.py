@@ -577,3 +577,120 @@ def test_evaluate_raises_on_empty_devset():
     )
     with pytest.raises(ValueError, match="devset"):
         ev(program)
+
+
+@pytest.mark.parametrize("num_threads", [1, 2])
+@pytest.mark.parametrize("failure_score", [0.0, 0.25])
+@pytest.mark.parametrize("display_progress", [False, True])
+def test_evaluate_metric_returning_none_gets_failure_score(num_threads, failure_score, display_progress):
+    """A metric that returns None for an example should substitute failure_score, not crash.
+
+    This matches the documented contract in metrics-and-evaluation.md (design decision #9:
+    "Metric failures get a failure_score, not an exception") and mirrors the existing
+    handling for metrics that raise.
+    """
+    dspy.configure(
+        lm=DummyLM(
+            {
+                "What is 1+1?": {"answer": "2"},
+                "What is 2+2?": {"answer": "4"},
+                "What is 3+3?": {"answer": "6"},
+                "What is 4+4?": {"answer": "8"},
+            }
+        )
+    )
+    devset = [
+        new_example("What is 1+1?", "2"),
+        new_example("What is 2+2?", "4"),
+        new_example("What is 3+3?", "6"),
+        new_example("What is 4+4?", "8"),
+    ]
+
+    def metric_returning_none(example, prediction):
+        if example.question == "What is 3+3?":
+            return None
+        return float(example.answer == prediction.answer)
+
+    program = Predict("question -> answer")
+    ev = Evaluate(
+        devset=devset,
+        metric=metric_returning_none,
+        num_threads=num_threads,
+        display_progress=display_progress,
+        failure_score=failure_score,
+        max_errors=10,
+    )
+    result = ev(program)
+
+    scores = [score for _, _, score in result.results]
+    assert scores == [1.0, 1.0, failure_score, 1.0]
+    expected = round(100 * (3 + failure_score) / 4, 2)
+    assert result.score == expected
+
+
+@pytest.mark.parametrize("num_threads", [1, 2])
+def test_evaluate_metric_returning_none_behaves_like_raising(num_threads):
+    """A metric returning None should produce the same result as a metric raising for the same example."""
+    dspy.configure(
+        lm=DummyLM(
+            {
+                "What is 1+1?": {"answer": "2"},
+                "What is 2+2?": {"answer": "4"},
+            }
+        )
+    )
+    devset = [new_example("What is 1+1?", "2"), new_example("What is 2+2?", "4")]
+    failure_score = 0.0
+
+    def metric_returning_none(example, prediction):
+        if example.question == "What is 2+2?":
+            return None
+        return 1.0
+
+    def metric_raising(example, prediction):
+        if example.question == "What is 2+2?":
+            raise RuntimeError("controlled failure")
+        return 1.0
+
+    program = Predict("question -> answer")
+    common = {
+        "devset": devset,
+        "num_threads": num_threads,
+        "display_progress": False,
+        "failure_score": failure_score,
+        "max_errors": 10,
+    }
+    result_none = Evaluate(metric=metric_returning_none, **common)(program)
+    result_raise = Evaluate(metric=metric_raising, **common)(program)
+
+    assert result_none.score == result_raise.score == 50.0
+    assert [score for _, _, score in result_none.results] == [1.0, failure_score]
+    assert [score for _, _, score in result_raise.results] == [1.0, failure_score]
+
+
+def test_evaluate_all_metrics_returning_none():
+    """Every metric returning None should still complete with failure_score for all examples."""
+    dspy.configure(
+        lm=DummyLM(
+            {
+                "What is 1+1?": {"answer": "2"},
+                "What is 2+2?": {"answer": "4"},
+            }
+        )
+    )
+    devset = [new_example("What is 1+1?", "2"), new_example("What is 2+2?", "4")]
+    failure_score = 0.5
+
+    program = Predict("question -> answer")
+    ev = Evaluate(
+        devset=devset,
+        metric=lambda example, prediction: None,
+        num_threads=2,
+        display_progress=False,
+        failure_score=failure_score,
+        max_errors=10,
+    )
+    result = ev(program)
+
+    assert [score for _, _, score in result.results] == [failure_score, failure_score]
+    assert result.score == round(100 * 2 * failure_score / 2, 2)

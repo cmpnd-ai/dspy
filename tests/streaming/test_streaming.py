@@ -886,10 +886,8 @@ async def test_stream_listener_single_chunk_recovers_value_strips_trailing_white
             choices=[StreamingChoices(delta=Delta(content="[[ ## answer ## ]] 42\n\n"))],
         )
 
-    with mock.patch("litellm.acompletion", side_effect=single_chunk_stream):
-        with dspy.context(
-            lm=dspy.LM("gemini/gemini-2.5-flash", engine="litellm", cache=False), adapter=dspy.ChatAdapter()
-        ):
+    with patch_streaming(side_effect=single_chunk_stream):
+        with dspy.context(lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter()):
             output = program(question="why did a chicken cross the kitchen?")
             chunks = []
             prediction = None
@@ -1693,7 +1691,6 @@ async def test_streaming_allows_custom_streamable_type():
         yield ModelResponseStream(model="gpt-4o-mini", choices=[StreamingChoices(delta=Delta(content=" ]]"))])
 
     with patch_streaming(side_effect=stream):
-        with dspy.context(
         with dspy.context(
             lm=dspy.LM("openai/gpt-4o-mini", cache=False), adapter=dspy.ChatAdapter(native_response_types=[CustomType])
         ):

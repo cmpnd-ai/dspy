@@ -2,7 +2,7 @@
 lm15.login.declared — routes that exist only for a managed connection.
 
 ``kimi-code`` (Kimi Code subscription: Anthropic Messages wire at
-``api.kimi.com/coding``) and ``github-copilot`` (Copilot: Chat Completions
+``api.kimi.com/coding/v1``) and ``github-copilot`` (Copilot: Chat Completions
 wire at the account's Copilot host) have no live wire receipt in
 lm15-contract, so they are **not** in the receipted provider registry
 (a registry row is a support claim; AUTH-26 forbids one without evidence).
@@ -21,7 +21,7 @@ from ..registry import ProviderDefinition
 
 __all__ = ["DECLARED_PROVIDERS", "KIMI_CODE", "GITHUB_COPILOT", "KIMI_CODE_BASE_URL", "COPILOT_DEFAULT_BASE_URL"]
 
-KIMI_CODE_BASE_URL = "https://api.kimi.com/coding"
+KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1"
 COPILOT_DEFAULT_BASE_URL = "https://api.individual.githubcopilot.com"
 
 KIMI_CODE = ProviderDefinition.anthropic(

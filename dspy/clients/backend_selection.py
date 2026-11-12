@@ -42,6 +42,25 @@ def compatibility_model(lm, selection):
     return lm.model
 
 
+def decision_requests_native(lm, options=None) -> bool:
+    """Whether the configured backend carries decision requests natively.
+
+    Mirrors ``LM.supports_decision_requests`` but accepts the per-call client
+    overrides, so a prediction that clears a compat-forcing setting (e.g.
+    ``config={"headers": None}``) is not refused on stale LM defaults.
+    """
+    spec = lm.engine
+    if not isinstance(spec, str):
+        return getattr(lm._capability_engine, "supports_decision_requests", False) is True
+    if spec == "litellm":
+        return False
+    from dspy.clients.errors import error_boundary
+
+    with error_boundary(lm.model, unexpected=True):
+        selection = select_backend(lm, options=options)
+        return selection.native and selection.resolution.provider == "typesafe"
+
+
 def select_backend(lm, options=None, request=None):
     """Select using LM defaults plus call overrides, without inference I/O.
 

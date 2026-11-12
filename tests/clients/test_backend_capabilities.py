@@ -89,6 +89,21 @@ def test_forced_native_decision_configuration_error_matches_execution(metadata):
         _ = lm.supports_decision_requests
 
 
+def test_decision_requests_call_override_clears_compat_forcing_setting(metadata):
+    from dspy.clients.backend_selection import decision_requests_native
+
+    lm = dspy.LM("typesafe:jev-latest", engine="lm15", headers={"x-test": "yes"})
+    try:
+        # LM defaults force the LiteLLM compatibility engine, so the hint refuses.
+        with pytest.raises(dspy.LMUnsupportedFeatureError):
+            decision_requests_native(lm)
+        # A per-call override clearing headers selects the native backend, so the
+        # planning check honours it instead of refusing on stale LM defaults.
+        assert decision_requests_native(lm, options={"headers": None}) is True
+    finally:
+        lm.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
 async def test_adapter_rejects_unsupported_call_time_client_without_leaking_override(asynchronous, metadata):

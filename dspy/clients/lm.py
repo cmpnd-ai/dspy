@@ -305,16 +305,9 @@ class LM(BaseLM):
         adapter translates decision outputs to ordinary chat prompts instead of
         building a typed request the selected engine cannot carry.
         """
-        from dspy.clients.backend_selection import select_backend
-        from dspy.clients.errors import error_boundary
+        from dspy.clients.backend_selection import decision_requests_native
 
-        if not isinstance(self.engine, str):
-            return getattr(self._capability_engine, "supports_decision_requests", False) is True
-        if self.engine == "litellm":
-            return False
-        with error_boundary(self.model, unexpected=True):
-            selection = select_backend(self)
-            return selection.native and selection.resolution.provider == "typesafe"
+        return decision_requests_native(self)
 
     @property
     def supported_params(self) -> set[str]:

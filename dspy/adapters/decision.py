@@ -51,9 +51,14 @@ def evidence_type(kind):
     return create_model(f"{name}Evidence", __config__=ConfigDict(extra="forbid"), **fields)
 
 
-def resolve_adapter(lm, adapter, signature, fields, declared_signature=None):
+def resolve_adapter(lm, adapter, signature, fields, declared_signature=None, lm_kwargs=None):
     """Resolve backend translation before a chat adapter starts capability planning."""
-    system_one = getattr(lm, "supports_decision_requests", False) is True
+    if lm_kwargs:
+        from dspy.clients.backend_selection import decision_requests_native
+
+        system_one = decision_requests_native(lm, options=lm_kwargs) is True
+    else:
+        system_one = getattr(lm, "supports_decision_requests", False) is True
     state = DecisionState(signature, fields, system_one=system_one, declared_signature=declared_signature)
     for name, field in signature.output_fields.items():
         if name not in state.types and any(

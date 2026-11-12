@@ -262,7 +262,7 @@ class Predict(Module, Parameter):
     def forward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 
-        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
+        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature, lm_kwargs=config)
 
         if self._should_stream():
             with settings.context(caller_predict=self):
@@ -276,7 +276,7 @@ class Predict(Module, Parameter):
     async def aforward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
 
-        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature)
+        adapter = resolve_adapter(lm, _get_adapter(), signature, self.fields, self.signature, lm_kwargs=config)
         if self._should_stream():
             with settings.context(caller_predict=self):
                 completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)

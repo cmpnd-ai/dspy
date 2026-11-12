@@ -160,6 +160,75 @@ def test_equality_format():
     assert TestSignature.equals(TestSignature)
 
 
+def test_equality_class_vs_string_untyped():
+    # Regression: class- and string-built variants of the same untyped signature
+    # must compare equal. Previously the class path set IS_TYPE_UNDEFINED=True on
+    # output fields while the string path omitted the key, breaking equals().
+    class ClassSig(Signature):
+        x = InputField()
+        y = OutputField()
+
+    str_sig = Signature("x -> y")
+
+    assert str_sig.equals(ClassSig)
+    assert ClassSig.equals(str_sig)
+
+
+def test_equality_class_vs_string_typed():
+    # Regression: typed class- and string-built variants must compare equal.
+    # Previously the string path stored IS_TYPE_UNDEFINED=False explicitly for
+    # typed inputs while the class path omitted the key, breaking equals().
+    class ClassTypedSig(Signature):
+        x: str = InputField()
+        y: str = OutputField()
+
+    str_typed_sig = Signature("x: str -> y: str")
+
+    assert str_typed_sig.equals(ClassTypedSig)
+    assert ClassTypedSig.equals(str_typed_sig)
+
+
+def test_equality_class_vs_string_mixed_typed():
+    # Mixed typed/untyped fields across declaration styles must also compare equal.
+    class ClassMixedSig(Signature):
+        a: int = InputField()
+        b = InputField()
+        c: str = OutputField()
+        d = OutputField()
+
+    str_mixed_sig = Signature("a: int, b -> c: str, d")
+
+    assert str_mixed_sig.equals(ClassMixedSig)
+    assert ClassMixedSig.equals(str_mixed_sig)
+
+
+def test_is_type_undefined_only_on_untyped_input_fields():
+    # IS_TYPE_UNDEFINED must be present (and True) only on untyped input fields,
+    # and absent from typed inputs and all output fields, regardless of the
+    # declaration path. This is what makes class- and string-built signatures
+    # compare equal under Signature.equals.
+    from dspy.utils.constants import IS_TYPE_UNDEFINED
+
+    # String path
+    str_sig = Signature("a: int, b -> c: str, d")
+    assert str_sig.input_fields["a"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+    assert str_sig.input_fields["b"].json_schema_extra.get(IS_TYPE_UNDEFINED) is True
+    assert str_sig.output_fields["c"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+    assert str_sig.output_fields["d"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+
+    # Class path
+    class ClassSig(Signature):
+        a: int = InputField()
+        b = InputField()
+        c: str = OutputField()
+        d = OutputField()
+
+    assert ClassSig.input_fields["a"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+    assert ClassSig.input_fields["b"].json_schema_extra.get(IS_TYPE_UNDEFINED) is True
+    assert ClassSig.output_fields["c"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+    assert ClassSig.output_fields["d"].json_schema_extra.get(IS_TYPE_UNDEFINED) is None
+
+
 def test_signature_reverse():
     sig = Signature("input1 -> output1")
     assert sig.signature == "input1 -> output1"

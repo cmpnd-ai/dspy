@@ -166,7 +166,10 @@ class SignatureMeta(type(BaseModel)):
                 continue  # Don't add types to non-field attributes
             if not name.startswith("__") and name not in raw_annotations:
                 raw_annotations[name] = str
-                field.json_schema_extra[IS_TYPE_UNDEFINED] = True  # Mark that the type was originally undefined in the signature
+                # Only input fields carry the IS_TYPE_UNDEFINED marker, mirroring the
+                # string-based parser so that class- and string-built signatures compare equal.
+                if field.json_schema_extra.get("__dspy_field_type") == "input":
+                    field.json_schema_extra[IS_TYPE_UNDEFINED] = True
         # Create ordered annotations dictionary that preserves field order
         ordered_annotations = {name: raw_annotations[name] for name in field_order if name in raw_annotations}
         # Add any remaining annotations that weren't in field_order
@@ -660,7 +663,13 @@ def _parse_signature(signature: str, names=None) -> dict[str, tuple[type, Any]]:
 
     fields = {}
     for field_name, field_type, is_type_undefined in input_fields:
-        fields[field_name] = (field_type, InputField(IS_TYPE_UNDEFINED= is_type_undefined))
+        # Only include the IS_TYPE_UNDEFINED key when the type was actually undefined,
+        # so its presence always means "type was undefined" and its absence means "typed"
+        # (or output field). This keeps string- and class-built signatures comparable.
+        if is_type_undefined:
+            fields[field_name] = (field_type, InputField(IS_TYPE_UNDEFINED=True))
+        else:
+            fields[field_name] = (field_type, InputField())
     for field_name, field_type, _ in output_fields:
         fields[field_name] = (field_type, OutputField())
 

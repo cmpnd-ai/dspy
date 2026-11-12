@@ -16,11 +16,6 @@ Changes: 2025-08-10 - Ran ruff to format the code to DSPy styles.
 class Hasher:
     """Hasher that accepts python objects as inputs."""
 
-    dispatch: dict = {}
-
-    def __init__(self):
-        self.m = hashlib.sha256()
-
     @classmethod
     def hash_bytes(cls, value: bytes | list[bytes]) -> str:
         """Return a hex digest for one or more byte chunks.
@@ -48,18 +43,3 @@ class Hasher:
             The hexadecimal digest of the serialized object.
         """
         return cls.hash_bytes(dumps(value))
-
-    def update(self, value: Any) -> None:
-        """Update the running digest with a typed object payload.
-
-        Args:
-            value: Any pickle-serializable Python object to incorporate.
-        """
-        header_for_update = f"=={type(value)}=="
-        value_for_update = self.hash(value)
-        self.m.update(header_for_update.encode("utf8"))
-        self.m.update(value_for_update.encode("utf-8"))
-
-    def hexdigest(self) -> str:
-        """Return the hexadecimal digest of the current hasher state."""
-        return self.m.hexdigest()

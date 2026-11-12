@@ -3,6 +3,7 @@ import contextvars
 import copy
 import logging
 import threading
+import types
 from contextlib import contextmanager
 from typing import Any
 
@@ -267,7 +268,7 @@ class Settings:
 
     def save(
         self, path: str,
-        modules_to_serialize: list[str] | None = None,
+        modules_to_serialize: list[str | types.ModuleType] | None = None,
         exclude_keys: list[str] | None = None,
     ):
         """
@@ -275,7 +276,8 @@ class Settings:
 
         Args:
             path: The file path to save the settings to.
-            modules_to_serialize (list or None): A list of modules to serialize with cloudpickle's `register_pickle_by_value`.
+            modules_to_serialize (list or None): A list of modules (module objects or their
+                dotted names) to serialize with cloudpickle's `register_pickle_by_value`.
                 If None, then no modules will be registered for serialization.
             exclude_keys (list or None): A list of keys to exclude during saving.
         """

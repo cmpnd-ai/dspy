@@ -65,12 +65,13 @@ class BootstrapFewShotWithOptuna(Teleprompter):
         trial.set_user_attr("program", program2)
         return result.score
 
-    def compile(self, student, *, teacher=None, max_demos, trainset, valset=None):
+    def compile(self, student, *, trainset, teacher=None, valset=None, max_demos=None):
         optuna = _import_optuna()
         self.trainset = trainset
         self.valset = valset or trainset
         self.student = student.reset_copy()
         self.teacher = teacher.deepcopy() if teacher is not None else student.reset_copy()
+        max_demos = self.max_num_samples if max_demos is None else max_demos
         teleprompter_optimize = BootstrapFewShot(
             metric=self.metric,
             max_bootstrapped_demos=max_demos,

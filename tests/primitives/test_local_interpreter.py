@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import os
 import tempfile
@@ -351,3 +352,23 @@ class AddModule(dspy.Module):
     program._bind_code(module_src)
     with dspy.context(lm=DummyLM([{"result": 42}])):
         assert program(value=20).result == 42
+
+
+@pytest.mark.parametrize("error_type", [asyncio.CancelledError, KeyboardInterrupt, SystemExit])
+def test_execute_interrupted_by_base_exception_shuts_down_session(error_type):
+    interpreter = dspy.LocalInterpreter()
+    interpreter.start()
+
+    def raise_during_receive(*args, **kwargs):
+        raise error_type("interrupted")
+
+    interpreter._receive = raise_during_receive
+
+    with pytest.raises(error_type):
+        interpreter.execute("1 + 1")
+
+    assert interpreter._process is None
+    assert interpreter._ended is True
+    with pytest.raises(CodeInterpreterError, match="shut down"):
+        interpreter.execute("2 + 2")
+    interpreter.shutdown()

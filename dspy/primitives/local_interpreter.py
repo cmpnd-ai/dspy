@@ -265,33 +265,37 @@ class LocalInterpreter:
             if self._process is None:
                 self.start()
             deadline = None if self.execution_timeout is None else time.monotonic() + self.execution_timeout
-            self._send(
-                {
-                    "type": "execute",
-                    "code": code,
-                    "variables": variables,
-                    "tools": list(self.tools),
-                    "output_fields": self.output_fields,
-                }
-            )
-            timeout_message = (
-                "Python worker did not respond."
-                if self.execution_timeout is None
-                else f"Python worker exceeded execution timeout of {self.execution_timeout:g} seconds."
-            )
-            process = self._process
-            assert process is not None
-            tool_calls: list[Future[Any]] = []
-            message = self._receive(deadline, timeout_message)
-            while message.get("type") == "tool_request":
-                tool_calls.append(_run_in_thread(lambda request=message: self._handle_tool(request, process)))
+            try:
+                self._send(
+                    {
+                        "type": "execute",
+                        "code": code,
+                        "variables": variables,
+                        "tools": list(self.tools),
+                        "output_fields": self.output_fields,
+                    }
+                )
+                timeout_message = (
+                    "Python worker did not respond."
+                    if self.execution_timeout is None
+                    else f"Python worker exceeded execution timeout of {self.execution_timeout:g} seconds."
+                )
+                process = self._process
+                assert process is not None
+                tool_calls: list[Future[Any]] = []
                 message = self._receive(deadline, timeout_message)
-            for tool_call in tool_calls:
-                timeout = None if deadline is None else max(0, deadline - time.monotonic())
-                try:
-                    tool_call.result(timeout)
-                except FutureTimeoutError:
-                    self._raise_terminal_error(timeout_message)
+                while message.get("type") == "tool_request":
+                    tool_calls.append(_run_in_thread(lambda request=message: self._handle_tool(request, process)))
+                    message = self._receive(deadline, timeout_message)
+                for tool_call in tool_calls:
+                    timeout = None if deadline is None else max(0, deadline - time.monotonic())
+                    try:
+                        tool_call.result(timeout)
+                    except FutureTimeoutError:
+                        self._raise_terminal_error(timeout_message)
+            except BaseException:
+                self.shutdown()
+                raise
             kind = message.get("type")
             if kind == "terminal_error":
                 self._raise_terminal_error(f"Python worker failed: {message.get('error')}")

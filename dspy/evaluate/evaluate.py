@@ -174,7 +174,7 @@ class Evaluate:
             prediction = program(**example.inputs())
             score = metric(example, prediction)
             if score is None:
-                return dspy.Prediction(), self.failure_score
+                raise ValueError("Metric returned None for an example; treating as a failure.")
             return prediction, score
 
         results = executor.execute(process_item, devset)

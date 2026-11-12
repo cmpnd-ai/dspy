@@ -694,3 +694,42 @@ def test_evaluate_all_metrics_returning_none():
 
     assert [score for _, _, score in result.results] == [failure_score, failure_score]
     assert result.score == round(100 * 2 * failure_score / 2, 2)
+
+
+@pytest.mark.parametrize("num_threads", [1, 2])
+def test_evaluate_metric_returning_none_counts_toward_max_errors(num_threads):
+    """A metric that returns None should count toward max_errors, matching the raising case.
+
+    Design decision #9 groups None metric results with raised metric failures and says
+    max_errors caps how many such failures the harness tolerates before stopping.
+    """
+    dspy.configure(
+        lm=DummyLM(
+            {
+                "What is 1+1?": {"answer": "2"},
+                "What is 2+2?": {"answer": "4"},
+            }
+        )
+    )
+    devset = [new_example("What is 1+1?", "2"), new_example("What is 2+2?", "4")]
+
+    def metric_returning_none(example, prediction):
+        return None
+
+    def metric_raising(example, prediction):
+        raise RuntimeError("controlled failure")
+
+    program = Predict("question -> answer")
+    common = {
+        "devset": devset,
+        "num_threads": num_threads,
+        "display_progress": False,
+        "failure_score": 0.0,
+        "max_errors": 1,
+    }
+
+    with pytest.raises(Exception, match="cancelled due to errors"):
+        Evaluate(metric=metric_returning_none, **common)(program)
+
+    with pytest.raises(Exception, match="cancelled due to errors"):
+        Evaluate(metric=metric_raising, **common)(program)

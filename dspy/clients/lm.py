@@ -297,18 +297,17 @@ class LM(BaseLM):
 
     @property
     def supports_decision_requests(self) -> bool:
-        """Whether the engine accepts typed System One judgments instead of chat prompts."""
-        from dspy.clients.capabilities import resolve
-        from dspy.lm15 import UnknownModelError, UnsupportedFeatureError
+        """Whether the engine accepts typed System One judgments instead of chat prompts.
 
-        if not isinstance(self.engine, str):
-            return getattr(self._capability_engine, "supports_decision_requests", False) is True
-        if self.engine == "litellm":
-            return False
-        try:
-            return resolve(self).provider == "typesafe"
-        except (UnknownModelError, UnsupportedFeatureError):
-            return False
+        Like the other capability hints, this follows the configuration-based
+        execution backend: a client setting that forces the LiteLLM compatibility
+        engine (e.g. ``headers``) also withdraws native decision support, so the
+        adapter translates decision outputs to ordinary chat prompts instead of
+        building a typed request the selected engine cannot carry.
+        """
+        from dspy.clients.backend_selection import decision_requests_native
+
+        return decision_requests_native(self)
 
     @property
     def supported_params(self) -> set[str]:

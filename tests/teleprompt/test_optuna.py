@@ -54,7 +54,7 @@ def test_compile_without_max_demos():
 
 
 def test_compile_with_explicit_max_demos():
-    """Explicitly passing max_demos should still work and forward it to BootstrapFewShot."""
+    """Explicitly passing max_demos should forward it to BootstrapFewShot, not the constructor's limit."""
     dspy.configure(lm=_make_lm())
     student = SimpleModule("input -> output")
     optimizer = BootstrapFewShotWithOptuna(
@@ -63,8 +63,25 @@ def test_compile_with_explicit_max_demos():
         max_labeled_demos=1,
         num_candidate_programs=2,
     )
-    compiled = optimizer.compile(student=student, trainset=trainset, valset=valset, max_demos=1)
+
+    import dspy.teleprompt.teleprompt_optuna as optuna_mod
+
+    captured = {}
+    original_bootstrap = optuna_mod.BootstrapFewShot
+
+    class CapturingBootstrap(original_bootstrap):
+        def __init__(self, **kwargs):
+            captured["max_bootstrapped_demos"] = kwargs.get("max_bootstrapped_demos")
+            super().__init__(**kwargs)
+
+    optuna_mod.BootstrapFewShot = CapturingBootstrap
+    try:
+        compiled = optimizer.compile(student=student, trainset=trainset, valset=valset, max_demos=3)
+    finally:
+        optuna_mod.BootstrapFewShot = original_bootstrap
+
     assert compiled is not None
+    assert captured["max_bootstrapped_demos"] == 3
 
 
 def test_max_demos_defaults_to_init_max_bootstrapped_demos():

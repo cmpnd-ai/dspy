@@ -128,6 +128,17 @@ class Module(BaseModule, metaclass=ProgramMeta):
 
             return await self.aforward(*args, **kwargs)
 
+    async def aforward(self, *args, **kwargs):
+        """Default async entry point for modules that only define ``forward``.
+
+        Runs the sync ``forward`` in a worker thread via :func:`dspy.utils.asyncify.asyncify`,
+        which propagates the current thread-local settings context. Subclasses that need
+        async-specific logic (e.g. ``Predict``, ``ChainOfThought``) override this method.
+        """
+        from dspy.utils.asyncify import asyncify
+
+        return await asyncify(self.forward)(*args, **kwargs)
+
     def named_predictors(self):
         """Return all named Predict modules in this module.
 
@@ -330,15 +341,16 @@ class Module(BaseModule, metaclass=ProgramMeta):
         if prediction_in_output:
             prediction_in_output.set_lm_usage(tokens)
         else:
-            logger.warning("Failed to set LM usage. Please return `dspy.Prediction` object from dspy.Module to enable usage tracking.")
-
+            logger.warning(
+                "Failed to set LM usage. Please return `dspy.Prediction` object from dspy.Module to enable usage tracking."
+            )
 
     def __getattribute__(self, name):
         attr = super().__getattribute__(name)
 
         if name == "forward" and callable(attr):
             # Only the immediate caller matters; avoid walking the full stack on every call.
-            forward_called_directly = sys._getframe(1).f_code.co_name != "__call__"
+            forward_called_directly = sys._getframe(1).f_code.co_name not in ("__call__", "aforward")
 
             if forward_called_directly:
                 logger.warning(

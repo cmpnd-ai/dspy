@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,7 @@ def test_save_and_load_react_state(tmp_path):
     assert "What is 2 + 3?" in prompt
 
 
+
 def test_load_state_is_transactional():
     """
     Regression test for https://github.com/stanfordnlp/dspy/issues/9589
@@ -256,6 +258,107 @@ def test_load_state_is_transactional():
         with pytest.raises(KeyError):
             template.load(str(path))
 
-        assert template.a.predict.demos == [], (
-            "load_state partially mutated module before failing"
-        )
+        assert template.a.predict.demos == [], "load_state partially mutated module before failing"
+
+
+# ---------------------------------------------------------------------------
+# acall() fallback for sync-only modules
+# ---------------------------------------------------------------------------
+
+
+class SyncOnlyModule(dspy.Module):
+    """A module that defines only ``forward`` — no ``aforward``."""
+
+    def forward(self, x):
+        return dspy.Prediction(result=x * 2)
+
+
+class ParentWithPredict(dspy.Module):
+    """A sync-only module whose ``forward`` calls a ``Predict`` sub-module."""
+
+    def __init__(self):
+        super().__init__()
+        self.predict = dspy.Predict("x -> y")
+
+    def forward(self, x):
+        return self.predict(x=x)
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_on_sync_only_module():
+    """acall on a sync-only module returns the same result as __call__."""
+    module = SyncOnlyModule()
+    sync_result = module(x=21)
+    async_result = await module.acall(x=21)
+    assert async_result.result == sync_result.result == 42
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_has_aforward():
+    """Every Module instance has aforward, even sync-only ones."""
+    module = SyncOnlyModule()
+    assert hasattr(module, "aforward")
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_runs_in_worker_thread():
+    """The default aforward runs forward in a worker thread, not the event loop thread."""
+    loop_thread = threading.get_ident()
+
+    class ThreadCapture(dspy.Module):
+        def forward(self, x):
+            return dspy.Prediction(thread_id=threading.get_ident())
+
+    module = ThreadCapture()
+    result = await module.acall(x=1)
+    assert result.thread_id != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_no_double_history():
+    """The fallback calls self.forward directly (not self.__call__), so history is recorded once."""
+    with dspy.context(lm=DummyLM([{"y": "84"}])):
+        parent = ParentWithPredict()
+        await parent.acall(x=42)
+        assert len(parent.history) == 1
+        assert len(parent.predict.history) == 1
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_no_forward_warning(capsys):
+    """Accessing self.forward inside the default aforward does not emit the discouragement warning."""
+    module = SyncOnlyModule()
+    await module.acall(x=1)
+    captured = capsys.readouterr()
+    assert "directly is discouraged" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_with_track_usage():
+    """track_usage works correctly with the asyncify fallback path."""
+    with dspy.context(lm=DummyLM([{"y": "84"}]), track_usage=True):
+        parent = ParentWithPredict()
+        result = await parent.acall(x=42)
+        assert result.y == "84"
+        assert result.get_lm_usage() is not None
+
+
+@pytest.mark.asyncio
+async def test_acall_fallback_on_built_in_sync_modules():
+    """Built-in sync-only modules all have aforward via the Module default."""
+    with dspy.context(lm=DummyLM([{"answer": "2"}])):
+        pot = dspy.ProgramOfThought("question -> answer")
+        assert hasattr(pot, "aforward")
+
+    # BestOfN
+    predict = dspy.Predict("question -> answer")
+    best_of_n = dspy.BestOfN(module=predict, N=2, reward_fn=lambda *a: 1.0, threshold=1.0)
+    assert hasattr(best_of_n, "aforward")
+
+    # Refine
+    refine = dspy.Refine(module=predict, N=2, reward_fn=lambda *a: 1.0, threshold=1.0)
+    assert hasattr(refine, "aforward")
+
+    # MultiChainComparison
+    mcc = dspy.MultiChainComparison("question -> answer")
+    assert hasattr(mcc, "aforward")

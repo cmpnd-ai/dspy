@@ -528,6 +528,18 @@ def test_forward_through_call_no_warning(capsys):
     assert "directly is discouraged" not in captured.err
 
 
+@pytest.mark.asyncio
+async def test_forward_through_acall_no_warning(capsys):
+    class TestModule(dspy.Module):
+        def forward(self, x):
+            return x
+
+    module = TestModule()
+    await module.acall(x="test")
+    captured = capsys.readouterr()
+    assert "directly is discouraged" not in captured.err
+
+
 def test_forward_guard_does_not_walk_the_stack(monkeypatch):
     import inspect
 

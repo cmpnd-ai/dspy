@@ -163,8 +163,10 @@ class CopilotFlow(ProviderFlow):
         ctx.notify(ProgressNotice(stage="exchange", message="Exchanging the GitHub token for a Copilot token…"))
         material = _exchange(ctx, github_token, merged)
         label = "GitHub Copilot" if domain == DEFAULT_DOMAIN else f"GitHub Copilot ({domain})"
+        # Always emit the resolved domain: a blank/explicit ``github.com`` answer must
+        # override (clear) a stale saved GHE domain on a replacement login's commit-merge.
         return LoginResult(material=material, label=label, renewal="remint",
-                           settings={"enterprise_domain": domain} if domain != DEFAULT_DOMAIN else {})
+                           settings={"enterprise_domain": domain})
 
     def renew(self, ctx: LoginContext, material: Material, settings: dict[str, str]) -> LoginResult:
         github_token = material.get("refresh")
